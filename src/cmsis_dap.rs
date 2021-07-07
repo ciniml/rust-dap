@@ -77,6 +77,7 @@ pub struct SwdIoConfig
     pub clock_wait_cycles: u32,
     pub idle_cycles: u32,
     pub turn_around_cycles: u32,
+    pub always_generate_data_phase: bool,
 }
 
 pub trait SwdIo {
@@ -146,9 +147,10 @@ where
 impl Default for SwdIoConfig {
     fn default() -> Self {
         Self {
-            clock_wait_cycles: 100,
+            clock_wait_cycles: 10,
             idle_cycles: 0,
             turn_around_cycles: 1,
+            always_generate_data_phase: false,
         }
     }
 }
@@ -228,9 +230,11 @@ where
                         DapCommandId::HostStatus => dap_host_status(request, response),
                         DapCommandId::Connect => dap_connect(&mut self.io, request, response),
                         DapCommandId::Disconnect => dap_disconnect(&mut self.io, request, response),
+                        DapCommandId::TransferConfigure => swd_transfer_config(&mut self.config, &mut self.io, request, response),
                         DapCommandId::Transfer => swd_transfer(&mut self.config, &mut self.io, request, response),
                         DapCommandId::SWJClock => swj_clock(request, response),
                         DapCommandId::SWJSequence => swj_sequence(&self.config, &mut self.io, request, response),
+                        DapCommandId::SWDConfigure => swd_config(&mut self.config, request, response),
                         DapCommandId::SWDSequence => swd_sequence(&self.config, &mut self.io, request, response),
                         _ => { Err(DapError::InvalidCommand) },
                     };
@@ -441,12 +445,38 @@ fn write_u32<C: CursorWrite>(cursor: &mut C, value: u32) {
     cursor.write(&bytes).ok();
 }
 
+
+fn swd_transfer_config<Swd: SwdIo>(config: &mut CmsisDapConfig, swdio: &mut Swd, request: &[u8], response: &mut [u8]) -> core::result::Result<(usize, usize), DapError> {
+    if request.len() < 5 {
+        return Err(DapError::InvalidCommand)
+    } else {
+        config.swdio.idle_cycles = request[0] as u32;
+        config.retry_count = u16::from_le_bytes(request[1..3].try_into().unwrap()) as u32;
+        config.match_retry_count = u16::from_le_bytes(request[3..5].try_into().unwrap()) as u32;
+        response[0] = DAP_OK;
+        Ok((5, 1))
+    }
+}
+
+
+fn swd_config(config: &mut CmsisDapConfig, request: &[u8], response: &mut [u8]) -> core::result::Result<(usize, usize), DapError> {
+    if request.len() < 1 {
+        return Err(DapError::InvalidCommand)
+    } else {
+        config.swdio.always_generate_data_phase = (request[0] & 0b100) != 0;
+        config.swdio.turn_around_cycles = (request[0] & 3) as u32 + 1;
+        response[0] = DAP_OK;
+        Ok((1, 1))
+    }
+}
+
+
 fn swd_transfer<Swd: SwdIo>(config: &mut CmsisDapConfig, swdio: &mut Swd, request: &[u8], response: &mut [u8]) -> core::result::Result<(usize, usize), DapError> {
     if request.len() == 0 {
         return Err(DapError::InvalidCommand)
     } else {
-        let mut request_count = request[0];
-        let mut request = BufferCursor::new_with_position(request, 1);
+        let mut request_count = request[1];
+        let mut request = BufferCursor::new_with_position(request, 2);
         let (response_header, response_body) = response.split_at_mut(2);
         let mut response = BufferCursor::new(response_body);
         let mut posted_read = false;
@@ -468,6 +498,7 @@ fn swd_transfer<Swd: SwdIo>(config: &mut CmsisDapConfig, swdio: &mut Swd, reques
                     if swd_request.contains(SwdRequest::APnDP) && !swd_request.contains(SwdRequest::TRANSFER_MATCH_VALUE) {
                         swd_transfer_inner_with_retry(&config, swdio, swd_request, 0)
                     } else {
+                        posted_read = false;
                         swd_transfer_inner_with_retry(&config, swdio, SwdRequest::RDBUFF | SwdRequest::RnW, 0)
                     };
                     if let Ok(value) = result {
@@ -481,30 +512,36 @@ fn swd_transfer<Swd: SwdIo>(config: &mut CmsisDapConfig, swdio: &mut Swd, reques
                     let mut match_retry_count = 0;
                     
                     if swd_request.contains(SwdRequest::APnDP) {
-                        let result = loop {
-                            match swd_transfer_inner_with_retry(&config, swdio, swd_request, 0) {
-                                Ok(value) => {
-                                    if value & config.match_mask == match_value {
-                                        break Ok(value)
-                                    } else if match_retry_count == config.match_retry_count {
-                                        break Err(DapError::ExceedRetryCount)
-                                    }
-                                    match_retry_count += 1;
-                                },
-                                Err(DapError::SwdError(err)) => {
-                                    if err != DAP_TRANSFER_WAIT || match_retry_count == config.match_retry_count {
-                                        break Err(DapError::SwdError(err))
-                                    }
-                                    match_retry_count += 1;
-                                },
-                                Err(err) => break Err(err),
+                        // Issue AP read
+                        match swd_transfer_inner_with_retry(&config, swdio, swd_request, 0) {
+                            Ok(_) => {},
+                            Err(err) => {
+                                break Err(err);
                             }
-                        };
-                        if result.is_err() {
-                            break result;  // Error
                         }
                     }
-
+                    let result = loop {
+                        match swd_transfer_inner_with_retry(&config, swdio, swd_request, 0) {
+                            Ok(value) => {
+                                if value & config.match_mask == match_value {
+                                    break Ok(value)
+                                } else if match_retry_count == config.match_retry_count {
+                                    break Err(DapError::ExceedRetryCount)
+                                }
+                                match_retry_count += 1;
+                            },
+                            Err(DapError::SwdError(err)) => {
+                                if err != DAP_TRANSFER_WAIT || match_retry_count == config.match_retry_count {
+                                    break Err(DapError::SwdError(err))
+                                }
+                                match_retry_count += 1;
+                            },
+                            Err(err) => break Err(err),
+                        }
+                    };
+                    if result.is_err() {
+                        break result;  // Error
+                    }
                 } else {
                     if swd_request.contains(SwdRequest::APnDP) {
                         // Read AP
@@ -529,8 +566,8 @@ fn swd_transfer<Swd: SwdIo>(config: &mut CmsisDapConfig, swdio: &mut Swd, reques
                             },
                         }
                     }
-                    write_issued = false;
                 }
+                write_issued = false;
             } else {
                 // Write register
                 if posted_read {

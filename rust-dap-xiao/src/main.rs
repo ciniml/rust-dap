@@ -47,41 +47,46 @@ struct XiaoSwdIo {
 }
 
 impl XiaoSwdIo {
-    fn swclk_out(&mut self) -> &mut SwClkOutputPin { self.swclk_out.as_mut().unwrap() }
-    fn swdio_out(&mut self) -> &mut SwdIoOutputPin { self.swdio_out.as_mut().unwrap() }
-    #[allow(dead_code)]
-    fn swclk_in(&mut self) -> &mut SwClkInputPin { self.swclk_in.as_mut().unwrap() }
-    fn swdio_in(&mut self) -> &mut SwdIoInputPin { self.swdio_in.as_mut().unwrap() }
+    fn swclk_out(&mut self) -> Option<&mut SwClkOutputPin> { self.swclk_out.as_mut() }
+    fn swdio_out(&mut self) -> Option<&mut SwdIoOutputPin> { self.swdio_out.as_mut() }
+    fn swdio_in(&mut self) -> Option<&mut SwdIoInputPin> { self.swdio_in.as_mut() }
 
     fn clock_wait(&self, config: &SwdIoConfig) {
         cycle_delay(config.clock_wait_cycles);
     }
     fn cycle_clock(&mut self, config: &SwdIoConfig) {
-        self.swdio_out().set_low().ok();
+        self.swclk_out().and_then(|p| p.set_low().ok());
         self.clock_wait(config);
-        self.swdio_out().set_high().ok();
+        self.swclk_out().and_then(|p| p.set_high().ok());
         self.clock_wait(config);
     }
     fn turn_around(&mut self, config: &SwdIoConfig) {
-        self.cycle_clock(config);
+        for _ in 0..config.turn_around_cycles {
+            self.cycle_clock(config);
+        }
     }
     fn idle_cycle(&mut self, config: &SwdIoConfig) {
-        self.write_bit(config, false);
+        for _ in 0..config.idle_cycles {
+            self.write_bit(config, false);
+        }
     }
     fn write_bit(&mut self, config: &SwdIoConfig, value: bool) {
-        if value { self.swdio_out().set_high().ok(); } else {self.swdio_out().set_low().ok(); }
-        self.swclk_out().set_low().ok();
+        self.swdio_out().and_then(|p| if value { p.set_high().ok() } else { p.set_low().ok() });
+        self.swclk_out().and_then(|p| p.set_low().ok());
         self.clock_wait(config);
-        self.swclk_out().set_high().ok();
+        self.swclk_out().and_then(|p| p.set_high().ok());
         self.clock_wait(config);
     }
     fn read_bit(&mut self, config: &SwdIoConfig) -> bool {
-        self.swclk_out().set_low().ok();
+        self.swclk_out().and_then(|p| p.set_low().ok());
         self.clock_wait(config);
-        let value = self.swdio_in().is_high().map_or(false, |v| v);
-        self.swclk_out().set_high().ok();
+        let value = self.swdio_in().map_or_else(|| false, |p| p.is_high().unwrap_or(false) );
+        self.swclk_out().and_then(|p| p.set_high().ok());
         self.clock_wait(config);
         value
+    }
+    fn set_swdio(&mut self, value: bool) {
+        self.swdio_out().and_then(|p| if value { p.set_high().ok() } else { p.set_low().ok() });
     }
     #[allow(dead_code)]
     fn get_timestamp(&mut self) -> u32 { 0 }
@@ -217,7 +222,7 @@ impl SwdIo for XiaoSwdIo {
                 let parity_expected = self.read_bit(config);
                 self.turn_around(config);
                 self.enable_output();
-                if parity == parity_expected { DAP_TRANSFER_OK } else { DAP_TRANSFER_MISMATCH } 
+                if parity == parity_expected { Ok(value) } else { Err(DapError::SwdError(DAP_TRANSFER_MISMATCH)) } 
             } else {    // WRITE request
                 self.turn_around(config);
                 self.enable_output();
@@ -230,28 +235,30 @@ impl SwdIo for XiaoSwdIo {
                     value >>= 1;
                 }
                 self.write_bit(config, parity);
-                DAP_TRANSFER_OK
+                Ok(0)
             };
             // TODO: capture timestamp
             self.idle_cycle(config);
-            return if ack == DAP_TRANSFER_OK { Ok(0) } else { Err(DapError::SwdError(ack)) }
+            self.set_swdio(true);
+            return ack;
         }
 
         // An error occured.
         if ack == rust_dap::DAP_TRANSFER_WAIT || ack == rust_dap::DAP_TRANSFER_FAULT {
             self.disable_output();
-            if request.contains(SwdRequest::RnW) {
+            if config.always_generate_data_phase && request.contains(SwdRequest::RnW) {
                 for _ in 0..33 {
                     self.cycle_clock(config);
                 }
             }
             self.turn_around(config);
             self.enable_output();
-            if !request.contains(SwdRequest::RnW) {
+            if config.always_generate_data_phase && !request.contains(SwdRequest::RnW) {
                 for _ in 0..33{
                     self.write_bit(config, false);
                 }
             }
+            self.set_swdio(true);
             return Err(DapError::SwdError(ack));
         }
 
@@ -261,6 +268,7 @@ impl SwdIo for XiaoSwdIo {
             self.cycle_clock(config);
         }
         self.enable_output();
+        self.set_swdio(true);
         return Err(DapError::SwdError(ack));
     }
 
