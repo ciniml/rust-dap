@@ -1,0 +1,21 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug",
+            "type": "cortex-debug",
+            "request": "launch",
+            "servertype": "external",
+            "cwd": "${workspaceRoot}",
+            "runToMain": true,
+            "executable": "target/thumbv6m-none-eabi/debug/rust-dap-xiao",
+            "device": "ATSAMD21G18",
+            "gdbPath": "gdb-multiarch",
+            "gdbTarget": "localhost:3333",
+            "svdFile": "ATSAMD21G18A.svd",
+            "runToEntryPoint": "main",
+            "preLaunchTask": "build rust-dap-xiao",
+            "showDevDebugOutput": false
+        }
+    ]
+}

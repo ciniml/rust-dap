@@ -147,7 +147,7 @@ where
 impl Default for SwdIoConfig {
     fn default() -> Self {
         Self {
-            clock_wait_cycles: 10,
+            clock_wait_cycles: 1,
             idle_cycles: 0,
             turn_around_cycles: 1,
             always_generate_data_phase: false,
@@ -232,6 +232,7 @@ where
                         DapCommandId::Disconnect => dap_disconnect(&mut self.io, request, response),
                         DapCommandId::TransferConfigure => swd_transfer_config(&mut self.config, &mut self.io, request, response),
                         DapCommandId::Transfer => swd_transfer(&mut self.config, &mut self.io, request, response),
+                        DapCommandId::TransferBlock => swd_transfer_block(&mut self.config, &mut self.io, request, response),
                         DapCommandId::SWJClock => swj_clock(request, response),
                         DapCommandId::SWJSequence => swj_sequence(&self.config, &mut self.io, request, response),
                         DapCommandId::SWDConfigure => swd_config(&mut self.config, request, response),
@@ -261,6 +262,12 @@ where
 {
     fn get_configuration_descriptors(&self, writer: &mut DescriptorWriter) -> Result<()> {
         self.inner.get_configuration_descriptors(writer)
+    }
+    fn get_bos_descriptors(&self, writer: &mut BosWriter) -> Result<()> {
+        self.inner.get_bos_descriptors(writer)
+    }
+    fn get_string(&self, index: StringIndex, lang_id: u16) -> Option<&str> {
+        self.inner.get_string(index, lang_id)
     }
     fn reset(&mut self) {
         self.inner.reset()
@@ -301,10 +308,18 @@ fn dap_info(request: &[u8], response: &mut [u8]) -> core::result::Result<(usize,
                     write_buffer(buffer, "Piyo".as_bytes())?
                 },
                 DapInfoId::CmsisDapVer => {
-                    write_buffer(buffer, "2.0.0".as_bytes())?
+                    write_buffer(buffer, "2.00".as_bytes())?
                 },
                 DapInfoId::Capabilities => {
                     buffer[0] = 0b0000_0001;
+                    1 as usize
+                },
+                DapInfoId::PacketCount => {
+                    buffer[0] = 1;
+                    1 as usize
+                },
+                DapInfoId::PacketSize => {
+                    buffer[0] = 64;
                     1 as usize
                 },
                 _ => {0 as usize},
@@ -320,7 +335,7 @@ fn dap_info(request: &[u8], response: &mut [u8]) -> core::result::Result<(usize,
 fn dap_connect<Swd: SwdIo>(swdio: &mut Swd, request: &[u8], response: &mut [u8]) -> core::result::Result<(usize, usize), DapError> {
     if request.len() >= 1 {
         swdio.connect();
-        response[0] = request[0];
+        response[0] = 1; // SWD
         Ok((1, 1))
     }
     else {
@@ -435,6 +450,12 @@ fn read_swd_request<C: CursorRead>(cursor: &mut C) -> SwdRequest {
     cursor.read(&mut buffer).ok();
     unsafe { SwdRequest::from_bits_unchecked(buffer[0]) }
 }
+fn read_u16<C: CursorRead>(cursor: &mut C) -> u16 {
+    let mut value: [u8; 2] = unsafe{ core::mem::MaybeUninit::uninit().assume_init() };
+    cursor.read(&mut value).ok();
+    u16::from_le_bytes(value)
+}
+
 fn read_u32<C: CursorRead>(cursor: &mut C) -> u32 {
     let mut value: [u8; 4] = unsafe{ core::mem::MaybeUninit::uninit().assume_init() };
     cursor.read(&mut value).ok();
@@ -470,6 +491,70 @@ fn swd_config(config: &mut CmsisDapConfig, request: &[u8], response: &mut [u8]) 
     }
 }
 
+fn swd_transfer_block<Swd: SwdIo>(config: &mut CmsisDapConfig, swdio: &mut Swd, request: &[u8], response: &mut [u8]) -> core::result::Result<(usize, usize), DapError> {
+    if request.len() == 0 {
+        return Err(DapError::InvalidCommand)
+    }
+    let (response_header, response_body) = response.split_at_mut(3);
+    let mut response = BufferCursor::new(response_body);
+    let mut request = BufferCursor::new_with_position(request, 1);
+    let request_count = read_u16(&mut request) as u32;
+    if request_count == 0 {
+        response_header[0] = 0;
+        response_header[1] = 0;
+        response_header[2] = 0;
+        return Ok((2, 3))
+    }
+
+    let swd_request = read_swd_request(&mut request);
+    let mut response_count = 0u32;
+    let result = swd_transfer_block_inner(config, swdio, swd_request, &mut request, &mut response, request_count, &mut response_count);
+    response_header[0] = (request_count >> 0 & 0xff) as u8;
+    response_header[1] = (request_count >> 8 & 0xff) as u8;
+    response_header[2] = match result {
+        Ok(_) => DAP_TRANSFER_OK,
+        Err(err) => match err {
+            DapError::ExceedRetryCount => DAP_TRANSFER_WAIT,
+            DapError::SwdError(swd_error) => swd_error,
+            _ => DAP_TRANSFER_ERROR,
+        }
+    };
+    Ok((request.get_position(), response.get_position() + 3))
+}
+
+fn swd_transfer_block_inner<Swd: SwdIo>(config: &mut CmsisDapConfig, swdio: &mut Swd, swd_request: SwdRequest, request: &mut BufferCursor<&[u8]>, response: &mut BufferCursor<&mut [u8]>, mut request_count: u32, response_count: &mut u32) -> core::result::Result<(), DapError> {
+    if swd_request.contains(SwdRequest::RnW) {  // Read access
+        if swd_request.contains(SwdRequest::APnDP) {    // AP read?
+            swd_transfer_inner_with_retry(config, swdio, swd_request, 0)?;
+        }
+        while request_count > 0 {
+            request_count -= 1;
+            let swd_request = if request_count == 0 && swd_request.contains(SwdRequest::APnDP) {  // Last access of AP read
+                // Read the last result from RDBUFF.
+                SwdRequest::RDBUFF | SwdRequest::RnW
+            }
+            else {
+                // Otherwise, transmit the original request.
+                swd_request
+            };
+            let result = swd_transfer_inner_with_retry(config, swdio, swd_request, 0)?;
+            write_u32(response, result);
+            *response_count += 1;
+        }
+    }
+    else {
+        // Write access
+        while request_count > 0 {
+            request_count -= 1;
+            let data = read_u32(request);
+            swd_transfer_inner_with_retry(config, swdio, swd_request, data)?;
+            *response_count += 1;
+        }
+        // Check the last write result
+        swd_transfer_inner_with_retry(config, swdio, SwdRequest::RDBUFF | SwdRequest::RnW, 0)?;
+    }
+    Ok(())
+}
 
 fn swd_transfer<Swd: SwdIo>(config: &mut CmsisDapConfig, swdio: &mut Swd, request: &[u8], response: &mut [u8]) -> core::result::Result<(usize, usize), DapError> {
     if request.len() == 0 {

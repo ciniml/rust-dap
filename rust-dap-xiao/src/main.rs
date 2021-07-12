@@ -1,34 +1,36 @@
 #![no_std]
 #![no_main]
 
+use embedded_hal::digital::v2::InputPin;
 use hal::gpio::Port;
 use hal::prelude::_atsamd_hal_embedded_hal_digital_v2_OutputPin;
-use embedded_hal::digital::v2::InputPin;
 use panic_halt as _;
-use rust_dap::DAP_TRANSFER_MISMATCH;
-use rust_dap::DAP_TRANSFER_OK;
 use rust_dap::DapError;
 use rust_dap::SwdIo;
 use rust_dap::SwdIoConfig;
 use rust_dap::SwdRequest;
+use rust_dap::DAP_TRANSFER_MISMATCH;
+use rust_dap::DAP_TRANSFER_OK;
+use rust_dap::USB_CLASS_MISCELLANEOUS;
+use rust_dap::USB_PROTOCOL_IAD;
+use rust_dap::USB_SUBCLASS_COMMON;
 use xiao_m0 as hal;
 
 use hal::clock::GenericClockController;
 use hal::entry;
-use hal::gpio::{OpenDrain, PushPull, Floating, Input, Output, Pa18, Pin};
 use hal::gpio::v2::{PA05, PA07};
+use hal::gpio::{Floating, Input, OpenDrain, Output, Pa18, Pin, PushPull};
 use hal::pac::{interrupt, CorePeripherals, Peripherals};
 
 use hal::usb::UsbBus;
 use usb_device::bus::UsbBusAllocator;
 
+use rust_dap::CmsisDap;
 use usb_device::prelude::*;
 use usbd_serial::{SerialPort, USB_CLASS_CDC};
-use rust_dap::{CmsisDap};
 
 use cortex_m::asm::delay as cycle_delay;
 use cortex_m::peripheral::NVIC;
-
 
 type SwdInputPin<P> = Pin<P, Input<Floating>>;
 type SwdOutputPin<P> = Pin<P, Output<PushPull>>;
@@ -47,9 +49,15 @@ struct XiaoSwdIo {
 }
 
 impl XiaoSwdIo {
-    fn swclk_out(&mut self) -> Option<&mut SwClkOutputPin> { self.swclk_out.as_mut() }
-    fn swdio_out(&mut self) -> Option<&mut SwdIoOutputPin> { self.swdio_out.as_mut() }
-    fn swdio_in(&mut self) -> Option<&mut SwdIoInputPin> { self.swdio_in.as_mut() }
+    fn swclk_out(&mut self) -> Option<&mut SwClkOutputPin> {
+        self.swclk_out.as_mut()
+    }
+    fn swdio_out(&mut self) -> Option<&mut SwdIoOutputPin> {
+        self.swdio_out.as_mut()
+    }
+    fn swdio_in(&mut self) -> Option<&mut SwdIoInputPin> {
+        self.swdio_in.as_mut()
+    }
 
     fn clock_wait(&self, config: &SwdIoConfig) {
         cycle_delay(config.clock_wait_cycles);
@@ -71,7 +79,13 @@ impl XiaoSwdIo {
         }
     }
     fn write_bit(&mut self, config: &SwdIoConfig, value: bool) {
-        self.swdio_out().and_then(|p| if value { p.set_high().ok() } else { p.set_low().ok() });
+        self.swdio_out().and_then(|p| {
+            if value {
+                p.set_high().ok()
+            } else {
+                p.set_low().ok()
+            }
+        });
         self.swclk_out().and_then(|p| p.set_low().ok());
         self.clock_wait(config);
         self.swclk_out().and_then(|p| p.set_high().ok());
@@ -80,22 +94,31 @@ impl XiaoSwdIo {
     fn read_bit(&mut self, config: &SwdIoConfig) -> bool {
         self.swclk_out().and_then(|p| p.set_low().ok());
         self.clock_wait(config);
-        let value = self.swdio_in().map_or_else(|| false, |p| p.is_high().unwrap_or(false) );
+        let value = self
+            .swdio_in()
+            .map_or_else(|| false, |p| p.is_high().unwrap_or(false));
         self.swclk_out().and_then(|p| p.set_high().ok());
         self.clock_wait(config);
         value
     }
     fn set_swdio(&mut self, value: bool) {
-        self.swdio_out().and_then(|p| if value { p.set_high().ok() } else { p.set_low().ok() });
+        self.swdio_out().and_then(|p| {
+            if value {
+                p.set_high().ok()
+            } else {
+                p.set_low().ok()
+            }
+        });
     }
     #[allow(dead_code)]
-    fn get_timestamp(&mut self) -> u32 { 0 }
+    fn get_timestamp(&mut self) -> u32 {
+        0
+    }
 }
 
 impl SwdIo for XiaoSwdIo {
-    
     fn connect(&mut self) {
-        let port = unsafe {PORT.as_mut()};
+        let port = unsafe { PORT.as_mut() };
         port.map(|port| {
             if let Some(old) = self.swdio_in.take() {
                 let mut new = old.into_push_pull_output(port);
@@ -110,7 +133,7 @@ impl SwdIo for XiaoSwdIo {
         });
     }
     fn disconnect(&mut self) {
-        let port = unsafe {PORT.as_mut()};
+        let port = unsafe { PORT.as_mut() };
         port.map(|port| {
             if let Some(old) = self.swdio_out.take() {
                 let new = old.into_floating_input(port);
@@ -129,7 +152,7 @@ impl SwdIo for XiaoSwdIo {
         let mut count = count;
 
         while count > 0 {
-            count-= 1;
+            count -= 1;
             if bits == 0 {
                 value = data[index];
                 index += 1;
@@ -149,14 +172,18 @@ impl SwdIo for XiaoSwdIo {
             while bits > 0 && count > 0 {
                 bits -= 1;
                 count -= 1;
-                
+
                 let bit_value = self.read_bit(config);
-                value = if bit_value { (value >> 1) | 0x80 } else { value >> 1 };
+                value = if bit_value {
+                    (value >> 1) | 0x80
+                } else {
+                    value >> 1
+                };
             }
             value >>= bits;
             data[index] = value;
             index += 1;
-        }    
+        }
     }
 
     fn swd_write_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]) {
@@ -173,11 +200,15 @@ impl SwdIo for XiaoSwdIo {
                 self.write_bit(config, value & 1 != 0);
                 value >>= 1;
             }
-        }    
+        }
     }
 
-    
-    fn swd_transfer(&mut self, config: &SwdIoConfig, request: SwdRequest, data: u32) -> core::result::Result<u32, rust_dap::DapError> {
+    fn swd_transfer(
+        &mut self,
+        config: &SwdIoConfig,
+        request: SwdRequest,
+        data: u32,
+    ) -> core::result::Result<u32, rust_dap::DapError> {
         // write request
         self.enable_output();
         {
@@ -195,9 +226,9 @@ impl SwdIo for XiaoSwdIo {
             let bit = request.contains(SwdRequest::A3);
             self.write_bit(config, bit);
             parity ^= bit;
-            self.write_bit(config, parity);   // Parity
-            self.write_bit(config, false);    // Stop
-            self.write_bit(config, true);     // Park
+            self.write_bit(config, parity); // Parity
+            self.write_bit(config, false); // Stop
+            self.write_bit(config, true); // Park
         }
 
         // turnaround + read ack.
@@ -211,19 +242,25 @@ impl SwdIo for XiaoSwdIo {
             ack
         };
         if ack == rust_dap::DAP_TRANSFER_OK {
-            let ack = if request.contains(SwdRequest::RnW) {  // READ request
+            let ack = if request.contains(SwdRequest::RnW) {
+                // READ request
                 let mut value = 0u32;
                 let mut parity = false;
                 for _ in 0..32 {
                     let bit = self.read_bit(config);
                     parity ^= bit;
-                    value = (value >> 1) | if bit {0x80000000} else {0x00000000};
+                    value = (value >> 1) | if bit { 0x80000000 } else { 0x00000000 };
                 }
                 let parity_expected = self.read_bit(config);
                 self.turn_around(config);
                 self.enable_output();
-                if parity == parity_expected { Ok(value) } else { Err(DapError::SwdError(DAP_TRANSFER_MISMATCH)) } 
-            } else {    // WRITE request
+                if parity == parity_expected {
+                    Ok(value)
+                } else {
+                    Err(DapError::SwdError(DAP_TRANSFER_MISMATCH))
+                }
+            } else {
+                // WRITE request
                 self.turn_around(config);
                 self.enable_output();
                 let mut value = data;
@@ -254,7 +291,7 @@ impl SwdIo for XiaoSwdIo {
             self.turn_around(config);
             self.enable_output();
             if config.always_generate_data_phase && !request.contains(SwdRequest::RnW) {
-                for _ in 0..33{
+                for _ in 0..33 {
                     self.write_bit(config, false);
                 }
             }
@@ -273,7 +310,7 @@ impl SwdIo for XiaoSwdIo {
     }
 
     fn enable_output(&mut self) {
-        let port = unsafe {PORT.as_mut()};
+        let port = unsafe { PORT.as_mut() };
         port.map(|port| {
             if let Some(old) = self.swdio_in.take() {
                 let mut new = old.into_push_pull_output(port);
@@ -284,7 +321,7 @@ impl SwdIo for XiaoSwdIo {
     }
 
     fn disable_output(&mut self) {
-        let port = unsafe {PORT.as_mut()};
+        let port = unsafe { PORT.as_mut() };
         port.map(|port| {
             if let Some(old) = self.swdio_out.take() {
                 let new = old.into_floating_input(port);
@@ -320,7 +357,7 @@ fn main() -> ! {
         USB_ALLOCATOR.as_ref().unwrap()
     };
 
-    let swdio = XiaoSwdIo{
+    let swdio = XiaoSwdIo {
         swclk_in: Some(pins.a8),
         swdio_in: Some(pins.a9),
         swclk_out: None,
@@ -335,7 +372,11 @@ fn main() -> ! {
                 .manufacturer("fugafuga.org")
                 .product("CMSIS-DAP")
                 .serial_number("test")
-                .device_class(USB_CLASS_CDC)
+                .device_class(USB_CLASS_MISCELLANEOUS) 
+                .device_class(USB_SUBCLASS_COMMON)
+                .device_protocol(USB_PROTOCOL_IAD)
+                .composite_with_iads()
+                .max_packet_size_0(64)
                 .build(),
         );
         LED = Some(pins.led1.into_open_drain_output(&mut pins.port));
@@ -356,7 +397,7 @@ fn main() -> ! {
         //         let _ = dap.process();
         //     });
         // }
-        cycle_delay(15*1024*1024);
+        cycle_delay(15 * 1024 * 1024);
         led0.toggle();
     }
 }
