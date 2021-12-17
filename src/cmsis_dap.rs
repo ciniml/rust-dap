@@ -360,14 +360,9 @@ fn dap_connect<Swd: SwdIo>(swdio: &mut Swd, request: &[u8], response: &mut [u8])
     }
 }
 fn dap_disconnect<Swd: SwdIo>(swdio: &mut Swd, request: &[u8], response: &mut [u8]) -> core::result::Result<(usize, usize), DapError> {
-    if request.len() >= 1 {
-        swdio.disconnect();
-        response[0] = DAP_OK;
-        Ok((0, 1))
-    }
-    else {
-        Err(DapError::InvalidCommand)
-    }
+    swdio.disconnect();
+    response[0] = DAP_OK;
+    Ok((0, 1))
 }
 fn dap_host_status(request: &[u8], response: &mut [u8]) -> core::result::Result<(usize, usize), DapError> {
     if request.len() >= 1 {
