@@ -336,7 +336,8 @@ fn dap_info(request: &[u8], response: &mut [u8]) -> core::result::Result<(usize,
                 },
                 DapInfoId::PacketSize => {
                     buffer[0] = 64;
-                    1 as usize
+                    buffer[1] = 0;
+                    2 as usize
                 },
                 _ => {0 as usize},
             }
