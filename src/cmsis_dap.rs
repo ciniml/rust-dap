@@ -359,7 +359,7 @@ fn dap_connect<Swd: SwdIo>(swdio: &mut Swd, request: &[u8], response: &mut [u8])
         Err(DapError::InvalidCommand)
     }
 }
-fn dap_disconnect<Swd: SwdIo>(swdio: &mut Swd, request: &[u8], response: &mut [u8]) -> core::result::Result<(usize, usize), DapError> {
+fn dap_disconnect<Swd: SwdIo>(swdio: &mut Swd, _request: &[u8], response: &mut [u8]) -> core::result::Result<(usize, usize), DapError> {
     swdio.disconnect();
     response[0] = DAP_OK;
     Ok((0, 1))
@@ -479,7 +479,7 @@ fn write_u32<C: CursorWrite>(cursor: &mut C, value: u32) {
 }
 
 
-fn swd_transfer_config<Swd: SwdIo>(config: &mut CmsisDapConfig, swdio: &mut Swd, request: &[u8], response: &mut [u8]) -> core::result::Result<(usize, usize), DapError> {
+fn swd_transfer_config<Swd: SwdIo>(config: &mut CmsisDapConfig, _swdio: &mut Swd, request: &[u8], response: &mut [u8]) -> core::result::Result<(usize, usize), DapError> {
     if request.len() < 5 {
         return Err(DapError::InvalidCommand)
     } else {

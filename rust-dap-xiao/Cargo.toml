@@ -10,7 +10,7 @@ license-file = "../LICENSE"
 
 [dependencies]
 rust-dap = { path = ".." }
-xiao_m0 = { version = "0.9", features = ["usb", "unproven"]}
+xiao_m0 = { version = "0.11", features = ["usb", "unproven"]}
 panic-halt = "0.2"
 cortex-m = "0.6"
 cortex-m-rt = "0.6"

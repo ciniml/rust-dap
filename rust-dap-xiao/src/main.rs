@@ -17,36 +17,37 @@
 #![no_std]
 #![no_main]
 
-use embedded_hal::digital::v2::InputPin;
-use hal::gpio::Port;
-use hal::prelude::_atsamd_hal_embedded_hal_digital_v2_OutputPin;
+use core::sync::atomic::{AtomicU32, Ordering};
+
+use bsp::hal::sercom::v2::uart::Oversampling;
+use embedded_hal::digital::v2::{InputPin, OutputPin, ToggleableOutputPin};
 use panic_halt as _;
 use rust_dap::DapError;
 use rust_dap::SwdIo;
 use rust_dap::SwdIoConfig;
 use rust_dap::SwdRequest;
 use rust_dap::DAP_TRANSFER_MISMATCH;
-use rust_dap::DAP_TRANSFER_OK;
 use rust_dap::USB_CLASS_MISCELLANEOUS;
 use rust_dap::USB_PROTOCOL_IAD;
 use rust_dap::USB_SUBCLASS_COMMON;
-use xiao_m0 as hal;
-
-use hal::clock::GenericClockController;
-use hal::entry;
-use hal::gpio::v2::{PA05, PA07};
-use hal::gpio::{Floating, Input, OpenDrain, Output, Pa18, Pin, PushPull};
-use hal::pac::{interrupt, CorePeripherals, Peripherals};
-
-use hal::usb::UsbBus;
-use usb_device::bus::UsbBusAllocator;
-
 use rust_dap::CmsisDap;
-use usb_device::prelude::*;
-use usbd_serial::{SerialPort, USB_CLASS_CDC};
+
+use xiao_m0 as bsp;
+use bsp::{entry, hal, pac};
+use pac::{interrupt, CorePeripherals, Peripherals};
+use hal::prelude::*;
+use hal::clock::GenericClockController;
+use hal::usb::UsbBus;
+use hal::gpio::v2::{Floating, Input, Output, Pin, PushPull};
+use hal::sercom::v2::uart;
+use usb_device::{bus::UsbBusAllocator, prelude::*};
+use usbd_serial::{SerialPort};
 
 use cortex_m::asm::delay as cycle_delay;
 use cortex_m::peripheral::NVIC;
+
+// Import pin types
+use hal::gpio::v2::{PA05, PA07};
 
 type SwdInputPin<P> = Pin<P, Input<Floating>>;
 type SwdOutputPin<P> = Pin<P, Output<PushPull>>;
@@ -134,32 +135,26 @@ impl XiaoSwdIo {
 
 impl SwdIo for XiaoSwdIo {
     fn connect(&mut self) {
-        let port = unsafe { PORT.as_mut() };
-        port.map(|port| {
-            if let Some(old) = self.swdio_in.take() {
-                let mut new = old.into_push_pull_output(port);
-                new.set_low().ok();
-                self.swdio_out = Some(new);
-            }
-            if let Some(old) = self.swclk_in.take() {
-                let mut new = old.into_push_pull_output(port);
-                new.set_low().ok();
-                self.swclk_out = Some(new);
-            }
-        });
+        if let Some(old) = self.swdio_in.take() {
+            let mut new = old.into_push_pull_output();
+            new.set_low().ok();
+            self.swdio_out = Some(new);
+        }
+        if let Some(old) = self.swclk_in.take() {
+            let mut new = old.into_push_pull_output();
+            new.set_low().ok();
+            self.swclk_out = Some(new);
+        }
     }
     fn disconnect(&mut self) {
-        let port = unsafe { PORT.as_mut() };
-        port.map(|port| {
-            if let Some(old) = self.swdio_out.take() {
-                let new = old.into_floating_input(port);
-                self.swdio_in = Some(new);
-            }
-            if let Some(old) = self.swclk_out.take() {
-                let new = old.into_floating_input(port);
-                self.swclk_in = Some(new);
-            }
-        });
+        if let Some(old) = self.swdio_out.take() {
+            let new = old.into_floating_input();
+            self.swdio_in = Some(new);
+        }
+        if let Some(old) = self.swclk_out.take() {
+            let new = old.into_floating_input();
+            self.swclk_in = Some(new);
+        }
     }
     fn swj_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]) {
         let mut index = 0;
@@ -326,24 +321,18 @@ impl SwdIo for XiaoSwdIo {
     }
 
     fn enable_output(&mut self) {
-        let port = unsafe { PORT.as_mut() };
-        port.map(|port| {
-            if let Some(old) = self.swdio_in.take() {
-                let mut new = old.into_push_pull_output(port);
-                new.set_low().ok();
-                self.swdio_out = Some(new);
-            }
-        });
+        if let Some(old) = self.swdio_in.take() {
+            let mut new = old.into_push_pull_output();
+            new.set_low().ok();
+            self.swdio_out = Some(new);
+        }
     }
 
     fn disable_output(&mut self) {
-        let port = unsafe { PORT.as_mut() };
-        port.map(|port| {
-            if let Some(old) = self.swdio_out.take() {
-                let new = old.into_floating_input(port);
-                self.swdio_in = Some(new);
-            }
-        });
+        if let Some(old) = self.swdio_out.take() {
+            let new = old.into_floating_input();
+            self.swdio_in = Some(new);
+        }
     }
 }
 
@@ -358,24 +347,23 @@ fn main() -> ! {
         &mut peripherals.NVMCTRL,
     );
 
-    let mut pins = hal::Pins::new(peripherals.PORT);
-    let mut led0 = pins.led0.into_open_drain_output(&mut pins.port);
-
+    let pins = bsp::Pins::new(peripherals.PORT);
+    let mut led0 = pins.led0.into_push_pull_output();
+    
     let bus_allocator = unsafe {
-        USB_ALLOCATOR = Some(hal::usb_allocator(
+        USB_ALLOCATOR = Some(bsp::usb_allocator(
             peripherals.USB,
             &mut clocks,
             &mut peripherals.PM,
             pins.usb_dm,
             pins.usb_dp,
-            &mut pins.port,
         ));
         USB_ALLOCATOR.as_ref().unwrap()
     };
 
     let swdio = XiaoSwdIo {
-        swclk_in: Some(pins.a8),
-        swdio_in: Some(pins.a9),
+        swclk_in: Some(pins.a8.into_floating_input()),
+        swdio_in: Some(pins.a9.into_floating_input()),
         swclk_out: None,
         swdio_out: None,
     };
@@ -395,35 +383,84 @@ fn main() -> ! {
                 .max_packet_size_0(64)
                 .build(),
         );
-        LED = Some(pins.led1.into_open_drain_output(&mut pins.port));
+        LED = Some(pins.led1.into_push_pull_output());
+        UART_SERIAL = Some(bsp::uart(&mut clocks, DEFAULT_BAUD_RATE.hz(), peripherals.SERCOM4, &mut peripherals.PM, pins.a7, pins.a6));
     }
 
+    // The above shared context MUST BE initialized before enabling interrupts.
     unsafe {
+        // Configure UART (SERCOM4) interrupt
+        UART_SERIAL.as_mut().map(|uart| {
+            enable_uart_interrupts(uart);
+        });
+        core.NVIC.set_priority(interrupt::SERCOM4, 2);
+        NVIC::unmask(interrupt::SERCOM4);
+        // USB interrupt
         core.NVIC.set_priority(interrupt::USB, 1);
         NVIC::unmask(interrupt::USB);
     }
 
-    unsafe {
-        PORT = Some(pins.port);
-    }
-
+    let mut current_baud_rate = DEFAULT_BAUD_RATE;
     loop {
-        // unsafe {
-        //     USB_DAP.as_mut().map(|dap| {
-        //         let _ = dap.process();
-        //     });
-        // }
-        cycle_delay(15 * 1024 * 1024);
-        led0.toggle();
+        unsafe {
+            UART_SERIAL.as_mut().map(|uart| {
+                let expected_baud_rate = BAUD_RATE.load(Ordering::Relaxed);
+                if current_baud_rate != expected_baud_rate {
+                    // Update the UART configuration.
+                    NVIC::mask(interrupt::USB);
+                    disable_uart_interrupts(uart);
+                    uart.reconfigure(|config| config.set_baud((expected_baud_rate as u32).hz(), uart::BaudMode::Arithmetic(uart::Oversampling::Bits16)));
+                    enable_uart_interrupts(uart);
+                    NVIC::unmask(interrupt::USB);
+                    current_baud_rate = expected_baud_rate;
+                }
+            });
+            USB_SERIAL.as_mut().map(|serial| {       
+                let mut buf: [u8; 64] = core::mem::MaybeUninit::uninit().assume_init();
+                let mut serial_read_consumer = USB_SERIAL_READ_QUEUE.split().1;
+                let mut index = 0;
+                while index < buf.len() {
+                    if let Some(c) = serial_read_consumer.dequeue() {
+                        buf[index] = c;
+                        index += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if index > 0 {
+                    serial.write(&buf[0..index]).ok();
+                }
+            });
+        }
+        //cycle_delay(15 * 1024 * 1024);
+        led0.toggle().unwrap();
     }
 }
 
-static mut PORT: Option<Port> = None;
+fn enable_uart_interrupts(uart: &mut bsp::Uart)
+{
+    let serial_write_consumer = unsafe { USB_SERIAL_WRITE_QUEUE.split().1 };
+    let flags = if serial_write_consumer.ready() { uart::Flags::RXC | uart::Flags::DRE } else { uart::Flags::RXC };
+    uart.enable_interrupts(flags);
+}
+fn disable_uart_interrupts(uart: &mut bsp::Uart)
+{
+    uart.disable_interrupts(uart::Flags::RXC | uart::Flags::DRE);
+}
+
+const UART_READ_QUEUE_SIZE: usize = 128;
+const UART_WRITE_QUEUE_SIZE: usize = 128;
+static mut USB_SERIAL_READ_QUEUE: heapless::spsc::Queue<u8, UART_READ_QUEUE_SIZE> = heapless::spsc::Queue::new();
+static mut USB_SERIAL_WRITE_QUEUE: heapless::spsc::Queue<u8, UART_WRITE_QUEUE_SIZE> = heapless::spsc::Queue::new();
+static mut UART_SERIAL: Option<bsp::Uart> = None;
 static mut USB_ALLOCATOR: Option<UsbBusAllocator<UsbBus>> = None;
 static mut USB_BUS: Option<UsbDevice<UsbBus>> = None;
 static mut USB_SERIAL: Option<SerialPort<UsbBus>> = None;
 static mut USB_DAP: Option<CmsisDap<UsbBus, XiaoSwdIo, 64>> = None;
-static mut LED: Option<Pa18<Output<OpenDrain>>> = None;
+static mut LED: Option<bsp::Led1> = None;
+
+const DEFAULT_BAUD_RATE: u32 = 115200u32;
+static mut BAUD_RATE: AtomicU32 = AtomicU32::new(DEFAULT_BAUD_RATE);
 
 fn poll_usb() {
     unsafe {
@@ -434,24 +471,54 @@ fn poll_usb() {
 
                     dap.process().ok();
 
-                    let mut buf = [0u8; 64];
-
+                    // Store the new baudrate.
+                    let baud_rate = serial.line_coding().data_rate();
+                    BAUD_RATE.store(baud_rate, Ordering::Relaxed);
+                
+                    let mut buf: [u8; 64] = core::mem::MaybeUninit::uninit().assume_init();
+                    let mut serial_write_producer = USB_SERIAL_WRITE_QUEUE.split().0;
                     if let Ok(count) = serial.read(&mut buf) {
-                        for (i, c) in buf.iter().enumerate() {
-                            if i >= count {
+                        for c in buf[0..count].iter() {
+                            if serial_write_producer.enqueue(*c).is_err() {
                                 break;
                             }
-                            serial.write(&[c.clone()]).unwrap();
-                            LED.as_mut().map(|led| led.toggle());
                         }
                     };
+
+                    // Enable UART interrupts.
+                    UART_SERIAL.as_mut().map(|uart| enable_uart_interrupts(uart));
+
                 });
             });
         });
+        LED.as_mut().map(|led| led.toggle());
     };
 }
 
 #[interrupt]
 fn USB() {
     poll_usb();
+}
+
+// UART interrupts 
+#[interrupt]
+fn SERCOM4() {
+    let mut serial_read_producer = unsafe { USB_SERIAL_READ_QUEUE.split().0 };
+    let mut serial_write_consumer = unsafe { USB_SERIAL_WRITE_QUEUE.split().1  };
+    unsafe {
+        UART_SERIAL.as_mut().map(|uart| {
+            let flags = uart.read_flags();
+            if flags.contains(uart::Flags::DRE) {
+                if let Some(c) = serial_write_consumer.dequeue() {
+                    uart.write_data(c as u16);
+                } else {
+                    uart.disable_interrupts(uart::Flags::DRE);  // Disable DRE interrupt if there are no data in the queue.
+                }
+            }
+            if flags.contains(uart::Flags::RXC) {
+                let data = uart.read_data() as u8;
+                serial_read_producer.enqueue_unchecked(data);
+            }
+        });
+    }
 }
