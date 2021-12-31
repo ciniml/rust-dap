@@ -17,9 +17,9 @@
 #![no_std]
 #![no_main]
 
+use core::ops::Range;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use bsp::hal::sercom::v2::uart::Oversampling;
 use embedded_hal::digital::v2::{InputPin, OutputPin, ToggleableOutputPin};
 use panic_halt as _;
 use rust_dap::DapError;
@@ -393,14 +393,15 @@ fn main() -> ! {
         UART_SERIAL.as_mut().map(|uart| {
             enable_uart_interrupts(uart);
         });
-        core.NVIC.set_priority(interrupt::SERCOM4, 2);
+        core.NVIC.set_priority(interrupt::SERCOM4, 1);
         NVIC::unmask(interrupt::SERCOM4);
         // USB interrupt
-        core.NVIC.set_priority(interrupt::USB, 1);
+        core.NVIC.set_priority(interrupt::USB, 2);
         NVIC::unmask(interrupt::USB);
     }
 
     let mut current_baud_rate = DEFAULT_BAUD_RATE;
+    let mut buf: BlockBuffer<64> = BlockBuffer::new();
     loop {
         unsafe {
             UART_SERIAL.as_mut().map(|uart| {
@@ -416,20 +417,24 @@ fn main() -> ! {
                 }
             });
             USB_SERIAL.as_mut().map(|serial| {       
-                let mut buf: [u8; 64] = core::mem::MaybeUninit::uninit().assume_init();
                 let mut serial_read_consumer = USB_SERIAL_READ_QUEUE.split().1;
-                let mut index = 0;
-                while index < buf.len() {
-                    if let Some(c) = serial_read_consumer.dequeue() {
-                        buf[index] = c;
-                        index += 1;
-                    } else {
-                        break;
+                buf.write(|buf| {
+                    for index in 0..buf.len() {
+                        if let Some(c) = serial_read_consumer.dequeue() {
+                            buf[index] = c;
+                        } else {
+                            return index;
+                        }
                     }
-                }
-                if index > 0 {
-                    serial.write(&buf[0..index]).ok();
-                }
+                    buf.len()
+                });
+                buf.read(|buf| {
+                    if let Ok(count) = serial.write(buf) {
+                        count
+                    } else {
+                        0
+                    }
+                });
             });
         }
         //cycle_delay(15 * 1024 * 1024);
@@ -462,38 +467,7 @@ static mut LED: Option<bsp::Led1> = None;
 const DEFAULT_BAUD_RATE: u32 = 115200u32;
 static mut BAUD_RATE: AtomicU32 = AtomicU32::new(DEFAULT_BAUD_RATE);
 
-fn poll_usb() {
-    unsafe {
-        USB_BUS.as_mut().map(|usb_dev| {
-            USB_SERIAL.as_mut().map(|serial| {
-                USB_DAP.as_mut().map(|dap| {
-                    usb_dev.poll(&mut [serial, dap]);
-
-                    dap.process().ok();
-
-                    // Store the new baudrate.
-                    let baud_rate = serial.line_coding().data_rate();
-                    BAUD_RATE.store(baud_rate, Ordering::Relaxed);
-                
-                    let mut buf: [u8; 64] = core::mem::MaybeUninit::uninit().assume_init();
-                    let mut serial_write_producer = USB_SERIAL_WRITE_QUEUE.split().0;
-                    if let Ok(count) = serial.read(&mut buf) {
-                        for c in buf[0..count].iter() {
-                            if serial_write_producer.enqueue(*c).is_err() {
-                                break;
-                            }
-                        }
-                    };
-
-                    // Enable UART interrupts.
-                    UART_SERIAL.as_mut().map(|uart| enable_uart_interrupts(uart));
-
-                });
-            });
-        });
-        LED.as_mut().map(|led| led.toggle());
-    };
-}
+static mut SERIAL_TX_BUFFER: BlockBuffer<64> = BlockBuffer::new();
 
 #[interrupt]
 fn USB() {
@@ -508,6 +482,10 @@ fn SERCOM4() {
     unsafe {
         UART_SERIAL.as_mut().map(|uart| {
             let flags = uart.read_flags();
+            if flags.contains(uart::Flags::RXC) {
+                let data = uart.read_data() as u8;
+                serial_read_producer.enqueue_unchecked(data);
+            }
             if flags.contains(uart::Flags::DRE) {
                 if let Some(c) = serial_write_consumer.dequeue() {
                     uart.write_data(c as u16);
@@ -515,10 +493,48 @@ fn SERCOM4() {
                     uart.disable_interrupts(uart::Flags::DRE);  // Disable DRE interrupt if there are no data in the queue.
                 }
             }
-            if flags.contains(uart::Flags::RXC) {
-                let data = uart.read_data() as u8;
-                serial_read_producer.enqueue_unchecked(data);
-            }
         });
     }
+}
+
+fn poll_usb() {
+    unsafe {
+        USB_BUS.as_mut().map(|usb_dev| {
+            USB_SERIAL.as_mut().map(|serial| {
+                USB_DAP.as_mut().map(|dap| {
+                    usb_dev.poll(&mut [serial, dap]);
+
+                    dap.process().ok();
+
+                    // Store the new baudrate.
+                    let baud_rate = serial.line_coding().data_rate();
+                    BAUD_RATE.store(baud_rate, Ordering::Relaxed);
+                
+                    let mut serial_write_producer = USB_SERIAL_WRITE_QUEUE.split().0;
+                    SERIAL_TX_BUFFER.write(|buf| {
+                        if let Ok(count) = serial.read(buf) {
+                            count
+                        } else {
+                            0
+                        }
+                    });
+                    SERIAL_TX_BUFFER.read(|buf| {
+                        let mut count = 0;
+                        for c in buf.iter() {
+                            if serial_write_producer.enqueue(*c).is_err() {
+                                break;
+                            }
+                            count += 1;
+                        }
+                        count
+                    });
+
+                    // Enable UART interrupts if there are data to be transmit
+                    UART_SERIAL.as_mut().map(|uart| enable_uart_interrupts(uart));
+
+                });
+            });
+        });
+        LED.as_mut().map(|led| led.toggle());
+    };
 }
