@@ -37,10 +37,10 @@ use rust_dap::CmsisDap;
 use usb_device::prelude::*;
 use usbd_serial::{SerialPort};
 
-use embedded_hal::digital::v2::ToggleableOutputPin;
+use embedded_hal::digital::v2::{OutputPin, ToggleableOutputPin};
 
-type SwdIoPin = hal::gpio::bank0::Gpio9;
-type SwClkPin = hal::gpio::bank0::Gpio10;
+type SwdIoPin = hal::gpio::bank0::Gpio4;
+type SwClkPin = hal::gpio::bank0::Gpio2;
 type SwdInputPin<P> = PicoSwdInputPin<P>;
 type SwdOutputPin<P> = PicoSwdOutputPin<P>;
 type SwdIoInputPin = SwdInputPin<SwdIoPin>;
@@ -55,11 +55,9 @@ use swdio_pin::*;
 struct CycleDelay {}
 impl DelayFunc for CycleDelay {
     fn cycle_delay(&self, cycles: u32) {
-        cortex_m::asm::delay(cycles);
+        cortex_m::asm::delay(cycles*10);
     }
 }
-
-
 
 #[entry]
 fn main() -> ! {
@@ -100,8 +98,8 @@ fn main() -> ! {
     };
 
     let swdio = MySwdIoSet::new(
-        PicoSwdInputPin::new(pins.gpio10.into_floating_input()),
-        PicoSwdInputPin::new(pins.gpio9.into_floating_input()),
+        PicoSwdInputPin::new(pins.gpio2.into_floating_input()),
+        PicoSwdInputPin::new(pins.gpio4.into_floating_input()),
         CycleDelay{},
     );
 
@@ -127,14 +125,13 @@ fn main() -> ! {
         pac::NVIC::unmask(pac::Interrupt::USBCTRL_IRQ);
     }
 
+    pins.gpio16.into_push_pull_output().set_high().ok();
+    let mut led = pins.gpio17.into_push_pull_output();
+    led.set_high().ok();
+
     loop {
-        // unsafe {
-        //     USB_DAP.as_mut().map(|dap| {
-        //         let _ = dap.process();
-        //     });
-        // }
         cortex_m::asm::delay(15 * 1024 * 1024);
-        //led0.toggle();
+        led.toggle().ok();
     }
 }
 

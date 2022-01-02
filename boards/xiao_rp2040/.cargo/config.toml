@@ -2,8 +2,8 @@
 target = "thumbv6m-none-eabi"
 
 [target.thumbv6m-none-eabi]
-runner = "hf2 elf"
-#runner = "probe-run --chip atsamd51p19a"
+runner = "elf2uf2-rs -d"
+#runner = "picotool load -x -t elf"
 rustflags = [
   "-C", "link-arg=-Tlink.x", "-C", "link-arg=--nmagic",
 ]
