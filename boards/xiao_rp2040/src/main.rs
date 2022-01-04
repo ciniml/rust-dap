@@ -55,7 +55,7 @@ use swdio_pin::*;
 struct CycleDelay {}
 impl DelayFunc for CycleDelay {
     fn cycle_delay(&self, cycles: u32) {
-        cortex_m::asm::delay(cycles*10);
+        cortex_m::asm::delay(cycles);
     }
 }
 
@@ -125,6 +125,7 @@ fn main() -> ! {
         pac::NVIC::unmask(pac::Interrupt::USBCTRL_IRQ);
     }
 
+    pins.gpio7.into_floating_disabled();
     pins.gpio16.into_push_pull_output().set_high().ok();
     let mut led = pins.gpio17.into_push_pull_output();
     led.set_high().ok();

@@ -1,6 +1,6 @@
 
 use embedded_hal::digital::v2::{InputPin, OutputPin, IoPin, PinState};
-use rp_pico::hal::gpio::{Pin, PinId, Input, Output, Disabled, Floating, PushPull};
+use rp_pico::hal::gpio::{Pin, PinId, Input, Output, Disabled, Floating, PushPull, OutputOverride};
 
 pub struct PicoSwdInputPin<I> 
 where
@@ -42,8 +42,11 @@ where
     fn into_input_pin(self) -> Result<PicoSwdInputPin<I>, Self::Error> {
         Ok(self)
     }
-    fn into_output_pin(self, state: PinState) -> Result<PicoSwdOutputPin<I>, Self::Error> {
-        let output_pin = self.pin.into_push_pull_output();
+    fn into_output_pin(mut self, state: PinState) -> Result<PicoSwdOutputPin<I>, Self::Error> {
+        let output_override = if state == PinState::High { OutputOverride::AlwaysHigh } else { OutputOverride::AlwaysLow };
+        self.pin.set_output_override(output_override);
+        let mut output_pin = self.pin.into_push_pull_output();
+        output_pin.set_output_override(OutputOverride::DontInvert);
         let mut new_pin = PicoSwdOutputPin::new(output_pin);
         new_pin.set_state(state)?;
         Ok(new_pin)
