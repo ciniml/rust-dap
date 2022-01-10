@@ -332,7 +332,7 @@ checksum = "e3a8614ee435691de62bcffcf4a66d91b3594bf1428a5722e79103249a095690"
 
 [[package]]
 name = "rust-dap"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitflags",
  "embedded-hal",
