@@ -672,6 +672,7 @@ fn swd_transfer<Swd: SwdIo>(config: &mut CmsisDapConfig, swdio: &mut Swd, reques
                     match swd_transfer_inner_with_retry(&config, swdio, SwdRequest::RDBUFF | SwdRequest::RnW, 0) {
                         Ok(value) => {
                             write_u32(&mut response, value);
+                            posted_read = false;
                         },
                         Err(err) => {
                             break Err(err);  // Error
