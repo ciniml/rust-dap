@@ -3,7 +3,7 @@ target = "thumbv6m-none-eabi"
 
 [target.thumbv6m-none-eabi]
 runner = "hf2 elf"
-#runner = "probe-run --chip atsamd51p19a"
+#runner = "probe-run --chip atsamd21g18a"
 rustflags = [
   "-C", "link-arg=-Tlink.x", "-C", "link-arg=--nmagic",
 ]
