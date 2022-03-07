@@ -12,7 +12,6 @@ debug = 2
 
 [dependencies]
 rust-dap = { path = "../..", features = ["bitbang", "unproven"] }
-blockbuffer = { path = "../../blockbuffer" }
 rp-pico = { git = "https://github.com/rp-rs/rp-hal.git", rev = "8d18abdfc7c0129debba85457d32d32175bf36bd" }
 panic-halt = "0.2"
 cortex-m = "0.7"
