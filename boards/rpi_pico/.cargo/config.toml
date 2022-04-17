@@ -1,0 +1,9 @@
+[build]
+target = "thumbv6m-none-eabi"
+
+[target.thumbv6m-none-eabi]
+runner = "elf2uf2-rs -d"
+#runner = "picotool load -x -t elf"
+rustflags = [
+  "-C", "link-arg=-Tlink.x", "-C", "link-arg=--nmagic",
+]
