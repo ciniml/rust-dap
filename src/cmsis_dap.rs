@@ -417,20 +417,15 @@ fn swd_sequence<Swd: SwdIo>(config: &CmsisDapConfig, swdio: &mut Swd, request: &
             if do_input {
                 swdio.disable_output();
                 swdio.swd_read_sequence(&config.swdio, clock_count, &mut response[response_index..]);
+                response_index += bytes_count;
             } else {
                 swdio.enable_output();
                 swdio.swd_write_sequence(&config.swdio, clock_count, &request[request_index..]);
+                request_index += bytes_count;
             }
 
             if sequence_count == 0 {
                 swdio.enable_output()
-            }
-
-            if do_input {
-                request_index += 1;
-                response_index += bytes_count;
-            } else {
-                request_index = 1 + bytes_count;
             }
         }
         response[0] = DAP_OK;
