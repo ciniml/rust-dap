@@ -1,4 +1,4 @@
-// Copyright 2021 Kenta Ida
+// Copyright 2021-2022 Kenta Ida
 //
 // SPDX-License-Identifier: Apache-2.0
 //
@@ -17,17 +17,11 @@
 #![no_std]
 #![no_main]
 
-mod line_coding;
-mod swdio_pin;
-
 #[rtic::app(device = rp_pico::hal::pac, peripherals = true)]
 mod app {
     use panic_halt as _;
 
     use rust_dap::bitbang::*;
-    use rust_dap::USB_CLASS_MISCELLANEOUS;
-    use rust_dap::USB_PROTOCOL_IAD;
-    use rust_dap::USB_SUBCLASS_COMMON;
 
     use hal::gpio::{Output, Pin, PushPull};
     use hal::pac;
@@ -43,34 +37,38 @@ mod app {
     use embedded_hal::digital::v2::{OutputPin, ToggleableOutputPin};
     use embedded_hal::serial::{Read, Write};
 
-    type SwdIoPin = hal::gpio::bank0::Gpio4;
-    type SwClkPin = hal::gpio::bank0::Gpio2;
+    use rust_dap_rp2040::swdio_pin::{PicoSwdInputPin, PicoSwdOutputPin};
+    use rust_dap_rp2040::line_coding::*;
+    use rust_dap_rp2040::util::{UartConfigAndClock, CycleDelay, initialize_usb, read_usb_serial_byte_cs, write_usb_serial_byte_cs};
+
+    // GPIO mappings
+    type GpioUartTx = hal::gpio::bank0::Gpio0;
+    type GpioUartRx = hal::gpio::bank0::Gpio1;
+    type GpioUsbLed = hal::gpio::bank0::Gpio25;
+    type GpioIdleLed = hal::gpio::bank0::Gpio17;
+    type GpioDebugOut = hal::gpio::bank0::Gpio6;
+    type GpioDebugIrqOut = hal::gpio::bank0::Gpio28;
+    type GpioDebugUsbIrqOut = hal::gpio::bank0::Gpio27;
+    type GpioSwdIo = hal::gpio::bank0::Gpio4;
+    type GpioSwClk = hal::gpio::bank0::Gpio2;
+
+
     type SwdInputPin<P> = PicoSwdInputPin<P>;
     type SwdOutputPin<P> = PicoSwdOutputPin<P>;
-    type SwdIoInputPin = SwdInputPin<SwdIoPin>;
-    type SwdIoOutputPin = SwdOutputPin<SwdIoPin>;
-    type SwClkInputPin = SwdInputPin<SwClkPin>;
-    type SwClkOutputPin = SwdOutputPin<SwClkPin>;
+    type SwdIoInputPin = SwdInputPin<GpioSwdIo>;
+    type SwdIoOutputPin = SwdOutputPin<GpioSwdIo>;
+    type SwClkInputPin = SwdInputPin<GpioSwClk>;
+    type SwClkOutputPin = SwdOutputPin<GpioSwClk>;
     type MySwdIoSet =
         SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, CycleDelay>;
-
-    pub struct CycleDelay {}
-    impl DelayFunc for CycleDelay {
-        fn cycle_delay(&self, cycles: u32) {
-            cortex_m::asm::delay(cycles);
-        }
-    }
-
-    use crate::line_coding::*;
-    use crate::swdio_pin::*;
 
     // UART Interrupt context
     const UART_RX_QUEUE_SIZE: usize = 256;
     const UART_TX_QUEUE_SIZE: usize = 128;
     // UART Shared context
     type UartPins = (
-        hal::gpio::Pin<hal::gpio::bank0::Gpio0, hal::gpio::Function<hal::gpio::Uart>>,
-        hal::gpio::Pin<hal::gpio::bank0::Gpio1, hal::gpio::Function<hal::gpio::Uart>>,
+        hal::gpio::Pin<GpioUartTx, hal::gpio::Function<hal::gpio::Uart>>,
+        hal::gpio::Pin<GpioUartRx, hal::gpio::Function<hal::gpio::Uart>>,
     );
     type Uart = hal::uart::UartPeripheral<hal::uart::Enabled, pac::UART0, UartPins>;
     pub struct UartReader(hal::uart::Reader<pac::UART0, UartPins>);
@@ -79,11 +77,7 @@ mod app {
     unsafe impl Sync for UartWriter {}
     unsafe impl Send for UartReader {}
     unsafe impl Send for UartWriter {}
-
-    pub struct UartConfigAndClock {
-        pub config: UartConfig,
-        pub clock: embedded_time::rate::Hertz,
-    }
+    
 
     #[shared]
     struct Shared {
@@ -101,11 +95,11 @@ mod app {
         uart_rx_producer: heapless::spsc::Producer<'static, u8, UART_RX_QUEUE_SIZE>,
         usb_bus: UsbDevice<'static, UsbBus>,
         usb_dap: CmsisDap<'static, UsbBus, MySwdIoSet, 64>,
-        usb_led: Pin<hal::gpio::bank0::Gpio25, Output<PushPull>>,
-        idle_led: Pin<hal::gpio::bank0::Gpio17, Output<PushPull>>,
-        debug_out: Pin<hal::gpio::bank0::Gpio6, Output<PushPull>>,
-        debug_irq_out: Pin<hal::gpio::bank0::Gpio28, Output<PushPull>>,
-        debug_usb_irq_out: Pin<hal::gpio::bank0::Gpio27, Output<PushPull>>,
+        usb_led: Pin<GpioUsbLed, Output<PushPull>>,
+        idle_led: Pin<GpioIdleLed, Output<PushPull>>,
+        debug_out: Pin<GpioDebugOut, Output<PushPull>>,
+        debug_irq_out: Pin<GpioDebugIrqOut, Output<PushPull>>,
+        debug_usb_irq_out: Pin<GpioDebugUsbIrqOut, Output<PushPull>>,
     }
 
     #[init(local = [
@@ -163,24 +157,12 @@ mod app {
         c.local.USB_ALLOCATOR.replace(usb_allocator);
         let usb_allocator = c.local.USB_ALLOCATOR.as_ref().unwrap();
 
-        let swdio = MySwdIoSet::new(
+        let (usb_serial, usb_dap, usb_bus) = initialize_usb(
             PicoSwdInputPin::new(pins.gpio2.into_floating_input()),
             PicoSwdInputPin::new(pins.gpio4.into_floating_input()),
-            CycleDelay {},
+            usb_allocator
         );
-
-        let usb_serial = SerialPort::new(usb_allocator);
-        let usb_dap = CmsisDap::new(usb_allocator, swdio);
-        let usb_bus = UsbDeviceBuilder::new(usb_allocator, UsbVidPid(0x6666, 0x4444))
-            .manufacturer("fugafuga.org")
-            .product("CMSIS-DAP")
-            .serial_number("test")
-            .device_class(USB_CLASS_MISCELLANEOUS)
-            .device_class(USB_SUBCLASS_COMMON)
-            .device_protocol(USB_PROTOCOL_IAD)
-            .composite_with_iads()
-            .max_packet_size_0(64)
-            .build();
+        
         let usb_led = pins.led.into_push_pull_output();
         let (uart_rx_producer, uart_rx_consumer) = c.local.uart_rx_queue.split();
         let (uart_tx_producer, uart_tx_consumer) = c.local.uart_tx_queue.split();
@@ -353,9 +335,9 @@ mod app {
         if let Ok(expected_config) = c
             .shared
             .usb_serial
-            .lock(|usb_serial| UartConfig::try_from(usb_serial.line_coding().clone()))
+            .lock(|usb_serial| UartConfig::try_from(usb_serial.line_coding()))
         {
-            let config = UartConfig::from(c.local.uart_config.config.clone());
+            let config = c.local.uart_config.config;
             if expected_config != config {
                 (&mut c.shared.uart_reader, &mut c.shared.uart_writer).lock(|reader, writer| {
                     reader.as_mut().unwrap().0.disable_rx_interrupt();
@@ -364,7 +346,7 @@ mod app {
                     let enabled = disabled
                         .enable((&expected_config).into(), c.local.uart_config.clock)
                         .unwrap();
-                    c.local.uart_config.config = expected_config.into();
+                    c.local.uart_config.config = expected_config;
                     let (new_reader, new_writer) = enabled.split();
                     reader.replace(UartReader(new_reader));
                     writer.replace(UartWriter(new_writer));
@@ -375,28 +357,5 @@ mod app {
 
         c.local.usb_led.toggle().ok();
         c.local.debug_usb_irq_out.set_low().ok();
-    }
-
-    fn read_usb_serial_byte_cs(usb_serial: &mut SerialPort<UsbBus>) -> Result<u8, UsbError> {
-        let mut buf = [0u8; 1];
-        match usb_serial.read(&mut buf) {
-            Ok(1) => Ok(buf[0]),
-            Ok(0) => Err(UsbError::WouldBlock),
-            Ok(_) => panic!("USB Serial read extra data."),
-            Err(err) => Err(err),
-        }
-    }
-
-    fn write_usb_serial_byte_cs(
-        usb_serial: &mut SerialPort<UsbBus>,
-        data: u8,
-    ) -> Result<(), UsbError> {
-        let buf = [data; 1];
-        match usb_serial.write(&buf) {
-            Ok(1) => Ok(()),
-            Ok(0) => Err(UsbError::WouldBlock),
-            Ok(_) => panic!("USB Serial wrote extra data."),
-            Err(err) => Err(err),
-        }
     }
 }

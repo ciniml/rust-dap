@@ -1,5 +1,5 @@
 [package]
-name = "rust-dap-xiao-rp2040"
+name = "rust-dap-rp2040"
 version = "0.1.0"
 authors = ["Kenta IDA <fuga@fugafuga.org>"]
 edition = "2021"
@@ -7,13 +7,9 @@ license = "Apache-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[profile.release]
-debug = 2
-
 [dependencies]
-rust-dap = { path = "../../rust-dap", features = ["bitbang", "unproven"] }
-rust-dap-rp2040 = { path = "../../rust-dap-rp2040" }
-rp-pico = { git = "https://github.com/rp-rs/rp-hal.git", rev = "8d18abdfc7c0129debba85457d32d32175bf36bd" }
+rust-dap = { path = "../rust-dap", features = ["bitbang", "unproven"] }
+rp2040-hal = { git = "https://github.com/rp-rs/rp-hal.git", rev = "8d18abdfc7c0129debba85457d32d32175bf36bd" }
 panic-halt = "0.2"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"

@@ -1,29 +1,56 @@
-use rp_pico::hal::uart;
+// Copyright 2022 Kenta Ida
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+use hal::uart;
+use rp2040_hal as hal;
 use usbd_serial;
 
 use core::convert::{From, TryFrom};
 
+/// UART configuration conversion error
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UartConvertError {
+    /// Incompatible UART parameter
     Incompatible,
 }
 
+/// UART Stop bits
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UartStopBits {
+    /// 1 stop bit
     One,
+    /// 2 stop bits
     Two,
 }
 
+/// UART parity type
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UartParityType {
+    /// No parity
     None,
+    /// Odd parity
     Odd,
+    /// Even parity
     Even,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UartDataBits(u8);
 
+/// UART configuration which can be converted into both usbd_serial UART configuration and RP2040 UART configuration.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UartConfig {
     pub data_bits: UartDataBits,
@@ -74,7 +101,7 @@ impl From<UartParityType> for usbd_serial::ParityType {
         match value {
             UartParityType::None => Self::None,
             UartParityType::Even => Self::Event,
-            UartParityType::Odd  => Self::Odd,
+            UartParityType::Odd => Self::Odd,
         }
     }
 }

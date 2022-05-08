@@ -1,28 +1,43 @@
+// Copyright 2022 Kenta Ida
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-use embedded_hal::digital::v2::{InputPin, OutputPin, IoPin, PinState};
-use rp_pico::hal::gpio::{Pin, PinId, Input, Output, Disabled, Floating, PushPull, OutputOverride};
+use embedded_hal::digital::v2::{InputPin, IoPin, OutputPin, PinState};
+use hal::gpio::{Disabled, Floating, Input, Output, OutputOverride, Pin, PinId, PushPull};
+use rp2040_hal as hal;
 
-pub struct PicoSwdInputPin<I> 
+/// InputPin implementation for SWD pin
+pub struct PicoSwdInputPin<I>
 where
-    I: PinId
+    I: PinId,
 {
     pin: Pin<I, Input<Floating>>,
 }
 
-impl<I> PicoSwdInputPin<I> 
+impl<I> PicoSwdInputPin<I>
 where
-    I: PinId
+    I: PinId,
 {
     pub fn new(pin: Pin<I, Input<Floating>>) -> Self {
-        Self {
-            pin: pin,
-        }
+        Self { pin: pin }
     }
 }
 
-impl<I> InputPin for PicoSwdInputPin<I> 
+impl<I> InputPin for PicoSwdInputPin<I>
 where
-    I: PinId
+    I: PinId,
 {
     type Error = core::convert::Infallible;
     fn is_high(&self) -> Result<bool, Self::Error> {
@@ -33,8 +48,7 @@ where
     }
 }
 
-
-impl<I> IoPin<PicoSwdInputPin<I>, PicoSwdOutputPin<I>> for PicoSwdInputPin<I> 
+impl<I> IoPin<PicoSwdInputPin<I>, PicoSwdOutputPin<I>> for PicoSwdInputPin<I>
 where
     I: PinId,
 {
@@ -43,7 +57,11 @@ where
         Ok(self)
     }
     fn into_output_pin(mut self, state: PinState) -> Result<PicoSwdOutputPin<I>, Self::Error> {
-        let output_override = if state == PinState::High { OutputOverride::AlwaysHigh } else { OutputOverride::AlwaysLow };
+        let output_override = if state == PinState::High {
+            OutputOverride::AlwaysHigh
+        } else {
+            OutputOverride::AlwaysLow
+        };
         self.pin.set_output_override(output_override);
         let mut output_pin = self.pin.into_push_pull_output();
         output_pin.set_output_override(OutputOverride::DontInvert);
@@ -52,25 +70,25 @@ where
         Ok(new_pin)
     }
 }
-pub struct PicoSwdOutputPin<I> 
+
+/// OutputPin implementation for SWD pin
+pub struct PicoSwdOutputPin<I>
 where
     I: PinId,
 {
     pin: Pin<I, Output<PushPull>>,
 }
 
-impl<I> PicoSwdOutputPin<I> 
+impl<I> PicoSwdOutputPin<I>
 where
     I: PinId,
 {
     pub fn new(pin: Pin<I, Output<PushPull>>) -> Self {
-        Self {
-            pin: pin,
-        }
+        Self { pin: pin }
     }
 }
 
-impl<I> OutputPin for PicoSwdOutputPin<I> 
+impl<I> OutputPin for PicoSwdOutputPin<I>
 where
     I: PinId,
 {
@@ -86,8 +104,7 @@ where
     }
 }
 
-
-impl<I> IoPin<PicoSwdInputPin<I>, PicoSwdOutputPin<I>> for PicoSwdOutputPin<I> 
+impl<I> IoPin<PicoSwdInputPin<I>, PicoSwdOutputPin<I>> for PicoSwdOutputPin<I>
 where
     I: PinId,
 {
@@ -102,6 +119,7 @@ where
     }
 }
 
+/// Pico SWD pin
 pub struct PicoSwdPin<I>
 where
     I: PinId,
