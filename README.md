@@ -11,10 +11,11 @@ Arm用のデバッグ・アダプタのプロトコルおよびファームウ�
 現在対応しているボードは以下の通りです。
 各ボードごとのの実装については、 [boards](./boards) ディレクトリ以下に含まれています。
 
-| ボード名        | 対応機能         | ディレクトリ         |
-|:---------------|:----------------|:--------------------|
-| Seeeduino XIAO | CMSIS-DAP       | [./boards/xiao_m0](./boards/xiao_m0) | 
-| XIAO RP2040    | CMSIS-DAP, UART | [./boards/xiao_rp2040](./boards/xiao_m0) | 
+| ボード名           | 対応機能         | ディレクトリ         |
+|:------------------|:----------------|:--------------------|
+| Seeeduino XIAO    | CMSIS-DAP       | [./boards/xiao_m0](./boards/xiao_m0) | 
+| XIAO RP2040       | CMSIS-DAP, UART | [./boards/xiao_rp2040](./boards/xiao_m0) | 
+| Raspberry Pi Pico | CMSIS-DAP, UART | [./boards/rpi_pico](./boards/rpi_pico) | 
 
 ## ライセンス
 
