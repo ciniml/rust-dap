@@ -66,29 +66,29 @@ pub struct UartConfigAndClock {
 
 type PicoUsbBusAllocator = UsbBusAllocator<UsbBus>;
 
-type PicoSwdIoSet<SwdIoPin, SwClkPin> = SwdIoSet<
-    PicoSwdInputPin<SwdIoPin>,
-    PicoSwdOutputPin<SwdIoPin>,
+type PicoSwdIoSet<SwClkPin, SwdIoPin> = SwdIoSet<
     PicoSwdInputPin<SwClkPin>,
     PicoSwdOutputPin<SwClkPin>,
+    PicoSwdInputPin<SwdIoPin>,
+    PicoSwdOutputPin<SwdIoPin>,
     CycleDelay,
 >;
 
 /// Initialize SWDIO, USB-UART, CMSIS-DAP and USB BUS.
-pub fn initialize_usb<SwdIoPin, SwClkPin, const MAX_PACKET_SIZE: usize>(
-    swdio_pin: PicoSwdInputPin<SwdIoPin>,
+pub fn initialize_usb<SwClkPin, SwdIoPin, const MAX_PACKET_SIZE: usize>(
     swclk_pin: PicoSwdInputPin<SwClkPin>,
+    swdio_pin: PicoSwdInputPin<SwdIoPin>,
     usb_allocator: &'static PicoUsbBusAllocator,
 ) -> (
     SerialPort<UsbBus>,
-    CmsisDap<'static, UsbBus, PicoSwdIoSet<SwdIoPin, SwClkPin>, MAX_PACKET_SIZE>,
+    CmsisDap<'static, UsbBus, PicoSwdIoSet<SwClkPin, SwdIoPin>, MAX_PACKET_SIZE>,
     UsbDevice<UsbBus>,
 )
 where
-    SwdIoPin: PinId,
     SwClkPin: PinId,
+    SwdIoPin: PinId,
 {
-    let swdio = PicoSwdIoSet::<SwdIoPin, SwClkPin>::new(swdio_pin, swclk_pin, CycleDelay {});
+    let swdio = PicoSwdIoSet::<SwClkPin, SwdIoPin>::new(swclk_pin, swdio_pin, CycleDelay {});
 
     let usb_serial = SerialPort::new(usb_allocator);
     let usb_dap = CmsisDap::new(usb_allocator, swdio);
