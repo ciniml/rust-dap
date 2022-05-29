@@ -15,18 +15,30 @@
 // limitations under the License.
 
 use crate::line_coding::UartConfig;
-use crate::swdio_pin::{PicoSwdInputPin, PicoSwdOutputPin};
 use core::result::Result;
-use hal::{gpio::PinId, usb::UsbBus};
+use hal::usb::UsbBus;
 use rp2040_hal as hal;
-use rust_dap::bitbang::{DelayFunc, SwdIoSet};
-use rust_dap::{CmsisDap, USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON};
+use rust_dap::{CmsisDap, SwdIo, USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON};
 use usb_device::device::{UsbDevice, UsbDeviceBuilder, UsbVidPid};
 use usb_device::{class_prelude::UsbBusAllocator, UsbError};
 use usbd_serial::SerialPort;
 
+#[cfg(feature = "bitbang")]
+use rust_dap::bitbang::{DelayFunc, SwdIoSet as BitbangSwdIoSet};
+#[cfg(feature = "bitbang")]
+use crate::swdio_pin::{PicoSwdInputPin, PicoSwdOutputPin};
+#[cfg(feature = "bitbang")]
+pub type SwdIoSet<C, D> = BitbangSwdIoSet<PicoSwdInputPin<C>, PicoSwdOutputPin<C>, PicoSwdInputPin<D>, PicoSwdOutputPin<D>, CycleDelay>;
+
+#[cfg(not(feature = "bitbang"))]
+use crate::pio::{SwdIoSet as PioSwdIoSet, pio0};
+#[cfg(not(feature = "bitbang"))]
+pub type SwdIoSet<C, D> = PioSwdIoSet<pio0::Pin<C>, pio0::Pin<D>>;
+
 /// DelayFunc implementation which uses cortex_m::asm::delay
+#[cfg(feature = "bitbang")]
 pub struct CycleDelay {}
+#[cfg(feature = "bitbang")]
 impl DelayFunc for CycleDelay {
     fn cycle_delay(&self, cycles: u32) {
         cortex_m::asm::delay(cycles);
@@ -66,30 +78,18 @@ pub struct UartConfigAndClock {
 
 type PicoUsbBusAllocator = UsbBusAllocator<UsbBus>;
 
-type PicoSwdIoSet<SwClkPin, SwdIoPin> = SwdIoSet<
-    PicoSwdInputPin<SwClkPin>,
-    PicoSwdOutputPin<SwClkPin>,
-    PicoSwdInputPin<SwdIoPin>,
-    PicoSwdOutputPin<SwdIoPin>,
-    CycleDelay,
->;
-
 /// Initialize SWDIO, USB-UART, CMSIS-DAP and USB BUS.
-pub fn initialize_usb<SwClkPin, SwdIoPin, const MAX_PACKET_SIZE: usize>(
-    swclk_pin: PicoSwdInputPin<SwClkPin>,
-    swdio_pin: PicoSwdInputPin<SwdIoPin>,
+pub fn initialize_usb<Swd, const MAX_PACKET_SIZE: usize>(
+    swdio: Swd,
     usb_allocator: &'static PicoUsbBusAllocator,
 ) -> (
     SerialPort<UsbBus>,
-    CmsisDap<'static, UsbBus, PicoSwdIoSet<SwClkPin, SwdIoPin>, MAX_PACKET_SIZE>,
+    CmsisDap<'static, UsbBus, Swd, MAX_PACKET_SIZE>,
     UsbDevice<UsbBus>,
 )
 where
-    SwClkPin: PinId,
-    SwdIoPin: PinId,
+    Swd: SwdIo,
 {
-    let swdio = PicoSwdIoSet::<SwClkPin, SwdIoPin>::new(swclk_pin, swdio_pin, CycleDelay {});
-
     let usb_serial = SerialPort::new(usb_allocator);
     let usb_dap = CmsisDap::new(usb_allocator, swdio);
     let usb_bus = UsbDeviceBuilder::new(usb_allocator, UsbVidPid(0x6666, 0x4444))

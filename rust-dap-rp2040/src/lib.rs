@@ -18,5 +18,7 @@
 #![no_main]
 
 pub mod line_coding;
+#[cfg(not(feature = "bitbang"))]
+pub mod pio;
 pub mod swdio_pin;
 pub mod util;
