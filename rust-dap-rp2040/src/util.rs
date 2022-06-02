@@ -79,13 +79,14 @@ pub struct UartConfigAndClock {
 type PicoUsbBusAllocator = UsbBusAllocator<UsbBus>;
 
 /// Initialize SWDIO, USB-UART, CMSIS-DAP and USB BUS.
-pub fn initialize_usb<Swd, const MAX_PACKET_SIZE: usize>(
+pub fn initialize_usb<'a, Swd, const MAX_PACKET_SIZE: usize>(
     swdio: Swd,
-    usb_allocator: &'static PicoUsbBusAllocator,
+    usb_allocator: &'a PicoUsbBusAllocator,
+    serial: &'a str,
 ) -> (
-    SerialPort<UsbBus>,
-    CmsisDap<'static, UsbBus, Swd, MAX_PACKET_SIZE>,
-    UsbDevice<UsbBus>,
+    SerialPort<'a, UsbBus>,
+    CmsisDap<'a, UsbBus, Swd, MAX_PACKET_SIZE>,
+    UsbDevice<'a, UsbBus>,
 )
 where
     Swd: SwdIo,
@@ -95,7 +96,7 @@ where
     let usb_bus = UsbDeviceBuilder::new(usb_allocator, UsbVidPid(0x6666, 0x4444))
         .manufacturer("fugafuga.org")
         .product("CMSIS-DAP")
-        .serial_number("test")
+        .serial_number(serial)
         .device_class(USB_CLASS_MISCELLANEOUS)
         .device_class(USB_SUBCLASS_COMMON)
         .device_protocol(USB_PROTOCOL_IAD)
