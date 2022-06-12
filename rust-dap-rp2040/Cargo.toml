@@ -10,9 +10,11 @@ license = "Apache-2.0"
 [features]
 bitbang = ["rust-dap/bitbang", "rust-dap/unproven"]
 set_clock = []  # Enable swj_clock implementation for bitbang and PIO and set appropriate SWCLK frequency. Otherwise, SWCLK is fixed to 15.625[MHz]
+ram-exec = [] # Execute-in-SRAM support
 
 [dependencies]
 rust-dap = { path = "../rust-dap" }
+rp2040-boot2 = "0.2.0"
 rp2040-hal = { git = "https://github.com/rp-rs/rp-hal.git", rev = "8d18abdfc7c0129debba85457d32d32175bf36bd" }
 pio = "0.1.0"
 panic-halt = "0.2"

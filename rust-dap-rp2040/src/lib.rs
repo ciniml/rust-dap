@@ -17,6 +17,22 @@
 #![no_std]
 #![no_main]
 
+/// The linker will place this boot block at the start of our program image. We
+/// need this to help the ROM bootloader get our code up and running.
+#[cfg(feature = "ram-exec")]
+#[link_section = ".boot2"]
+#[no_mangle]
+#[used]
+pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_RAM_MEMCPY;
+
+/// The linker will place this boot block at the start of our program image. We
+/// need this to help the ROM bootloader get our code up and running.
+#[cfg(not(feature = "ram-exec"))]
+#[link_section = ".boot2"]
+#[no_mangle]
+#[used]
+pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
+
 pub mod line_coding;
 #[cfg(not(feature = "bitbang"))]
 pub mod pio;
