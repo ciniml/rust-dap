@@ -1,0 +1,26 @@
+name: Build test
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 2
+      matrix:
+        projects: ["rust-dap", "rust-dap-rp2040", "uart-test", "boards/rpi_pico", "boards/xiao_m0", "boards/xiao_rp2040"]
+    container:
+      image: rust:1.61.0-slim-bullseye
+    steps:
+      - uses: actions/checkout@v2
+      - name: setup
+        run: rustup component add rustfmt
+      - name: cargo fmt for ${{ matrix.projects }}
+        run: cargo fmt --all -- --check
+        working-directory: ${{ matrix.projects }}
+          
+      
