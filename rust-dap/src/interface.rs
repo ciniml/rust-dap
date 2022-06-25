@@ -232,35 +232,20 @@ impl<B: UsbBus> UsbClass<B> for CmsisDapInterface<'_, B> {
     }
 
     fn get_bos_descriptors(&self, writer: &mut BosWriter) -> Result<()> {
+        #[rustfmt::skip]
         writer.capability(
             BOS_CAPABILITY_TYPE_PLATFORM,
             &[
-                0, // Reserved
-                0xdf,
-                0x60,
-                0xdd,
-                0xd8, // MS_OS_20_Platform_Capability_ID
-                0x89,
-                0x45,
-                0xc7,
-                0x4c, // {D8DD60DF-4589-4CC7-9CD2-659D9E648A9F}
-                0x9c,
-                0xd2,
-                0x65,
-                0x9d, //
-                0x9e,
-                0x64,
-                0x8a,
-                0x9f, //
-                0x00,
-                0x00,
-                0x03,
-                0x06, // dwWindowsVersion – 0x06030000 (Win8.1 or later)
-                174,
-                0,              // wLength = MS OS 2.0 descriptor set
-                MS_VENDOR_CODE, // bMS_VendorCode
-                0x00,           // bAltEnumCmd - does not support alternate enum.
-            ],
+                0,  // Reserved
+                0xdf, 0x60, 0xdd, 0xd8,  // MS_OS_20_Platform_Capability_ID
+                0x89, 0x45, 0xc7, 0x4c,  // {D8DD60DF-4589-4CC7-9CD2-659D9E648A9F}
+                0x9c, 0xd2, 0x65, 0x9d,  // 
+                0x9e, 0x64, 0x8a, 0x9f,  //
+                0x00, 0x00, 0x03, 0x06,  // dwWindowsVersion – 0x06030000 (Win8.1 or later)
+                174, 0,                  // wLength = MS OS 2.0 descriptor set
+                MS_VENDOR_CODE,          // bMS_VendorCode
+                0x00,                    // bAltEnumCmd - does not support alternate enum.
+            ]
         )?;
         Ok(())
     }
