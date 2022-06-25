@@ -527,6 +527,7 @@ dependencies = [
  "heapless",
  "nb 0.1.3",
  "panic-halt",
+ "pio",
  "rp2040-hal",
  "rust-dap",
  "usb-device",

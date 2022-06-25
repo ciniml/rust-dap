@@ -18,21 +18,21 @@
 #![no_main]
 
 use panic_halt as _;
-use rust_dap::bitbang::{SwdIoSet, DelayFunc};
+use rust_dap::bitbang::{DelayFunc, SwdIoSet};
 use rust_dap::USB_CLASS_MISCELLANEOUS;
 use rust_dap::USB_PROTOCOL_IAD;
 use rust_dap::USB_SUBCLASS_COMMON;
 
 use embedded_hal::digital::v2::ToggleableOutputPin;
 
-use xiao_m0 as bsp;
 use bsp::{entry, hal, pac};
 use hal::clock::GenericClockController;
 use hal::gpio::v2::{Output, Pin, PushPull};
 use pac::{interrupt, CorePeripherals, Peripherals};
+use xiao_m0 as bsp;
 
-use xiao_m0::hal::usb::UsbBus;
 use usb_device::bus::UsbBusAllocator;
+use xiao_m0::hal::usb::UsbBus;
 
 use rust_dap::CmsisDap;
 use usb_device::prelude::*;
@@ -53,7 +53,8 @@ type SwdIoInputPin = XiaoSwdInputPin<SwdIoPin>;
 type SwdIoOutputPin = XiaoSwdOutputPin<SwdIoPin>;
 type SwClkInputPin = XiaoSwdInputPin<SwClkPin>;
 type SwClkOutputPin = XiaoSwdOutputPin<SwClkPin>;
-type MySwdIoSet = SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, CycleDelay>;
+type MySwdIoSet =
+    SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, CycleDelay>;
 
 struct CycleDelay {}
 impl DelayFunc for CycleDelay {
@@ -75,7 +76,7 @@ fn main() -> ! {
 
     let pins = bsp::Pins::new(peripherals.PORT);
     let mut led0 = pins.led0.into_push_pull_output();
-    
+
     let bus_allocator = unsafe {
         USB_ALLOCATOR = Some(bsp::usb_allocator(
             peripherals.USB,
@@ -90,7 +91,7 @@ fn main() -> ! {
     let swdio = MySwdIoSet::new(
         XiaoSwdInputPin::new(pins.a8.into_floating_input()),
         XiaoSwdInputPin::new(pins.a9.into_floating_input()),
-        CycleDelay{},
+        CycleDelay {},
     );
 
     unsafe {

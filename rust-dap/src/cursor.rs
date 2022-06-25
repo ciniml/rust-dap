@@ -26,7 +26,6 @@ pub trait CursorWrite {
     fn write(&mut self, data: &[u8]) -> Result<(), CursorError>;
 }
 
-
 pub struct BufferCursor<Buffer> {
     buffer: Buffer,
     position: usize,
