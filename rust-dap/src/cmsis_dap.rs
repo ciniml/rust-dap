@@ -117,6 +117,7 @@ fn write_buffer(buffer: &mut [u8], data: &[u8]) -> core::result::Result<usize, C
     writer.write(data).map(|_| data.len())
 }
 
+#[derive(Debug, PartialEq)]
 pub enum DapError {
     InvalidCommand,
     InvalidDapInfoId,
@@ -728,7 +729,177 @@ fn swd_transfer<Swd: SwdIo>(config: &mut CmsisDapConfig, swdio: &mut Swd, reques
         }
 
         response_header[0] = response_count as u8;
-        response_header[1] = last_response.map_or_else(|e| if let DapError::SwdError(err) = e { err } else { DAP_TRANSFER_ERROR }, |_| DAP_TRANSFER_OK );
-        Ok((request.get_position() , response.get_position() + 2))
+        response_header[1] = last_response.map_or_else(
+            |e| {
+                if let DapError::SwdError(err) = e {
+                    err
+                } else {
+                    DAP_TRANSFER_ERROR
+                }
+            },
+            |_| DAP_TRANSFER_OK,
+        );
+        Ok((request.get_position(), response.get_position() + 2))
+    }
+}
+
+mod test {
+    use super::*;
+    use usb_device::prelude::*;
+
+    struct DummyIo;
+    impl SwdIo for DummyIo {
+        fn connect(&mut self) {
+            todo!()
+        }
+
+        fn disconnect(&mut self) {
+            todo!()
+        }
+
+        fn swj_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]) {
+            todo!()
+        }
+
+        fn swd_read_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &mut [u8]) {}
+
+        fn swd_write_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]) {
+            todo!()
+        }
+
+        fn swd_transfer(
+            &mut self,
+            config: &SwdIoConfig,
+            request: SwdRequest,
+            data: u32,
+        ) -> core::result::Result<u32, DapError> {
+            todo!()
+        }
+
+        fn enable_output(&mut self) {}
+
+        fn disable_output(&mut self) {}
+    }
+
+    struct DummyUsbInterface {
+        dummy_read_buffer: [u8; 64],
+        dummy_read_buffer_size: usize,
+    }
+
+    impl UsbBus for DummyUsbInterface {
+        fn alloc_ep(
+            &mut self,
+            ep_dir: usb_device::UsbDirection,
+            ep_addr: Option<EndpointAddress>,
+            ep_type: EndpointType,
+            max_packet_size: u16,
+            interval: u8,
+        ) -> Result<EndpointAddress> {
+            Ok(EndpointAddress::from(0))
+        }
+
+        fn enable(&mut self) {}
+
+        fn reset(&self) {
+            todo!()
+        }
+
+        fn set_device_address(&self, addr: u8) {
+            todo!()
+        }
+
+        fn write(&self, ep_addr: EndpointAddress, buf: &[u8]) -> Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn read(&self, ep_addr: EndpointAddress, buf: &mut [u8]) -> Result<usize> {
+            buf[..self.dummy_read_buffer_size]
+                .clone_from_slice(&self.dummy_read_buffer[..self.dummy_read_buffer_size]);
+            Ok(self.dummy_read_buffer_size)
+        }
+
+        fn set_stalled(&self, ep_addr: EndpointAddress, stalled: bool) {
+            todo!()
+        }
+
+        fn is_stalled(&self, ep_addr: EndpointAddress) -> bool {
+            todo!()
+        }
+
+        fn suspend(&self) {
+            todo!()
+        }
+
+        fn resume(&self) {
+            todo!()
+        }
+
+        fn poll(&self) -> usb_device::bus::PollResult {
+            todo!()
+        }
+
+        const QUIRK_SET_ADDRESS_BEFORE_STATUS: bool = false;
+    }
+
+    #[test]
+    fn test_cmsisdap_process() {
+        let io = DummyIo;
+        let mut dummy_usb_interface = DummyUsbInterface {
+            dummy_read_buffer: [0; 64],
+            dummy_read_buffer_size: 0,
+        };
+
+        // overrun test
+        dummy_usb_interface.dummy_read_buffer[0] = 0x1D; // SWD_Sequence
+        let count = 8_usize;
+        dummy_usb_interface.dummy_read_buffer[1] = count as u8; // Sequence count
+        for i in 0..count {
+            // Sequence Info
+            dummy_usb_interface.dummy_read_buffer[2 + i] = 1 << 7; // 64 bit input
+        }
+        dummy_usb_interface.dummy_read_buffer_size = 10;
+        // no SWDIO Data
+        let usb = UsbBusAllocator::new(dummy_usb_interface);
+        let mut dap: CmsisDap<DummyUsbInterface, DummyIo, 64> = CmsisDap::new(&usb, io);
+        UsbDeviceBuilder::new(&usb, UsbVidPid(0x6666, 0x4444))
+            .manufacturer("fugafuga.org")
+            .product("CMSIS-DAP")
+            .serial_number("serialnumber")
+            .device_class(USB_CLASS_MISCELLANEOUS)
+            .device_class(USB_SUBCLASS_COMMON)
+            .device_protocol(USB_PROTOCOL_IAD)
+            .composite_with_iads()
+            .max_packet_size_0(64)
+            .build();
+        assert_eq!(dap.process().err(), Some(DapError::InternalError));
+
+        // 64 bytes <= sum of multiple command response
+        let io = DummyIo;
+        let mut dummy_usb_interface = DummyUsbInterface {
+            dummy_read_buffer: [0; 64],
+            dummy_read_buffer_size: 0,
+        };
+        // generate 80 byte response
+        for i in 0..8 {
+            // generate 10 byte response
+            dummy_usb_interface.dummy_read_buffer[3 * i] = 0x1D; // SWD_Sequence
+            dummy_usb_interface.dummy_read_buffer[3 * i + 1] = 1; // Sequence count
+            dummy_usb_interface.dummy_read_buffer[3 * i + 2] = 1 << 7; // 64 bit input
+        }
+        dummy_usb_interface.dummy_read_buffer_size = 3 * 8;
+        // no SWDIO Data
+        let usb = UsbBusAllocator::new(dummy_usb_interface);
+        let mut dap: CmsisDap<DummyUsbInterface, DummyIo, 64> = CmsisDap::new(&usb, io);
+        UsbDeviceBuilder::new(&usb, UsbVidPid(0x6666, 0x4444))
+            .manufacturer("fugafuga.org")
+            .product("CMSIS-DAP")
+            .serial_number("serialnumber")
+            .device_class(USB_CLASS_MISCELLANEOUS)
+            .device_class(USB_SUBCLASS_COMMON)
+            .device_protocol(USB_PROTOCOL_IAD)
+            .composite_with_iads()
+            .max_packet_size_0(64)
+            .build();
+        assert!(dap.process().is_ok());
     }
 }
