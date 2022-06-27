@@ -910,8 +910,8 @@ mod test {
     }
 
     struct DummyUsbInterface {
-        dummy_read_buffer: [u8; 64],
-        dummy_read_buffer_size: usize,
+        read_buffer: [u8; 64],
+        read_buffer_size: usize,
     }
 
     impl UsbBus for DummyUsbInterface {
@@ -941,9 +941,9 @@ mod test {
         }
 
         fn read(&self, ep_addr: EndpointAddress, buf: &mut [u8]) -> Result<usize> {
-            buf[..self.dummy_read_buffer_size]
-                .clone_from_slice(&self.dummy_read_buffer[..self.dummy_read_buffer_size]);
-            Ok(self.dummy_read_buffer_size)
+            buf[..self.read_buffer_size]
+                .clone_from_slice(&self.read_buffer[..self.read_buffer_size]);
+            Ok(self.read_buffer_size)
         }
 
         fn set_stalled(&self, ep_addr: EndpointAddress, stalled: bool) {
@@ -973,20 +973,20 @@ mod test {
     fn test_cmsisdap_process() {
         let io = DummyIo;
         let mut dummy_usb_interface = DummyUsbInterface {
-            dummy_read_buffer: [0; 64],
-            dummy_read_buffer_size: 0,
+            read_buffer: [0; 64],
+            read_buffer_size: 0,
         };
 
         // overrun test
         // 64 bytes <= single command response
-        dummy_usb_interface.dummy_read_buffer[0] = 0x1D; // SWD_Sequence
+        dummy_usb_interface.read_buffer[0] = 0x1D; // SWD_Sequence
         let count = 8_usize;
-        dummy_usb_interface.dummy_read_buffer[1] = count as u8; // Sequence count
+        dummy_usb_interface.read_buffer[1] = count as u8; // Sequence count
         for i in 0..count {
             // Sequence Info
-            dummy_usb_interface.dummy_read_buffer[2 + i] = 1 << 7; // 64 bit input
+            dummy_usb_interface.read_buffer[2 + i] = 1 << 7; // 64 bit input
         }
-        dummy_usb_interface.dummy_read_buffer_size = 10;
+        dummy_usb_interface.read_buffer_size = 10;
         // no SWDIO Data
         let usb = UsbBusAllocator::new(dummy_usb_interface);
         let mut dap: CmsisDap<DummyUsbInterface, DummyIo, 64> = CmsisDap::new(&usb, io);
@@ -1000,22 +1000,22 @@ mod test {
             .composite_with_iads()
             .max_packet_size_0(64)
             .build();
-        assert_eq!(dap.process().err(), Some(DapError::InternalError));
+        assert!(dap.process().is_ok());
 
         // 64 bytes <= sum of multiple command response
         let io = DummyIo;
         let mut dummy_usb_interface = DummyUsbInterface {
-            dummy_read_buffer: [0; 64],
-            dummy_read_buffer_size: 0,
+            read_buffer: [0; 64],
+            read_buffer_size: 0,
         };
         // generate 80 byte response
         for i in 0..8 {
             // generate 10 byte response
-            dummy_usb_interface.dummy_read_buffer[3 * i] = 0x1D; // SWD_Sequence
-            dummy_usb_interface.dummy_read_buffer[3 * i + 1] = 1; // Sequence count
-            dummy_usb_interface.dummy_read_buffer[3 * i + 2] = 1 << 7; // 64 bit input
+            dummy_usb_interface.read_buffer[3 * i] = 0x1D; // SWD_Sequence
+            dummy_usb_interface.read_buffer[3 * i + 1] = 1; // Sequence count
+            dummy_usb_interface.read_buffer[3 * i + 2] = 1 << 7; // 64 bit input
         }
-        dummy_usb_interface.dummy_read_buffer_size = 3 * 8;
+        dummy_usb_interface.read_buffer_size = 3 * 8;
         // no SWDIO Data
         let usb = UsbBusAllocator::new(dummy_usb_interface);
         let mut dap: CmsisDap<DummyUsbInterface, DummyIo, 64> = CmsisDap::new(&usb, io);
