@@ -1,28 +1,25 @@
+use embedded_hal::digital::v2::{InputPin, IoPin, OutputPin, PinState};
+use xiao_m0::hal::gpio::v2::pin::{Disabled, Floating, Input, Output, Pin, PinId, PushPull};
 
-use embedded_hal::digital::v2::{InputPin, OutputPin, IoPin, PinState};
-use xiao_m0::hal::gpio::v2::pin::{Pin, PinId, Input, Output, Disabled, Floating, PushPull};
-
-pub struct XiaoSwdInputPin<I> 
+pub struct XiaoSwdInputPin<I>
 where
-    I: PinId
+    I: PinId,
 {
     pin: Pin<I, Input<Floating>>,
 }
 
-impl<I> XiaoSwdInputPin<I> 
+impl<I> XiaoSwdInputPin<I>
 where
-    I: PinId
+    I: PinId,
 {
     pub fn new(pin: Pin<I, Input<Floating>>) -> Self {
-        Self {
-            pin: pin,
-        }
+        Self { pin: pin }
     }
 }
 
-impl<I> InputPin for XiaoSwdInputPin<I> 
+impl<I> InputPin for XiaoSwdInputPin<I>
 where
-    I: PinId
+    I: PinId,
 {
     type Error = core::convert::Infallible;
     fn is_high(&self) -> Result<bool, Self::Error> {
@@ -33,8 +30,7 @@ where
     }
 }
 
-
-impl<I> IoPin<XiaoSwdInputPin<I>, XiaoSwdOutputPin<I>> for XiaoSwdInputPin<I> 
+impl<I> IoPin<XiaoSwdInputPin<I>, XiaoSwdOutputPin<I>> for XiaoSwdInputPin<I>
 where
     I: PinId,
 {
@@ -49,25 +45,23 @@ where
         Ok(new_pin)
     }
 }
-pub struct XiaoSwdOutputPin<I> 
+pub struct XiaoSwdOutputPin<I>
 where
     I: PinId,
 {
     pin: Pin<I, Output<PushPull>>,
 }
 
-impl<I> XiaoSwdOutputPin<I> 
+impl<I> XiaoSwdOutputPin<I>
 where
     I: PinId,
 {
     pub fn new(pin: Pin<I, Output<PushPull>>) -> Self {
-        Self {
-            pin: pin,
-        }
+        Self { pin: pin }
     }
 }
 
-impl<I> OutputPin for XiaoSwdOutputPin<I> 
+impl<I> OutputPin for XiaoSwdOutputPin<I>
 where
     I: PinId,
 {
@@ -83,8 +77,7 @@ where
     }
 }
 
-
-impl<I> IoPin<XiaoSwdInputPin<I>, XiaoSwdOutputPin<I>> for XiaoSwdOutputPin<I> 
+impl<I> IoPin<XiaoSwdInputPin<I>, XiaoSwdOutputPin<I>> for XiaoSwdOutputPin<I>
 where
     I: PinId,
 {

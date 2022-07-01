@@ -15,18 +15,19 @@
 // limitations under the License.
 
 use crate::cmsis_dap::*;
-use embedded_hal::digital::v2::{InputPin, OutputPin, IoPin, PinState};
+use embedded_hal::digital::v2::{InputPin, IoPin, OutputPin, PinState};
 
 pub trait DelayFunc {
     fn cycle_delay(&self, cycles: u32);
 }
 
 pub struct SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn>
-    where SwClkInputPin: InputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
-          SwClkOutputPin: OutputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
-          SwdIoInputPin: InputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
-          SwdIoOutputPin: OutputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
-          DelayFn: DelayFunc,
+where
+    SwClkInputPin: InputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
+    SwClkOutputPin: OutputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
+    SwdIoInputPin: InputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
+    SwdIoOutputPin: OutputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
+    DelayFn: DelayFunc,
 {
     swdio_in: Option<SwdIoInputPin>,
     swdio_out: Option<SwdIoOutputPin>,
@@ -35,14 +36,16 @@ pub struct SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin
     cycle_delay: DelayFn,
 }
 
-impl <SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn> SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn>
-    where SwClkInputPin: InputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
-          SwClkOutputPin: OutputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
-          SwdIoInputPin: InputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
-          SwdIoOutputPin: OutputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
-          DelayFn: DelayFunc
+impl<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn>
+    SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn>
+where
+    SwClkInputPin: InputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
+    SwClkOutputPin: OutputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
+    SwdIoInputPin: InputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
+    SwdIoOutputPin: OutputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
+    DelayFn: DelayFunc,
 {
-    pub fn new(swclk: SwClkInputPin, swdio: SwdIoInputPin, cycle_delay: DelayFn) -> Self{
+    pub fn new(swclk: SwClkInputPin, swdio: SwdIoInputPin, cycle_delay: DelayFn) -> Self {
         Self {
             swdio_in: Some(swdio),
             swdio_out: None,
@@ -53,41 +56,67 @@ impl <SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn> Swd
     }
 }
 
-impl <SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn> BitBangSwdIo for SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn>
-    where SwClkInputPin: InputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
-          SwClkOutputPin: OutputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
-          SwdIoInputPin: InputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
-          SwdIoOutputPin: OutputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
-          DelayFn: DelayFunc
+impl<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn> BitBangSwdIo
+    for SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn>
+where
+    SwClkInputPin: InputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
+    SwClkOutputPin: OutputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
+    SwdIoInputPin: InputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
+    SwdIoOutputPin: OutputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
+    DelayFn: DelayFunc,
 {
     fn to_swclk_in(&mut self) {
         let mut pin = None;
         core::mem::swap(&mut pin, &mut self.swclk_out);
         if let Some(swclk_out) = pin {
-            self.swclk_in = Some(swclk_out.into_input_pin().unwrap_or_else(|_| panic!("Failed to turn SWCLK pin to input.")));
+            self.swclk_in = Some(
+                swclk_out
+                    .into_input_pin()
+                    .unwrap_or_else(|_| panic!("Failed to turn SWCLK pin to input.")),
+            );
         }
     }
     fn to_swclk_out(&mut self, output: bool) {
         let mut pin = None;
         core::mem::swap(&mut pin, &mut self.swclk_in);
         if let Some(swclk_in) = pin {
-            let state = if output { PinState::High } else { PinState::Low };
-            self.swclk_out = Some(swclk_in.into_output_pin(state).unwrap_or_else(|_| panic!("Failed to turn SWCLK pin to output.")));
+            let state = if output {
+                PinState::High
+            } else {
+                PinState::Low
+            };
+            self.swclk_out = Some(
+                swclk_in
+                    .into_output_pin(state)
+                    .unwrap_or_else(|_| panic!("Failed to turn SWCLK pin to output.")),
+            );
         }
     }
     fn to_swdio_in(&mut self) {
         let mut pin = None;
         core::mem::swap(&mut pin, &mut self.swdio_out);
         if let Some(swdio_out) = pin {
-            self.swdio_in = Some(swdio_out.into_input_pin().unwrap_or_else(|_| panic!("Failed to turn SWDIO pin to input.")));
+            self.swdio_in = Some(
+                swdio_out
+                    .into_input_pin()
+                    .unwrap_or_else(|_| panic!("Failed to turn SWDIO pin to input.")),
+            );
         }
     }
     fn to_swdio_out(&mut self, output: bool) {
         let mut pin = None;
         core::mem::swap(&mut pin, &mut self.swdio_in);
         if let Some(swdio_in) = pin {
-            let state = if output { PinState::High } else { PinState::Low };
-            self.swdio_out = Some(swdio_in.into_output_pin(state).unwrap_or_else(|_| panic!("Failed to turn SWDIO pin to output.")));
+            let state = if output {
+                PinState::High
+            } else {
+                PinState::Low
+            };
+            self.swdio_out = Some(
+                swdio_in
+                    .into_output_pin(state)
+                    .unwrap_or_else(|_| panic!("Failed to turn SWDIO pin to output.")),
+            );
         }
     }
     fn set_swclk_output(&mut self, output: bool) {
@@ -109,9 +138,10 @@ impl <SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn> Bit
         });
     }
     fn get_swdio_input(&mut self) -> bool {
-        self.swdio_in.as_mut().and_then(|p| {
-            Some(p.is_high().unwrap_or(false))
-        }).unwrap()
+        self.swdio_in
+            .as_mut()
+            .and_then(|p| Some(p.is_high().unwrap_or(false)))
+            .unwrap()
     }
     fn clock_wait(&self, config: &SwdIoConfig) {
         self.cycle_delay.cycle_delay(config.clock_wait_cycles);
