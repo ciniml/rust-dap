@@ -16,11 +16,11 @@
 
 #![no_std]
 
-mod interface;
-mod cmsis_dap;
-mod cursor;
 #[cfg(feature = "bitbang")]
 pub mod bitbang;
+mod cmsis_dap;
+mod cursor;
+mod interface;
 
-pub use crate::interface::*;
 pub use crate::cmsis_dap::*;
+pub use crate::interface::*;

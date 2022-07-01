@@ -36,7 +36,9 @@ mod app {
     use embedded_hal::serial::{Read, Write};
 
     use rust_dap_rp2040::line_coding::*;
-    use rust_dap_rp2040::util::{UartConfigAndClock, initialize_usb, read_usb_serial_byte_cs, write_usb_serial_byte_cs};
+    use rust_dap_rp2040::util::{
+        initialize_usb, read_usb_serial_byte_cs, write_usb_serial_byte_cs, UartConfigAndClock,
+    };
     type SwdIoSet = rust_dap_rp2040::util::SwdIoSet<GpioSwClk, GpioSwdIo>;
 
     // GPIO mappings

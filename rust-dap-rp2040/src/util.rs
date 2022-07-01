@@ -24,14 +24,20 @@ use usb_device::{class_prelude::UsbBusAllocator, UsbError};
 use usbd_serial::SerialPort;
 
 #[cfg(feature = "bitbang")]
-use rust_dap::bitbang::{DelayFunc, SwdIoSet as BitbangSwdIoSet};
-#[cfg(feature = "bitbang")]
 use crate::swdio_pin::{PicoSwdInputPin, PicoSwdOutputPin};
 #[cfg(feature = "bitbang")]
-pub type SwdIoSet<C, D> = BitbangSwdIoSet<PicoSwdInputPin<C>, PicoSwdOutputPin<C>, PicoSwdInputPin<D>, PicoSwdOutputPin<D>, CycleDelay>;
+use rust_dap::bitbang::{DelayFunc, SwdIoSet as BitbangSwdIoSet};
+#[cfg(feature = "bitbang")]
+pub type SwdIoSet<C, D> = BitbangSwdIoSet<
+    PicoSwdInputPin<C>,
+    PicoSwdOutputPin<C>,
+    PicoSwdInputPin<D>,
+    PicoSwdOutputPin<D>,
+    CycleDelay,
+>;
 
 #[cfg(not(feature = "bitbang"))]
-use crate::pio::{SwdIoSet as PioSwdIoSet, pio0};
+use crate::pio::{pio0, SwdIoSet as PioSwdIoSet};
 #[cfg(not(feature = "bitbang"))]
 pub type SwdIoSet<C, D> = PioSwdIoSet<pio0::Pin<C>, pio0::Pin<D>>;
 

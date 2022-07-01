@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests {
-    use serialport;
     use core::time::Duration;
-    use std::thread::spawn;
-    use std::sync::mpsc::channel;
     use rand::Rng;
+    use serialport;
+    use std::sync::mpsc::channel;
+    use std::thread::spawn;
 
     #[test]
     fn loopback() {
@@ -17,7 +17,7 @@ mod tests {
                 eprintln!("Failed to open \"{}\"", e);
                 ::std::process::exit(1);
             });
-        
+
         const NUMBER_OF_TRANSFERS: usize = 50;
         const BUFFER_SIZE: usize = 32;
 
@@ -33,10 +33,10 @@ mod tests {
             let buffer = vec![0u8; BUFFER_SIZE];
             rx_send.send(buffer).unwrap();
         }
-        
+
         let mut read_port = port.try_clone().expect("Failed to clone port.");
         let mut write_port = port;
-        
+
         let write_thread = spawn(move || {
             let mut rng = rand::thread_rng();
             for _ in 0..NUMBER_OF_TRANSFERS {
