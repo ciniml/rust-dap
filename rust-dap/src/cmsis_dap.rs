@@ -119,6 +119,7 @@ fn write_buffer(buffer: &mut [u8], data: &[u8]) -> core::result::Result<usize, C
     writer.write(data).map(|_| data.len())
 }
 
+#[derive(Debug, PartialEq)]
 pub enum DapError {
     InvalidCommand,
     InvalidDapInfoId,
@@ -231,59 +232,92 @@ where
 
     pub fn process(&mut self) -> core::result::Result<(), DapError> {
         self.process_out_packet().ok();
-        if self.pending_out_packet_size > 0 && self.next_in_packet_size == None {
-            let mut response_length = 0;
-            let mut bytes_processed = 0;
-            while bytes_processed < self.pending_out_packet_size {
-                let command_byte = self.pending_out_packet[bytes_processed];
-                self.next_in_packet[response_length] = command_byte;
-                response_length += 1;
-                bytes_processed += 1;
-
-                if let Ok(command) = DapCommandId::try_from_primitive(command_byte) {
-                    let request = self.pending_out_packet
-                        [bytes_processed..self.pending_out_packet_size]
-                        .borrow();
-                    let response = self.next_in_packet[response_length..].borrow_mut();
-
-                    let result = match command {
-                        DapCommandId::Info => dap_info(request, response),
-                        DapCommandId::HostStatus => dap_host_status(request, response),
-                        DapCommandId::Connect => dap_connect(&mut self.io, request, response),
-                        DapCommandId::Disconnect => dap_disconnect(&mut self.io, request, response),
-                        DapCommandId::TransferConfigure => {
-                            swd_transfer_config(&mut self.config, &mut self.io, request, response)
-                        }
-                        DapCommandId::Transfer => {
-                            swd_transfer(&mut self.config, &mut self.io, request, response)
-                        }
-                        DapCommandId::TransferBlock => {
-                            swd_transfer_block(&mut self.config, &mut self.io, request, response)
-                        }
-                        DapCommandId::SWJClock => swj_clock(request, response),
-                        DapCommandId::SWJSequence => {
-                            swj_sequence(&self.config, &mut self.io, request, response)
-                        }
-                        DapCommandId::SWDConfigure => {
-                            swd_config(&mut self.config, request, response)
-                        }
-                        DapCommandId::SWDSequence => {
-                            swd_sequence(&self.config, &mut self.io, request, response)
-                        }
-                        _ => Err(DapError::InvalidCommand),
-                    };
-                    if let Ok((request_processed, response_generated)) = result {
-                        bytes_processed += request_processed;
-                        response_length += response_generated;
-                    }
-                } else {
-                    // Just ignore the command.
-                }
-            }
-            self.next_in_packet_size = Some(response_length);
-            self.pending_out_packet_size = 0;
+        if self.pending_out_packet_size == 0 || self.next_in_packet_size.is_some() {
+            // nothing to do
+            self.send_next_packet().ok();
+            return Ok(());
         }
+
+        let mut response_packet_length = 0;
+        let mut bytes_processed = 0;
+        while bytes_processed < self.pending_out_packet_size {
+            // process command packets
+            let command_byte = self.pending_out_packet[bytes_processed];
+            bytes_processed += 1;
+
+            if let Ok(command) = DapCommandId::try_from_primitive(command_byte) {
+                let request =
+                    &self.pending_out_packet[bytes_processed..self.pending_out_packet_size];
+                let mut response = [0; MAX_PACKET_SIZE];
+                response[0] = command_byte;
+                let response_body = &mut response[1..];
+
+                let result = match command {
+                    DapCommandId::Info => dap_info(request, response_body),
+                    DapCommandId::HostStatus => dap_host_status(request, response_body),
+                    DapCommandId::Connect => dap_connect(&mut self.io, request, response_body),
+                    DapCommandId::Disconnect => {
+                        dap_disconnect(&mut self.io, request, response_body)
+                    }
+                    DapCommandId::TransferConfigure => {
+                        swd_transfer_config(&mut self.config, &mut self.io, request, response_body)
+                    }
+                    DapCommandId::Transfer => {
+                        swd_transfer(&mut self.config, &mut self.io, request, response_body)
+                    }
+                    DapCommandId::TransferBlock => {
+                        swd_transfer_block(&mut self.config, &mut self.io, request, response_body)
+                    }
+                    DapCommandId::SWJClock => swj_clock(request, response_body),
+                    DapCommandId::SWJSequence => {
+                        swj_sequence(&self.config, &mut self.io, request, response_body)
+                    }
+                    DapCommandId::SWDConfigure => {
+                        swd_config(&mut self.config, request, response_body)
+                    }
+                    DapCommandId::SWDSequence => {
+                        swd_sequence(&self.config, &mut self.io, request, response_body)
+                    }
+                    _ => Err(DapError::InvalidCommand),
+                };
+
+                let (request_processed, response_generated) = match result {
+                    Ok(x) => (x.0, x.1),
+                    Err(_) => {
+                        response_body[0] = 0xFF; // DAP_ERROR
+                        (0, 1)
+                    }
+                };
+
+                bytes_processed += request_processed;
+
+                if MAX_PACKET_SIZE < response_generated {
+                    // the packet larger than MAX_PACKET_SIZE bytes cannot be sent
+                    // due to USB specifications.
+                    response[1] = 0xFF; // DAP_ERROR
+                }
+
+                if MAX_PACKET_SIZE <= (response_packet_length + response_generated) {
+                    // Send packet when the total of responses exceeds the size of MAX_PACKET_SIZE
+                    self.next_in_packet_size = Some(response_packet_length);
+                    self.send_next_packet().ok();
+                    response_packet_length = 0;
+                }
+
+                // command_byte(1byte) + response_generated(? size)
+                let response_size = 1 + response_generated;
+                for d in response[..response_size].iter() {
+                    self.next_in_packet[response_packet_length] = *d;
+                    response_packet_length += 1;
+                }
+            } else {
+                // Just ignore the command.
+            }
+        }
+        self.next_in_packet_size = Some(response_packet_length);
+        self.pending_out_packet_size = 0;
         self.send_next_packet().ok();
+
         Ok(())
     }
 }
@@ -834,5 +868,167 @@ fn swd_transfer<Swd: SwdIo>(
             |_| DAP_TRANSFER_OK,
         );
         Ok((request.get_position(), response.get_position() + 2))
+    }
+}
+
+mod test {
+    use super::*;
+    use usb_device::prelude::*;
+
+    struct DummyIo;
+    impl SwdIo for DummyIo {
+        fn connect(&mut self) {
+            todo!()
+        }
+
+        fn disconnect(&mut self) {
+            todo!()
+        }
+
+        fn swj_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]) {
+            todo!()
+        }
+
+        fn swd_read_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &mut [u8]) {}
+
+        fn swd_write_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]) {
+            todo!()
+        }
+
+        fn swd_transfer(
+            &mut self,
+            config: &SwdIoConfig,
+            request: SwdRequest,
+            data: u32,
+        ) -> core::result::Result<u32, DapError> {
+            todo!()
+        }
+
+        fn enable_output(&mut self) {}
+
+        fn disable_output(&mut self) {}
+    }
+
+    struct DummyUsbInterface {
+        read_buffer: [u8; 64],
+        read_buffer_size: usize,
+    }
+
+    impl UsbBus for DummyUsbInterface {
+        fn alloc_ep(
+            &mut self,
+            ep_dir: usb_device::UsbDirection,
+            ep_addr: Option<EndpointAddress>,
+            ep_type: EndpointType,
+            max_packet_size: u16,
+            interval: u8,
+        ) -> Result<EndpointAddress> {
+            Ok(EndpointAddress::from(0))
+        }
+
+        fn enable(&mut self) {}
+
+        fn reset(&self) {
+            todo!()
+        }
+
+        fn set_device_address(&self, addr: u8) {
+            todo!()
+        }
+
+        fn write(&self, ep_addr: EndpointAddress, buf: &[u8]) -> Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn read(&self, ep_addr: EndpointAddress, buf: &mut [u8]) -> Result<usize> {
+            buf[..self.read_buffer_size]
+                .clone_from_slice(&self.read_buffer[..self.read_buffer_size]);
+            Ok(self.read_buffer_size)
+        }
+
+        fn set_stalled(&self, ep_addr: EndpointAddress, stalled: bool) {
+            todo!()
+        }
+
+        fn is_stalled(&self, ep_addr: EndpointAddress) -> bool {
+            todo!()
+        }
+
+        fn suspend(&self) {
+            todo!()
+        }
+
+        fn resume(&self) {
+            todo!()
+        }
+
+        fn poll(&self) -> usb_device::bus::PollResult {
+            todo!()
+        }
+
+        const QUIRK_SET_ADDRESS_BEFORE_STATUS: bool = false;
+    }
+
+    #[test]
+    fn test_cmsisdap_process() {
+        let io = DummyIo;
+        let mut dummy_usb_interface = DummyUsbInterface {
+            read_buffer: [0; 64],
+            read_buffer_size: 0,
+        };
+
+        // overrun test
+        // 64 bytes <= single command response
+        dummy_usb_interface.read_buffer[0] = 0x1D; // SWD_Sequence
+        let count = 8_usize;
+        dummy_usb_interface.read_buffer[1] = count as u8; // Sequence count
+        for i in 0..count {
+            // Sequence Info
+            dummy_usb_interface.read_buffer[2 + i] = 1 << 7; // 64 bit input
+        }
+        dummy_usb_interface.read_buffer_size = 10;
+        // no SWDIO Data
+        let usb = UsbBusAllocator::new(dummy_usb_interface);
+        let mut dap: CmsisDap<DummyUsbInterface, DummyIo, 64> = CmsisDap::new(&usb, io);
+        UsbDeviceBuilder::new(&usb, UsbVidPid(0x6666, 0x4444))
+            .manufacturer("fugafuga.org")
+            .product("CMSIS-DAP")
+            .serial_number("serialnumber")
+            .device_class(USB_CLASS_MISCELLANEOUS)
+            .device_class(USB_SUBCLASS_COMMON)
+            .device_protocol(USB_PROTOCOL_IAD)
+            .composite_with_iads()
+            .max_packet_size_0(64)
+            .build();
+        assert!(dap.process().is_ok());
+
+        // 64 bytes <= sum of multiple command response
+        let io = DummyIo;
+        let mut dummy_usb_interface = DummyUsbInterface {
+            read_buffer: [0; 64],
+            read_buffer_size: 0,
+        };
+        // generate 80 byte response
+        for i in 0..8 {
+            // generate 10 byte response
+            dummy_usb_interface.read_buffer[3 * i] = 0x1D; // SWD_Sequence
+            dummy_usb_interface.read_buffer[3 * i + 1] = 1; // Sequence count
+            dummy_usb_interface.read_buffer[3 * i + 2] = 1 << 7; // 64 bit input
+        }
+        dummy_usb_interface.read_buffer_size = 3 * 8;
+        // no SWDIO Data
+        let usb = UsbBusAllocator::new(dummy_usb_interface);
+        let mut dap: CmsisDap<DummyUsbInterface, DummyIo, 64> = CmsisDap::new(&usb, io);
+        UsbDeviceBuilder::new(&usb, UsbVidPid(0x6666, 0x4444))
+            .manufacturer("fugafuga.org")
+            .product("CMSIS-DAP")
+            .serial_number("serialnumber")
+            .device_class(USB_CLASS_MISCELLANEOUS)
+            .device_class(USB_SUBCLASS_COMMON)
+            .device_protocol(USB_PROTOCOL_IAD)
+            .composite_with_iads()
+            .max_packet_size_0(64)
+            .build();
+        assert!(dap.process().is_ok());
     }
 }
