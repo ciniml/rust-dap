@@ -8,6 +8,7 @@
 | GND     | GND    | GND          |
 | 8       | GPIO2  | SWCLK        |
 | 9       | GPIO4  | SWDIO        |
+| 0       | GPIO26 | RESET        |
 
 ## 使い方
 
