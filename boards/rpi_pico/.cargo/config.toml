@@ -4,6 +4,7 @@ target = "thumbv6m-none-eabi"
 [target.thumbv6m-none-eabi]
 runner = "elf2uf2-rs -d"
 #runner = "picotool load -x -t elf"
+#runner = "probe-run --probe xiao-rp2040 --chip RP2040" # Program target with rust-dap on XIAO RP2040 (for rust-dap RP2040 development board)
 rustflags = [
   "-C", "link-arg=-Tlink.x", "-C", "link-arg=--nmagic",
 ]
