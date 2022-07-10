@@ -503,4 +503,21 @@ impl<C, D> CmsisDapCommandInner for SwdIoSet<C, D> {
         Err(DapError::InvalidCommand)
     }
 
+    fn jtag_idcode(
+        &self,
+        _config: &mut CmsisDapConfig,
+        _request: &[u8],
+        _response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        Err(DapError::InvalidCommand)
+    }
+
+    fn jtag_sequence(
+        &mut self,
+        _config: &CmsisDapConfig,
+        _sequence_info: &JtagSequenceInfo,
+        _tdi_data: u64,
+    ) -> core::result::Result<Option<u64>, DapError> {
+        Err(DapError::InvalidCommand)
+    }
 }

@@ -12,7 +12,9 @@ debug = 2
 
 [features]
 bitbang = ["rust-dap/bitbang", "rust-dap-rp2040/bitbang"]
+jtag = ["bitbang"]
 swd = []
+swj = []
 
 [dependencies]
 rust-dap = { path = "../../rust-dap", features = ["unproven"] }

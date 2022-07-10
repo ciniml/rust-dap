@@ -45,6 +45,9 @@ enum DapCommandId {
     SWJSequence = 0x12,
     SWDConfigure = 0x13,
     SWDSequence = 0x1d,
+    JTAGSequence = 0x14,
+    JTAGConfigure = 0x15,
+    JTAGIdcode = 0x16,
 }
 
 #[derive(IntoPrimitive, TryFromPrimitive)]
@@ -105,6 +108,14 @@ pub struct SwdIoConfig {
     pub always_generate_data_phase: bool,
 }
 
+#[derive(Clone, Copy)]
+pub struct JtagIoConfig {
+    pub clock_wait_cycles: u32,
+    pub device_count: u8,
+    pub ir_length: [u8; 256],
+    pub idle_cycles: u32,
+}
+
 pub trait SwdIo {
     fn connect(&mut self);
     fn disconnect(&mut self);
@@ -122,6 +133,43 @@ pub trait SwdIo {
 }
 
 pub trait SwjIo {}
+
+pub trait JtagIo {
+    fn connect(&mut self, config: &JtagIoConfig);
+    fn disconnect(&mut self, config: &JtagIoConfig);
+    fn swj_sequence(&mut self, config: &JtagIoConfig, count: usize, data: &[u8]);
+    fn jtag_read_sequence(
+        &mut self,
+        config: &JtagIoConfig,
+        clock_count: usize,
+        tms_value: bool,
+        tdi_data: u64,
+    ) -> u64;
+    fn jtag_write_sequence(
+        &mut self,
+        config: &JtagIoConfig,
+        clock_count: usize,
+        tms_value: bool,
+        tdi_data: u64,
+    );
+    fn jtag_idcode(
+        &mut self,
+        config: &JtagIoConfig,
+        index: u8,
+    ) -> core::result::Result<u32, DapError>;
+
+    fn jtag_transfer(
+        &mut self,
+        config: &JtagIoConfig,
+        dap_index: u8,
+        request: SwdRequest,
+        data: u32,
+    ) -> core::result::Result<u32, DapError>;
+
+    fn write_ir(&mut self, config: &JtagIoConfig, dap_index: u8, ir: u32);
+    fn write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &[bool]);
+    fn read_write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &mut [bool]);
+}
 
 pub const DAP_OK: u8 = 0x00;
 pub const DAP_ERROR: u8 = 0xff;
@@ -188,8 +236,20 @@ impl Default for SwdIoConfig {
     }
 }
 
+impl Default for JtagIoConfig {
+    fn default() -> Self {
+        Self {
+            clock_wait_cycles: 1000,
+            device_count: 0,
+            ir_length: [0; 256],
+            idle_cycles: 0,
+        }
+    }
+}
+
 pub struct CmsisDapConfig {
     pub swdio: SwdIoConfig,
+    pub jtag: JtagIoConfig,
     pub retry_count: u32,
     pub match_mask: u32,
     pub match_retry_count: u32,
@@ -200,6 +260,7 @@ impl Default for CmsisDapConfig {
     fn default() -> Self {
         Self {
             swdio: SwdIoConfig::default(),
+            jtag: JtagIoConfig::default(),
             retry_count: 5,
             match_mask: 0xffffffff,
             match_retry_count: 5,
@@ -208,10 +269,25 @@ impl Default for CmsisDapConfig {
     }
 }
 
+pub struct JtagSequenceInfo {
+    pub number_of_tck_cycles: usize,
+    pub tms_value: bool,
+    pub tdo_capture: bool,
+}
 
+impl From<u8> for JtagSequenceInfo {
+    fn from(sequence_info: u8) -> Self {
+        JtagSequenceInfo {
+            tdo_capture: (sequence_info & (1 << 7)) != 0,
+            tms_value: (sequence_info & (1 << 6)) != 0,
+            number_of_tck_cycles: if sequence_info & 0b0011_1111 == 0 {
+                64
             } else {
+                (sequence_info & 0x3f) as usize
+            },
         }
     }
+}
 
 pub trait CmsisDapCommandInner {
     fn connect(&mut self, config: &CmsisDapConfig);
@@ -224,6 +300,12 @@ pub trait CmsisDapCommandInner {
         response: &mut [u8],
     ) -> core::result::Result<(usize, usize), DapError>;
 
+    fn jtag_sequence(
+        &mut self,
+        config: &CmsisDapConfig,
+        sequence_info: &JtagSequenceInfo,
+        tdi_data: u64,
+    ) -> core::result::Result<Option<u64>, DapError>;
 
     fn transfer_inner_with_retry(
         &mut self,
@@ -289,6 +371,12 @@ pub trait CmsisDapCommandInner {
         wait_us: u32,
     ) -> core::result::Result<u8, DapError>;
 
+    fn jtag_idcode(
+        &self,
+        config: &mut CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError>;
 }
 
 pub trait CmsisDapCommand {
@@ -401,6 +489,24 @@ pub trait CmsisDapCommand {
         response: &mut [u8],
     ) -> core::result::Result<(usize, usize), DapError>;
 
+    fn jtag_sequence(
+        &mut self,
+        config: &CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError>;
+    fn jtag_config(
+        &self,
+        config: &mut CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError>;
+    fn jtag_idcode(
+        &self,
+        config: &mut CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError>;
 }
 
 impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
@@ -854,6 +960,81 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
         CmsisDapCommandInner::swd_sequence(self, config, request, response)
     }
 
+    fn jtag_sequence(
+        &mut self,
+        config: &CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        if request.is_empty() {
+            return Err(DapError::InvalidCommand);
+        }
+
+        // parse command
+        let mut request_proceeded = 0;
+        let sequence_count = request[0];
+        request_proceeded += 1;
+        let mut request = &request[1..];
+
+        let mut response_body = &mut response[1..];
+        let mut response_body_count = 0;
+
+        for _i in 0..sequence_count {
+            let sequence_info = JtagSequenceInfo::from(request[0]);
+            request_proceeded += 1;
+            request = &request[1..];
+
+            // bits to byte
+            let tdi_data_length_byte = (sequence_info.number_of_tck_cycles + 7) / 8;
+            let mut tdi_data = [0; 8];
+            // The value of tdi_data_length_byte may not be 8
+            #[allow(clippy::manual_memcpy)]
+            for i in 0..tdi_data_length_byte {
+                tdi_data[i] = request[i];
+            }
+            let tdi_data = u64::from_le_bytes(tdi_data);
+            request = &request[tdi_data_length_byte..];
+            request_proceeded += tdi_data_length_byte;
+
+            let tdo = CmsisDapCommandInner::jtag_sequence(self, config, &sequence_info, tdi_data)?;
+            if sequence_info.tdo_capture {
+                let tdo = tdo.unwrap().to_le_bytes();
+                response_body[..tdi_data_length_byte]
+                    .clone_from_slice(&tdo[..tdi_data_length_byte]);
+                response_body_count += tdi_data_length_byte;
+                response_body = &mut response_body[tdi_data_length_byte..];
+            }
+        }
+
+        response[0] = DAP_OK;
+        response_body_count += 1;
+        Ok((request_proceeded, response_body_count))
+    }
+
+    fn jtag_config(
+        &self,
+        config: &mut CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        if request.is_empty() {
+            return Err(DapError::InvalidCommand);
+        }
+        let count = request[0];
+        config.jtag.ir_length[..(count as usize)]
+            .clone_from_slice(&request[1..((count as usize) + 1)]);
+        response[0] = DAP_OK;
+        Ok((1, 1))
+    }
+
+    fn jtag_idcode(
+        &self,
+        config: &mut CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        CmsisDapCommandInner::jtag_idcode(self, config, request, response)
+    }
 }
 
 impl<B, T, const MAX_PACKET_SIZE: usize> CmsisDap<'_, B, T, MAX_PACKET_SIZE>
@@ -940,6 +1121,17 @@ where
                     }
                     DapCommandId::SWDSequence => {
                         self.io.swd_sequence(&self.config, request, response_body)
+                    }
+                    DapCommandId::JTAGSequence => {
+                        self.io.jtag_sequence(&self.config, request, response_body)
+                    }
+                    DapCommandId::JTAGConfigure => {
+                        self.io
+                            .jtag_config(&mut self.config, request, response_body)
+                    }
+                    DapCommandId::JTAGIdcode => {
+                        self.io
+                            .jtag_idcode(&mut self.config, request, response_body)
                     } // _ => Err(DapError::InvalidCommand),
                 }?;
 
@@ -1182,6 +1374,33 @@ mod test {
         }
 
         fn swd_config(
+            &self,
+            _config: &mut CmsisDapConfig,
+            _request: &[u8],
+            _response: &mut [u8],
+        ) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
+
+        fn jtag_sequence(
+            &mut self,
+            _config: &CmsisDapConfig,
+            _request: &[u8],
+            _response: &mut [u8],
+        ) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
+
+        fn jtag_config(
+            &self,
+            _config: &mut CmsisDapConfig,
+            _request: &[u8],
+            _response: &mut [u8],
+        ) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
+
+        fn jtag_idcode(
             &self,
             _config: &mut CmsisDapConfig,
             _request: &[u8],

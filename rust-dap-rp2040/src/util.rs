@@ -28,13 +28,29 @@ use usbd_serial::SerialPort;
 #[cfg(feature = "bitbang")]
 use crate::swdio_pin::{PicoSwdInputPin, PicoSwdOutputPin};
 #[cfg(feature = "bitbang")]
-use rust_dap::bitbang::{DelayFunc, SwdIoSet as BitbangSwdIoSet};
+use rust_dap::bitbang::{DelayFunc, JtagIoSet as BitbangJtagIoSet, SwdIoSet as BitbangSwdIoSet};
 #[cfg(feature = "bitbang")]
 pub type SwdIoSet<C, D> = BitbangSwdIoSet<
     PicoSwdInputPin<C>,
     PicoSwdOutputPin<C>,
     PicoSwdInputPin<D>,
     PicoSwdOutputPin<D>,
+    CycleDelay,
+>;
+#[cfg(feature = "bitbang")]
+pub type JtagIoSet<TCK, TMS, TDI, TDO, TRST, SRST> = BitbangJtagIoSet<
+    PicoSwdInputPin<TCK>,
+    PicoSwdOutputPin<TCK>,
+    PicoSwdInputPin<TMS>,
+    PicoSwdOutputPin<TMS>,
+    PicoSwdInputPin<TDI>,
+    PicoSwdOutputPin<TDI>,
+    PicoSwdInputPin<TDO>,
+    PicoSwdOutputPin<TDO>,
+    PicoSwdInputPin<TRST>,
+    PicoSwdOutputPin<TRST>,
+    PicoSwdInputPin<SRST>,
+    PicoSwdOutputPin<SRST>,
     CycleDelay,
 >;
 
