@@ -9,6 +9,7 @@ license = "Apache-2.0"
 
 [features]
 bitbang = ["rust-dap/bitbang", "rust-dap/unproven"]
+pio_set_clock = []
 
 [dependencies]
 rust-dap = { path = "../rust-dap" }

@@ -160,6 +160,12 @@ pub trait BitBangSwdIo {
 }
 
 pub trait PrimitiveSwdIo {
+    /// Number of cycles to wait 1[s].
+    /// This constant is used to calculate wait cycles when swj_clock command is 
+    /// executed. 
+    /// If this constant is None, nothing is performed when swj_clock command is executed.
+    const CYCLES_PER_SECOND: Option<u32> = None;
+
     fn connect(&mut self);
     fn disconnect(&mut self);
     fn enable_output(&mut self);
@@ -236,6 +242,13 @@ impl<Io: PrimitiveSwdIo> SwdIo for Io {
     }
     fn disconnect(&mut self) {
         PrimitiveSwdIo::disconnect(self)
+    }
+    fn swj_clock(&mut self, config: &mut SwdIoConfig, frequency_hz: u32) -> core::result::Result<(), DapError> {
+        match Self::CYCLES_PER_SECOND {
+            Some(cycles_per_second) => config.clock_wait_cycles = if frequency_hz == 0 { 0 } else { cycles_per_second / frequency_hz },   // Update clock_wait_cycles.
+            _ => {},
+        }
+        Ok(())
     }
     fn swj_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]) {
         let mut index = 0;

@@ -96,6 +96,7 @@ pub struct SwdIoConfig {
 pub trait SwdIo {
     fn connect(&mut self);
     fn disconnect(&mut self);
+    fn swj_clock(&mut self, config: &mut SwdIoConfig, frequency_hz: u32) -> core::result::Result<(), DapError>;
     fn swj_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]);
     fn swd_read_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &mut [u8]);
     fn swd_write_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]);
@@ -268,7 +269,7 @@ where
                     DapCommandId::TransferBlock => {
                         swd_transfer_block(&mut self.config, &mut self.io, request, response_body)
                     }
-                    DapCommandId::SWJClock => swj_clock(request, response_body),
+                    DapCommandId::SWJClock => swj_clock(&mut self.config, &mut self.io, request, response_body),
                     DapCommandId::SWJSequence => {
                         swj_sequence(&self.config, &mut self.io, request, response_body)
                     }
@@ -424,14 +425,21 @@ fn dap_host_status(
         Err(DapError::InvalidCommand)
     }
 }
-fn swj_clock(
+fn swj_clock<Swd: SwdIo>(
+    config: &mut CmsisDapConfig,
+    swdio: &mut Swd,
     request: &[u8],
     response: &mut [u8],
 ) -> core::result::Result<(usize, usize), DapError> {
     if request.len() >= 4 {
-        let _clock = u32::from_le_bytes(request.try_into().unwrap());
-        response[0] = DAP_OK;
-        Ok((4, 1))
+        let clock_hz = u32::from_le_bytes(request.try_into().unwrap());
+        if swdio.swj_clock(&mut config.swdio, clock_hz).is_ok() {
+            response[0] = DAP_OK;
+            Ok((4, 1))
+        } else {
+            response[0] = DAP_ERROR;
+            Ok((4, 1))
+        }
     } else {
         Err(DapError::InvalidCommand)
     }
@@ -882,6 +890,10 @@ mod test {
         }
 
         fn disconnect(&mut self) {
+            todo!()
+        }
+
+        fn swj_clock(&mut self, config: &mut SwdIoConfig, frequency_hz: u32) -> core::result::Result<(), DapError> {
             todo!()
         }
 

@@ -26,13 +26,19 @@ pub mod pio0 {
     pub type Pin<P> = hal::gpio::Pin<P, FunctionPio0>;
 }
 
-pub struct SwdIoSet<C, D> {
-    // We only need these infomation at initialization in new() .
-    // clk_pin_id: u8,
-    // dat_pin_id: u8,
+const DEFAULT_PIO_DIVISOR: f32 = 1.0f32; // Default PIO Divisor. Generate 125/8 = 15.625[MHz] SWCLK clock.
+const DEFAULT_SWJ_CLOCK_HZ: u32 = ((125000000 / 8) as f32 / DEFAULT_PIO_DIVISOR) as u32;
+
+struct SwdPioContext {
     running_sm: hal::pio::StateMachine<hal::pio::PIO0SM0, hal::pio::Running>,
     rx_fifo: hal::pio::Rx<hal::pio::PIO0SM0>,
     tx_fifo: hal::pio::Tx<hal::pio::PIO0SM0>,
+}
+
+pub struct SwdIoSet<C, D> {
+    clk_pin_id: u8,
+    dat_pin_id: u8,
+    context: Option<SwdPioContext>,
     _pins: core::marker::PhantomData<(C, D)>,
 }
 
@@ -145,30 +151,20 @@ where
         // Initialize and start PIO
         let (mut pio, sm0, _, _, _) = pio0.split(resets);
         let installed = pio.install(&program).unwrap();
-        // let div = 25f32; // 125MHz / 25 = 5Mhz
-        // let div = 5f32; // 125MHz / 5 = 25Mhz
-        let div = 1f32; // 125MHz / 1 = 125Mhz
-        let (sm, rx, tx) = hal::pio::PIOBuilder::from_program(installed)
-            .set_pins(clk_pin_id, 1)
-            .side_set_pin_base(clk_pin_id)
-            .out_pins(dat_pin_id, 1)
-            .out_shift_direction(hal::pio::ShiftDirection::Right)
-            .in_pin_base(dat_pin_id)
-            .in_shift_direction(hal::pio::ShiftDirection::Right)
-            .clock_divisor(div)
-            .build(sm0);
-
+        let (sm, rx, tx) = Self::build_pio(clk_pin_id, dat_pin_id, installed, DEFAULT_PIO_DIVISOR, sm0);
         // Pin modes are controlled in connect() and disconnect() .
         // sm.set_pindirs([(clk_pin_id, hal::pio::PinDir::Output), (dat_pin_id, hal::pio::PinDir::Output)]);
 
         let running_sm = sm.start();
 
         Self {
-            // clk_pin_id,
-            // dat_pin_id,
-            running_sm,
-            rx_fifo: rx,
-            tx_fifo: tx,
+            clk_pin_id,
+            dat_pin_id,
+            context: Some(SwdPioContext {
+                running_sm,
+                rx_fifo: rx,
+                tx_fifo: tx,
+            }),
             _pins: core::marker::PhantomData,
         }
     }
@@ -176,8 +172,12 @@ where
 
 // Auxiliary low-level function
 impl<C, D> SwdIoSet<C, D> {
+    fn get_context(&mut self) -> &mut SwdPioContext {
+        self.context.as_mut().unwrap()
+    }
+
     fn set_clk_pindir(&mut self, oe: bool) {
-        self.running_sm.exec_instruction(
+        self.get_context().running_sm.exec_instruction(
             pio::InstructionOperands::SET {
                 destination: pio::SetDestination::PINDIRS,
                 data: match oe {
@@ -187,6 +187,62 @@ impl<C, D> SwdIoSet<C, D> {
             }
             .encode(),
         );
+    }
+
+    fn build_pio<P: PIOExt>(
+        clk_pin_id: u8,
+        dat_pin_id: u8,
+        installed: hal::pio::InstalledProgram<P>,
+        divisor: f32,
+        sm0: hal::pio::UninitStateMachine<(P, hal::pio::SM0)>,
+    ) -> (
+        hal::pio::StateMachine<(P, hal::pio::SM0), hal::pio::Stopped>,
+        hal::pio::Rx<(P, hal::pio::SM0)>,
+        hal::pio::Tx<(P, hal::pio::SM0)>,
+    ) {
+        hal::pio::PIOBuilder::from_program(installed)
+            .set_pins(clk_pin_id, 1)
+            .side_set_pin_base(clk_pin_id)
+            .out_pins(dat_pin_id, 1)
+            .out_shift_direction(hal::pio::ShiftDirection::Right)
+            .in_pin_base(dat_pin_id)
+            .in_shift_direction(hal::pio::ShiftDirection::Right)
+            .clock_divisor(divisor)
+            .build(sm0)
+    }
+
+    fn set_clock(&mut self, frequency_hz: u32) {
+        // Calculate divisor.
+        let divisor = if frequency_hz > 0 {
+            ((125000000u32 / 8) / frequency_hz) as f32
+        } else {
+            DEFAULT_PIO_DIVISOR
+        };
+        let divisor = if divisor < 1.0f32 {
+            DEFAULT_PIO_DIVISOR
+        } else {
+            divisor
+        };
+
+        // Stop SM, Reconstruct SM with new divisor.
+        let mut context = None;
+        core::mem::swap(&mut self.context, &mut context);
+        let context = context.unwrap();
+        let (sm0, installed) = context.running_sm.uninit(context.rx_fifo, context.tx_fifo);
+        let (sm0, rx_fifo, tx_fifo) = Self::build_pio(
+            self.clk_pin_id,
+            self.dat_pin_id,
+            installed,
+            divisor as f32,
+            sm0,
+        );
+        let running_sm = sm0.start();
+        let mut new_context = Some(SwdPioContext {
+            running_sm,
+            rx_fifo,
+            tx_fifo,
+        });
+        core::mem::swap(&mut self.context, &mut new_context);
     }
 }
 
@@ -199,6 +255,8 @@ impl<C, D> SwdIoSet<C, D> {
     fn disconnect(&mut self) {
         self.to_swdio_in();
         self.set_clk_pindir(false);
+        // Reset clock
+        //self.set_clock(DEFAULT_SWJ_CLOCK_HZ);
     }
 }
 
@@ -206,14 +264,14 @@ impl<C, D> SwdIoSet<C, D> {
 impl<C, D> SwdIoSet<C, D> {
     // if bits > 32 , it will behave as if value is extended with zeros.
     fn write_bits(&mut self, bits: u32, value: u32) {
-        while !self.tx_fifo.write(bits | 1 << 31) {}
-        while !self.tx_fifo.write(value) {}
+        while !self.get_context().tx_fifo.write(bits | 1 << 31) {}
+        while !self.get_context().tx_fifo.write(value) {}
     }
     // if bits > 32 , result is undefined.
     fn read_bits(&mut self, bits: u32) -> u32 {
-        while !self.tx_fifo.write(bits | 0) {}
-        while self.rx_fifo.is_empty() {}
-        let value = unsafe { self.rx_fifo.read().unwrap_unchecked() };
+        while !self.get_context().tx_fifo.write(bits | 0) {}
+        while self.get_context().rx_fifo.is_empty() {}
+        let value = unsafe { self.get_context().rx_fifo.read().unwrap_unchecked() };
         value >> ((32 - bits) & 31)
     }
 }
@@ -264,6 +322,16 @@ impl<C, D> SwdIo for SwdIoSet<C, D> {
     fn disconnect(&mut self) {
         self.disconnect();
     }
+    fn swj_clock(
+        &mut self,
+        _config: &mut SwdIoConfig,
+        #[allow(unused_variables)] frequency_hz: u32,
+    ) -> core::result::Result<(), DapError> {
+        #[cfg(feature = "pio_set_clock")]
+        self.set_clock(frequency_hz);
+        Ok(())
+    }
+
     fn swj_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]) {
         self.swd_write_sequence(config, count, data);
     }

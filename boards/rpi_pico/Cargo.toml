@@ -15,7 +15,7 @@ bitbang = ["rust-dap/bitbang", "rust-dap-rp2040/bitbang"]
 
 [dependencies]
 rust-dap = { path = "../../rust-dap", features = ["unproven"] }
-rust-dap-rp2040 = { path = "../../rust-dap-rp2040" }
+rust-dap-rp2040 = { path = "../../rust-dap-rp2040", features = ["pio_set_clock"] }
 rp-pico = { git = "https://github.com/rp-rs/rp-hal.git", rev = "8d18abdfc7c0129debba85457d32d32175bf36bd" }
 panic-halt = "0.2"
 cortex-m = "0.7"
