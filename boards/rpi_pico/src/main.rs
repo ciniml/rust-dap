@@ -146,6 +146,14 @@ mod app {
         c.local.USB_ALLOCATOR.replace(usb_allocator);
         let usb_allocator = c.local.USB_ALLOCATOR.as_ref().unwrap();
 
+        // Initialize MCU reset pin.
+        // Currently MCU reset pin is not used,
+        // so all we have to do is just initialize the pin in case the pin is connected to the target RESET.
+        {
+            let mut reset_pin = pins.gpio4.into_push_pull_output();
+            reset_pin.set_low().ok();
+            reset_pin.set_high().ok();
+        }
         let swdio;
         #[cfg(feature = "bitbang")]
         {
