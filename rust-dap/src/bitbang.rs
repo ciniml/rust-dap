@@ -21,6 +21,9 @@ pub trait DelayFunc {
     fn cycle_delay(&self, cycles: u32);
 }
 
+///////////////////
+/////// SWD ///////
+///////////////////
 pub struct SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn>
 where
     SwClkInputPin: InputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
@@ -51,7 +54,7 @@ where
             swdio_out: None,
             swclk_in: Some(swclk),
             swclk_out: None,
-            cycle_delay: cycle_delay,
+            cycle_delay,
         }
     }
 }
@@ -398,7 +401,7 @@ impl<Io: PrimitiveSwdIo> SwdIo for Io {
         }
         self.enable_output();
         self.set_swdio(true);
-        return Err(DapError::SwdError(ack));
+        Err(DapError::SwdError(ack))
     }
 
     fn enable_output(&mut self) {
@@ -408,4 +411,116 @@ impl<Io: PrimitiveSwdIo> SwdIo for Io {
     fn disable_output(&mut self) {
         PrimitiveSwdIo::disable_output(self);
     }
+}
+
+impl<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn> CmsisDapCommandInner
+    for SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn>
+where
+    SwClkInputPin: InputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
+    SwClkOutputPin: OutputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
+    SwdIoInputPin: InputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
+    SwdIoOutputPin: OutputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
+    DelayFn: DelayFunc,
+{
+    fn connect(&mut self, _config: &CmsisDapConfig) {
+        SwdIo::connect(self);
+    }
+    fn disconnect(&mut self, _config: &CmsisDapConfig) {
+        SwdIo::disconnect(self);
+    }
+
+    fn swj_sequence(&mut self, config: &CmsisDapConfig, count: usize, data: &[u8]) {
+        SwdIo::swj_sequence(self, &config.swdio, count, data);
+    }
+
+    fn swd_sequence(
+        &mut self,
+        config: &CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        if request.is_empty() {
+            return Err(DapError::InvalidCommand);
+        }
+
+        let mut sequence_count = request[0];
+        let mut request_index = 1;
+        let mut response_index = 1;
+        while sequence_count > 0 {
+            sequence_count -= 1;
+            let sequence_info = request[request_index];
+            request_index += 1;
+
+            let clock_count = if sequence_info & SWD_SEQUENCE_CLOCK == 0 {
+                64
+            } else {
+                sequence_info & SWD_SEQUENCE_CLOCK
+            } as usize;
+            let bytes_count = (clock_count + 7) >> 3;
+            let do_input = sequence_info & SWD_SEQUENCE_DIN != 0;
+
+            if do_input {
+                SwdIo::disable_output(self);
+                SwdIo::swd_read_sequence(
+                    self,
+                    &config.swdio,
+                    clock_count,
+                    &mut response[response_index..],
+                );
+            } else {
+                SwdIo::enable_output(self);
+                SwdIo::swd_write_sequence(
+                    self,
+                    &config.swdio,
+                    clock_count,
+                    &request[request_index..],
+                );
+            }
+
+            if sequence_count == 0 {
+                SwdIo::enable_output(self)
+            }
+
+            if do_input {
+                request_index += 1;
+                response_index += bytes_count;
+            } else {
+                request_index = 1 + bytes_count;
+            }
+        }
+        response[0] = DAP_OK;
+        Ok((request_index, response_index))
+    }
+
+    fn transfer_inner_with_retry(
+        &mut self,
+        config: &CmsisDapConfig,
+        _dap_index: u8,
+        request: SwdRequest,
+        data: u32,
+    ) -> core::result::Result<u32, DapError> {
+        let mut retry_count = 0;
+        loop {
+            match SwdIo::swd_transfer(self, &config.swdio, request, data) {
+                Ok(value) => break Ok(value),
+                Err(DapError::SwdError(err)) => {
+                    if err != DAP_TRANSFER_WAIT || retry_count == config.retry_count {
+                        break Err(DapError::SwdError(err));
+                    }
+                    retry_count += 1;
+                }
+                Err(err) => break Err(err),
+            }
+        }
+    }
+    fn swj_pins(
+        &mut self,
+        _config: &CmsisDapConfig,
+        _pin_output: u8,
+        _pin_select: u8,
+        _wait_us: u32,
+    ) -> core::result::Result<u8, DapError> {
+        unimplemented!();
+    }
+
 }

@@ -28,7 +28,7 @@ mod app {
     use hal::usb::UsbBus;
     use usb_device::bus::UsbBusAllocator;
 
-    use rust_dap::CmsisDap;
+    use rust_dap::{CmsisDap, DapCapabilities};
     use usb_device::prelude::*;
     use usbd_serial::SerialPort;
 
@@ -39,11 +39,12 @@ mod app {
     use rust_dap_rp2040::util::{
         initialize_usb, read_usb_serial_byte_cs, write_usb_serial_byte_cs, UartConfigAndClock,
     };
+    #[cfg(feature = "swd")]
     type SwdIoSet = rust_dap_rp2040::util::SwdIoSet<GpioSwClk, GpioSwdIo>;
+    #[cfg(feature = "swd")]
+    type IoSet = SwdIoSet;
 
     // GPIO mappings
-    type GpioSwClk = hal::gpio::bank0::Gpio2;
-    type GpioSwdIo = hal::gpio::bank0::Gpio3;
     type GpioUartTx = hal::gpio::bank0::Gpio0;
     type GpioUartRx = hal::gpio::bank0::Gpio1;
     type GpioUsbLed = hal::gpio::bank0::Gpio25;
@@ -51,6 +52,11 @@ mod app {
     type GpioDebugOut = hal::gpio::bank0::Gpio6;
     type GpioDebugIrqOut = hal::gpio::bank0::Gpio28;
     type GpioDebugUsbIrqOut = hal::gpio::bank0::Gpio27;
+    // swd
+    #[cfg(feature = "swd")]
+    type GpioSwClk = hal::gpio::bank0::Gpio2;
+    #[cfg(feature = "swd")]
+    type GpioSwdIo = hal::gpio::bank0::Gpio4;
 
     // UART Interrupt context
     const UART_RX_QUEUE_SIZE: usize = 256;
@@ -83,7 +89,7 @@ mod app {
         uart_config: UartConfigAndClock,
         uart_rx_producer: heapless::spsc::Producer<'static, u8, UART_RX_QUEUE_SIZE>,
         usb_bus: UsbDevice<'static, UsbBus>,
-        usb_dap: CmsisDap<'static, UsbBus, SwdIoSet, 64>,
+        usb_dap: CmsisDap<'static, UsbBus, IoSet, 64>,
         usb_led: Pin<GpioUsbLed, Output<PushPull>>,
         idle_led: Pin<GpioIdleLed, Output<PushPull>>,
         debug_out: Pin<GpioDebugOut, Output<PushPull>>,
@@ -154,24 +160,31 @@ mod app {
             reset_pin.set_low().ok();
             reset_pin.set_high().ok();
         }
-        let swdio;
-        #[cfg(feature = "bitbang")]
-        {
-            use rust_dap_rp2040::{swdio_pin::PicoSwdInputPin, util::CycleDelay};
-            let swclk_pin = PicoSwdInputPin::new(pins.gpio2.into_floating_input());
-            let swdio_pin = PicoSwdInputPin::new(pins.gpio3.into_floating_input());
-            swdio = SwdIoSet::new(swclk_pin, swdio_pin, CycleDelay {});
-        }
-        #[cfg(not(feature = "bitbang"))]
-        {
-            let mut swclk_pin = pins.gpio2.into_mode();
-            let mut swdio_pin = pins.gpio3.into_mode();
-            swclk_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-            swdio_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-            swdio = SwdIoSet::new(c.device.PIO0, swclk_pin, swdio_pin, &mut resets);
-        }
-        let (usb_serial, usb_dap, usb_bus) =
-            initialize_usb(swdio, usb_allocator, "raspberry-pi-pico");
+        #[cfg(feature = "swd")]
+        let (usb_serial, usb_dap, usb_bus) = {
+            let swdio;
+            #[cfg(feature = "bitbang")]
+            {
+                use rust_dap_rp2040::{swdio_pin::PicoSwdInputPin, util::CycleDelay};
+                let swclk_pin = PicoSwdInputPin::new(pins.gpio2.into_floating_input());
+                let swdio_pin = PicoSwdInputPin::new(pins.gpio4.into_floating_input());
+                swdio = SwdIoSet::new(swclk_pin, swdio_pin, CycleDelay {});
+            }
+            #[cfg(not(feature = "bitbang"))]
+            {
+                let mut swclk_pin = pins.gpio2.into_mode();
+                let mut swdio_pin = pins.gpio4.into_mode();
+                swclk_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+                swdio_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+                swdio = SwdIoSet::new(c.device.PIO0, swclk_pin, swdio_pin, &mut resets);
+            }
+            initialize_usb(
+                swdio,
+                usb_allocator,
+                "raspberry-pi-pico",
+                DapCapabilities::SWD,
+            )
+        };
 
         let usb_led = pins.led.into_push_pull_output();
         let (uart_rx_producer, uart_rx_consumer) = c.local.uart_rx_queue.split();

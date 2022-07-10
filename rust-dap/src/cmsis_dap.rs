@@ -16,8 +16,6 @@
 
 #![allow(non_upper_case_globals)]
 
-use core::borrow::Borrow;
-use core::borrow::BorrowMut;
 use core::convert::TryInto;
 use core::mem;
 
@@ -66,6 +64,20 @@ enum DapInfoId {
 }
 
 bitflags! {
+    pub struct DapCapabilities:u16 {
+        const SWD = 0b0000_0001;
+        const JTAG = 0b0000_0010;
+        const SWO_UART = 0b0000_0100;
+        const SWO_MANCHESTER = 0b0000_1000;
+        const ATOMIC_COMMANDS = 0b0001_0000;
+        const TEST_DOMAIN_TIMER = 0b0010_0000;
+        const SWO_STREAMING_TRACE = 0b0100_0000;
+        const UART_COMMUNICATION_PORT = 0b1000_0000;
+        const USB_COM_PORT = 0b1_0000_0000;
+    }
+}
+
+bitflags! {
     pub struct SwdRequest: u8 {
         const APnDP = 0b00000001;
         const RnW = 0b00000010;
@@ -109,10 +121,12 @@ pub trait SwdIo {
     fn disable_output(&mut self);
 }
 
-const DAP_OK: u8 = 0x00;
-const DAP_ERROR: u8 = 0xff;
-const SWD_SEQUENCE_CLOCK: u8 = 0x3f;
-const SWD_SEQUENCE_DIN: u8 = 0x80;
+pub trait SwjIo {}
+
+pub const DAP_OK: u8 = 0x00;
+pub const DAP_ERROR: u8 = 0xff;
+pub const SWD_SEQUENCE_CLOCK: u8 = 0x3f;
+pub const SWD_SEQUENCE_DIN: u8 = 0x80;
 
 fn write_buffer(buffer: &mut [u8], data: &[u8]) -> core::result::Result<usize, CursorError> {
     let mut writer = BufferCursor::new(buffer);
@@ -149,13 +163,13 @@ impl From<UsbError> for DapError {
     }
 }
 
-pub struct CmsisDap<'a, B, Swd, const MAX_PACKET_SIZE: usize>
+pub struct CmsisDap<'a, B, T, const MAX_PACKET_SIZE: usize>
 where
     B: UsbBus,
-    Swd: SwdIo,
+    T: CmsisDapCommand,
 {
     inner: CmsisDapInterface<'a, B>,
-    io: Swd,
+    io: T,
     next_in_packet: [u8; MAX_PACKET_SIZE],
     next_in_packet_size: Option<usize>,
     pending_out_packet: [u8; MAX_PACKET_SIZE],
@@ -166,19 +180,20 @@ where
 impl Default for SwdIoConfig {
     fn default() -> Self {
         Self {
-            clock_wait_cycles: 1,
             idle_cycles: 0,
+            clock_wait_cycles: 1,
             turn_around_cycles: 1,
             always_generate_data_phase: false,
         }
     }
 }
 
-struct CmsisDapConfig {
-    swdio: SwdIoConfig,
-    retry_count: u32,
-    match_mask: u32,
-    match_retry_count: u32,
+pub struct CmsisDapConfig {
+    pub swdio: SwdIoConfig,
+    pub retry_count: u32,
+    pub match_mask: u32,
+    pub match_retry_count: u32,
+    pub capabilities: DapCapabilities,
 }
 
 impl Default for CmsisDapConfig {
@@ -188,46 +203,682 @@ impl Default for CmsisDapConfig {
             retry_count: 5,
             match_mask: 0xffffffff,
             match_retry_count: 5,
+            capabilities: DapCapabilities::empty(),
         }
     }
 }
 
-impl<B, Swd, const MAX_PACKET_SIZE: usize> CmsisDap<'_, B, Swd, MAX_PACKET_SIZE>
+
+            } else {
+        }
+    }
+
+pub trait CmsisDapCommandInner {
+    fn connect(&mut self, config: &CmsisDapConfig);
+    fn disconnect(&mut self, config: &CmsisDapConfig);
+    fn swj_sequence(&mut self, config: &CmsisDapConfig, count: usize, data: &[u8]);
+    fn swd_sequence(
+        &mut self,
+        config: &CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError>;
+
+
+    fn transfer_inner_with_retry(
+        &mut self,
+        config: &CmsisDapConfig,
+        dap_index: u8,
+        request: SwdRequest,
+        data: u32,
+    ) -> core::result::Result<u32, DapError>;
+
+    fn transfer_block_inner(
+        &mut self,
+        config: &mut CmsisDapConfig,
+        dap_index: u8,
+        swd_request: SwdRequest,
+        request: &mut BufferCursor<&[u8]>,
+        response: &mut BufferCursor<&mut [u8]>,
+        mut request_count: u32,
+        response_count: &mut u32,
+    ) -> core::result::Result<(), DapError> {
+        if swd_request.contains(SwdRequest::RnW) {
+            // Read access
+            if swd_request.contains(SwdRequest::APnDP) {
+                // AP read?
+                self.transfer_inner_with_retry(config, dap_index, swd_request, 0)?;
+            }
+            while request_count > 0 {
+                request_count -= 1;
+                let swd_request = if request_count == 0 && swd_request.contains(SwdRequest::APnDP) {
+                    // Last access of AP read
+                    // Read the last result from RDBUFF.
+                    SwdRequest::RDBUFF | SwdRequest::RnW
+                } else {
+                    // Otherwise, transmit the original request.
+                    swd_request
+                };
+                let result = self.transfer_inner_with_retry(config, dap_index, swd_request, 0)?;
+                write_u32(response, result);
+                *response_count += 1;
+            }
+        } else {
+            // Write access
+            while request_count > 0 {
+                request_count -= 1;
+                let data = read_u32(request);
+                self.transfer_inner_with_retry(config, dap_index, swd_request, data)?;
+                *response_count += 1;
+            }
+            // Check the last write result
+            self.transfer_inner_with_retry(
+                config,
+                dap_index,
+                SwdRequest::RDBUFF | SwdRequest::RnW,
+                0,
+            )?;
+        }
+        Ok(())
+    }
+    fn swj_pins(
+        &mut self,
+        config: &CmsisDapConfig,
+        pin_output: u8,
+        pin_select: u8,
+        wait_us: u32,
+    ) -> core::result::Result<u8, DapError>;
+
+}
+
+pub trait CmsisDapCommand {
+    fn dap_info(
+        &self,
+        capabilities: DapCapabilities,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError>;
+    fn dap_host_status(
+        &self,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        if !request.is_empty() {
+            response[0] = DAP_OK;
+            Ok((4, 1))
+        } else {
+            Err(DapError::InvalidCommand)
+        }
+    }
+    fn dap_connect(
+        &mut self,
+        config: &CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError>;
+
+    fn dap_disconnect(
+        &mut self,
+        config: &CmsisDapConfig,
+        _request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError>;
+
+    fn transfer_config(
+        &self,
+        config: &mut CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        if request.len() < 5 {
+            Err(DapError::InvalidCommand)
+        } else {
+            config.swdio.idle_cycles = request[0] as u32;
+            config.jtag.idle_cycles = request[0] as u32;
+            config.retry_count = u16::from_le_bytes(request[1..3].try_into().unwrap()) as u32;
+            config.match_retry_count = u16::from_le_bytes(request[3..5].try_into().unwrap()) as u32;
+            response[0] = DAP_OK;
+            Ok((5, 1))
+        }
+    }
+    fn transfer(
+        &mut self,
+        config: &mut CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError>;
+
+    fn transfer_block(
+        &mut self,
+        config: &mut CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError>;
+
+    fn transfer_abort(&self) -> core::result::Result<(usize, usize), DapError>;
+    fn write_abort(&self) -> core::result::Result<(usize, usize), DapError>;
+    fn delay(&self) -> core::result::Result<(usize, usize), DapError>;
+    fn reset_target(&self) -> core::result::Result<(usize, usize), DapError>;
+    fn swj_pins(
+        &mut self,
+        config: &CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError>;
+    fn swj_clock(
+        &self,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        if request.len() == 4 {
+            // TODO: use clock
+            let _clock = u32::from_le_bytes(request[0..4].try_into().unwrap());
+            response[0] = DAP_OK;
+            Ok((4, 1))
+        } else {
+            Err(DapError::InvalidCommand)
+        }
+    }
+
+    fn swj_sequence(
+        &mut self,
+        config: &CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError>;
+
+    fn swd_sequence(
+        &mut self,
+        config: &CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError>;
+
+    fn swd_config(
+        &self,
+        config: &mut CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError>;
+
+}
+
+impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
+    // 各コマンドの実装を書く
+    // JtagやSwdに無い実装はErrを返す
+    fn dap_connect(
+        &mut self,
+        config: &CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        if !request.is_empty() {
+            let port = request[0];
+            match port {
+                0 | 1 | 2 => {
+                    CmsisDapCommandInner::connect(self, config);
+                    response[0] = if port == 0 { 1 } else { port };
+                    Ok((1, 1))
+                }
+                _ => Err(DapError::InvalidCommand),
+            }
+        } else {
+            Err(DapError::InvalidCommand)
+        }
+    }
+
+    fn dap_disconnect(
+        &mut self,
+        config: &CmsisDapConfig,
+        _request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        CmsisDapCommandInner::disconnect(self, config);
+        response[0] = DAP_OK;
+        Ok((0, 1))
+    }
+
+    fn dap_info(
+        &self,
+        capabilities: DapCapabilities,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        if request.is_empty() {
+            return Err(DapError::InvalidCommand);
+        }
+        let id = DapInfoId::try_from_primitive(request[0])?;
+        let length: usize = {
+            let buffer = &mut response[1..];
+            match id {
+                DapInfoId::Vendor => write_buffer(buffer, "Hoge".as_bytes())?,
+                DapInfoId::Product => write_buffer(buffer, "Fuga".as_bytes())?,
+                DapInfoId::SerialNumber => write_buffer(buffer, "Piyo".as_bytes())?,
+                DapInfoId::CmsisDapVer => write_buffer(buffer, "2.00".as_bytes())?,
+                DapInfoId::Capabilities => {
+                    let bits = capabilities.bits().to_le_bytes();
+                    buffer[0] = bits[0];
+                    if capabilities.contains(DapCapabilities::USB_COM_PORT) {
+                        // Info0, Info1
+                        buffer[1] = bits[1];
+                        2
+                    } else {
+                        // Info0 only
+                        1
+                    }
+                }
+                DapInfoId::PacketCount => {
+                    buffer[0] = 1;
+                    1
+                }
+                DapInfoId::PacketSize => {
+                    buffer[0] = 64;
+                    buffer[1] = 0;
+                    2
+                }
+                _ => 0,
+            }
+        };
+        response[0] = (length) as u8;
+        Ok((1, length + 1))
+    }
+
+    fn transfer(
+        &mut self,
+        config: &mut CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        if request.is_empty() {
+            return Err(DapError::InvalidCommand);
+        }
+
+        let dap_index = request[0];
+        let mut request_count = request[1];
+        let mut request = BufferCursor::new_with_position(request, 2);
+        let (response_header, response_body) = response.split_at_mut(2);
+        let mut response = BufferCursor::new(response_body);
+        let mut posted_read = false;
+        let mut write_issued = false;
+        let mut response_count = 0;
+        let mut last_response = loop {
+            if request_count == 0 {
+                break Ok(0);
+            }
+            request_count -= 1;
+
+            let swd_request = read_swd_request(&mut request);
+
+            if swd_request.contains(SwdRequest::RnW) {
+                if posted_read {
+                    // read
+                    let result = if swd_request.contains(SwdRequest::APnDP)
+                        && !swd_request.contains(SwdRequest::TRANSFER_MATCH_VALUE)
+                    {
+                        CmsisDapCommandInner::transfer_inner_with_retry(
+                            self,
+                            &config,
+                            dap_index,
+                            swd_request,
+                            0,
+                        )
+                    } else {
+                        posted_read = false;
+                        CmsisDapCommandInner::transfer_inner_with_retry(
+                            self,
+                            &config,
+                            dap_index,
+                            SwdRequest::RDBUFF | SwdRequest::RnW,
+                            0,
+                        )
+                    };
+                    if let Ok(value) = result {
+                        write_u32(&mut response, value);
+                    } else {
+                        break result; // Error
+                    }
+                }
+                if swd_request.contains(SwdRequest::TRANSFER_MATCH_VALUE) {
+                    let match_value = read_u32(&mut request);
+                    let mut match_retry_count = 0;
+
+                    if swd_request.contains(SwdRequest::APnDP) {
+                        // Issue AP read
+                        match CmsisDapCommandInner::transfer_inner_with_retry(
+                            self,
+                            &config,
+                            dap_index,
+                            swd_request,
+                            0,
+                        ) {
+                            Ok(_) => {}
+                            Err(err) => {
+                                break Err(err);
+                            }
+                        }
+                    }
+                    let result = loop {
+                        match CmsisDapCommandInner::transfer_inner_with_retry(
+                            self,
+                            &config,
+                            dap_index,
+                            swd_request,
+                            0,
+                        ) {
+                            Ok(value) => {
+                                if value & config.match_mask == match_value {
+                                    break Ok(value);
+                                } else if match_retry_count == config.match_retry_count {
+                                    break Err(DapError::ExceedRetryCount);
+                                }
+                                match_retry_count += 1;
+                            }
+                            Err(DapError::SwdError(err)) => {
+                                if err != DAP_TRANSFER_WAIT
+                                    || match_retry_count == config.match_retry_count
+                                {
+                                    break Err(DapError::SwdError(err));
+                                }
+                                match_retry_count += 1;
+                            }
+                            Err(err) => break Err(err),
+                        }
+                    };
+                    if result.is_err() {
+                        break result; // Error
+                    }
+                } else {
+                    if swd_request.contains(SwdRequest::APnDP) {
+                        // Read AP
+                        if !posted_read {
+                            match CmsisDapCommandInner::transfer_inner_with_retry(
+                                self,
+                                &config,
+                                dap_index,
+                                swd_request,
+                                0,
+                            ) {
+                                Ok(_) => {
+                                    posted_read = true;
+                                }
+                                Err(err) => {
+                                    break Err(err); // Error
+                                }
+                            }
+                        }
+                    } else {
+                        // Read DP
+                        match CmsisDapCommandInner::transfer_inner_with_retry(
+                            self,
+                            &config,
+                            dap_index,
+                            swd_request,
+                            0,
+                        ) {
+                            Ok(value) => {
+                                write_u32(&mut response, value);
+                            }
+                            Err(err) => {
+                                break Err(err); // Error
+                            }
+                        }
+                    }
+                }
+                write_issued = false;
+            } else {
+                // Write register
+                if posted_read {
+                    // The last request is posted read, so we have to read-out the result.
+                    match CmsisDapCommandInner::transfer_inner_with_retry(
+                        self,
+                        &config,
+                        dap_index,
+                        SwdRequest::RDBUFF | SwdRequest::RnW,
+                        0,
+                    ) {
+                        Ok(value) => {
+                            write_u32(&mut response, value);
+                            posted_read = false;
+                        }
+                        Err(err) => {
+                            break Err(err); // Error
+                        }
+                    }
+                }
+
+                let value = read_u32(&mut request);
+                if swd_request.contains(SwdRequest::TRANSFER_MATCH_MASK) {
+                    // Update match mask
+                    config.match_mask = value
+                } else {
+                    // Write DP/AP
+                    match CmsisDapCommandInner::transfer_inner_with_retry(
+                        self,
+                        &config,
+                        dap_index,
+                        swd_request,
+                        value,
+                    ) {
+                        Ok(_) => {}
+                        Err(err) => {
+                            break Err(err); // Error
+                        }
+                    }
+
+                    write_issued = true;
+                }
+            }
+
+            response_count += 1;
+        };
+
+        // process remaining requests.
+        while request_count > 0 {
+            request_count -= 1;
+            let swd_request = read_swd_request(&mut request);
+
+            if swd_request.contains(SwdRequest::RnW) {
+                // Read request
+                if swd_request.contains(SwdRequest::TRANSFER_MATCH_VALUE) {
+                    // Read match value
+                    read_u32(&mut request);
+                }
+            } else {
+                // Write request
+                read_u32(&mut request);
+            }
+        }
+
+        if last_response.is_ok() {
+            if posted_read || write_issued {
+                match CmsisDapCommandInner::transfer_inner_with_retry(
+                    self,
+                    &config,
+                    dap_index,
+                    SwdRequest::RDBUFF | SwdRequest::RnW,
+                    0,
+                ) {
+                    Ok(value) => {
+                        if posted_read {
+                            write_u32(&mut response, value);
+                        }
+                    }
+                    Err(err) => {
+                        last_response = Err(err);
+                    }
+                }
+            }
+        }
+
+        response_header[0] = response_count as u8;
+        response_header[1] = last_response.map_or_else(
+            |e| {
+                if let DapError::SwdError(err) = e {
+                    err
+                } else {
+                    DAP_TRANSFER_ERROR
+                }
+            },
+            |_| DAP_TRANSFER_OK,
+        );
+        Ok((request.get_position(), response.get_position() + 2))
+    }
+
+    fn transfer_block(
+        &mut self,
+        config: &mut CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        if request.len() == 0 {
+            return Err(DapError::InvalidCommand);
+        }
+        let dap_index = request[0];
+        let (response_header, response_body) = response.split_at_mut(3);
+        let mut response = BufferCursor::new(response_body);
+        let mut request = BufferCursor::new_with_position(request, 1);
+        let request_count = read_u16(&mut request) as u32;
+        if request_count == 0 {
+            response_header[0] = 0;
+            response_header[1] = 0;
+            response_header[2] = 0;
+            return Ok((2, 3));
+        }
+
+        let swd_request = read_swd_request(&mut request);
+        let mut response_count = 0u32;
+        let result = CmsisDapCommandInner::transfer_block_inner(
+            self,
+            config,
+            dap_index,
+            swd_request,
+            &mut request,
+            &mut response,
+            request_count,
+            &mut response_count,
+        );
+        response_header[0] = (request_count >> 0 & 0xff) as u8;
+        response_header[1] = (request_count >> 8 & 0xff) as u8;
+        response_header[2] = match result {
+            Ok(_) => DAP_TRANSFER_OK,
+            Err(err) => match err {
+                DapError::ExceedRetryCount => DAP_TRANSFER_WAIT,
+                DapError::SwdError(swd_error) => swd_error,
+                _ => DAP_TRANSFER_ERROR,
+            },
+        };
+        Ok((request.get_position(), response.get_position() + 3))
+    }
+
+    fn transfer_abort(&self) -> core::result::Result<(usize, usize), DapError> {
+        // unimplemented
+        Err(DapError::InvalidCommand)
+    }
+    fn write_abort(&self) -> core::result::Result<(usize, usize), DapError> {
+        Err(DapError::InvalidCommand)
+    }
+    fn delay(&self) -> core::result::Result<(usize, usize), DapError> {
+        Err(DapError::InvalidCommand)
+    }
+    fn reset_target(&self) -> core::result::Result<(usize, usize), DapError> {
+        Err(DapError::InvalidCommand)
+    }
+    fn swj_pins(
+        &mut self,
+        config: &CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        let pin_output = request[0];
+        let pin_select = request[1];
+        let wait_us = u32::from_le_bytes(request[2..6].try_into().unwrap());
+        let pin_input =
+            CmsisDapCommandInner::swj_pins(self, config, pin_output, pin_select, wait_us);
+        response[0] = pin_input.unwrap_or(0);
+        Ok((6, 1))
+    }
+
+    fn swj_sequence(
+        &mut self,
+        config: &CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        if request.len() > 0 {
+            let count = if request[0] == 0 {
+                256
+            } else {
+                request[0] as usize
+            };
+            let count_bytes = (count + 7) >> 3;
+            if request.len() > count_bytes {
+                CmsisDapCommandInner::swj_sequence(
+                    self,
+                    &config,
+                    count,
+                    &request[1..count_bytes + 1],
+                );
+                response[0] = DAP_OK;
+                Ok((count_bytes + 1, 1))
+            } else {
+                response[0] = DAP_ERROR;
+                Ok((request.len(), 1))
+            }
+        } else {
+            Err(DapError::InvalidCommand)
+        }
+    }
+
+    fn swd_config(
+        &self,
+        config: &mut CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        if request.len() < 1 {
+            return Err(DapError::InvalidCommand);
+        } else {
+            config.swdio.always_generate_data_phase = (request[0] & 0b100) != 0;
+            config.swdio.turn_around_cycles = (request[0] & 3) as u32 + 1;
+            response[0] = DAP_OK;
+            Ok((1, 1))
+        }
+    }
+
+    fn swd_sequence(
+        &mut self,
+        config: &CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        CmsisDapCommandInner::swd_sequence(self, config, request, response)
+    }
+
+}
+
+impl<B, T, const MAX_PACKET_SIZE: usize> CmsisDap<'_, B, T, MAX_PACKET_SIZE>
 where
     B: UsbBus,
-    Swd: SwdIo,
+    T: CmsisDapCommand,
 {
-    pub fn new(alloc: &UsbBusAllocator<B>, io: Swd) -> CmsisDap<'_, B, Swd, MAX_PACKET_SIZE> {
+    pub fn new(
+        alloc: &UsbBusAllocator<B>,
+        io: T,
+        capability: DapCapabilities,
+    ) -> CmsisDap<'_, B, T, MAX_PACKET_SIZE> {
+        let config = CmsisDapConfig {
+            capabilities: capability,
+            ..Default::default()
+        };
         CmsisDap {
             inner: CmsisDapInterface::new(alloc, 64),
-            io: io,
+            io,
             next_in_packet: unsafe { mem::MaybeUninit::uninit().assume_init() },
             next_in_packet_size: None,
             pending_out_packet: unsafe { mem::MaybeUninit::uninit().assume_init() },
             pending_out_packet_size: 0,
-            config: CmsisDapConfig::default(),
+            config,
         }
-    }
-
-    fn send_next_packet(&mut self) -> Result<()> {
-        if let Some(size) = self.next_in_packet_size {
-            if size > 0 {
-                self.inner.write_packet(&self.next_in_packet[0..size])?;
-            } else {
-                self.inner.write_packet(&[])?;
-            }
-            self.next_in_packet_size = None;
-        }
-        Ok(())
-    }
-    fn process_out_packet(&mut self) -> Result<()> {
-        if self.pending_out_packet_size == 0 {
-            self.pending_out_packet_size = self
-                .inner
-                .read_packet(&mut self.pending_out_packet)
-                .map_or(0, |size| size);
-        }
-        Ok(())
     }
 
     pub fn process(&mut self) -> core::result::Result<(), DapError> {
@@ -252,45 +903,47 @@ where
                 response[0] = command_byte;
                 let response_body = &mut response[1..];
 
-                let result = match command {
-                    DapCommandId::Info => dap_info(request, response_body),
-                    DapCommandId::HostStatus => dap_host_status(request, response_body),
-                    DapCommandId::Connect => dap_connect(&mut self.io, request, response_body),
+                let (request_processed, response_generated) = match command {
+                    DapCommandId::Info => {
+                        self.io
+                            .dap_info(self.config.capabilities, request, response_body)
+                    }
+                    DapCommandId::HostStatus => self.io.dap_host_status(request, response_body),
+                    DapCommandId::Connect => {
+                        self.io.dap_connect(&self.config, request, response_body)
+                    }
                     DapCommandId::Disconnect => {
-                        dap_disconnect(&mut self.io, request, response_body)
+                        self.io.dap_disconnect(&self.config, request, response_body)
                     }
                     DapCommandId::TransferConfigure => {
-                        swd_transfer_config(&mut self.config, &mut self.io, request, response_body)
+                        self.io
+                            .transfer_config(&mut self.config, request, response_body)
                     }
                     DapCommandId::Transfer => {
-                        swd_transfer(&mut self.config, &mut self.io, request, response_body)
+                        self.io.transfer(&mut self.config, request, response_body)
                     }
                     DapCommandId::TransferBlock => {
-                        swd_transfer_block(&mut self.config, &mut self.io, request, response_body)
+                        self.io
+                            .transfer_block(&mut self.config, request, response_body)
                     }
-                    DapCommandId::SWJClock => swj_clock(request, response_body),
+                    DapCommandId::TransferAbort => self.io.transfer_abort(),
+                    DapCommandId::WriteAbort => self.io.write_abort(),
+                    DapCommandId::Delay => self.io.delay(),
+                    DapCommandId::ResetTarget => self.io.reset_target(),
+                    DapCommandId::SWJPins => self.io.swj_pins(&self.config, request, response_body),
+                    DapCommandId::SWJClock => self.io.swj_clock(request, response_body),
                     DapCommandId::SWJSequence => {
-                        swj_sequence(&self.config, &mut self.io, request, response_body)
+                        self.io.swj_sequence(&self.config, request, response_body)
                     }
                     DapCommandId::SWDConfigure => {
-                        swd_config(&mut self.config, request, response_body)
+                        self.io.swd_config(&mut self.config, request, response_body)
                     }
                     DapCommandId::SWDSequence => {
-                        swd_sequence(&self.config, &mut self.io, request, response_body)
-                    }
-                    _ => Err(DapError::InvalidCommand),
-                };
-
-                let (request_processed, response_generated) = match result {
-                    Ok(x) => (x.0, x.1),
-                    Err(_) => {
-                        response_body[0] = 0xFF; // DAP_ERROR
-                        (0, 1)
-                    }
-                };
+                        self.io.swd_sequence(&self.config, request, response_body)
+                    } // _ => Err(DapError::InvalidCommand),
+                }?;
 
                 bytes_processed += request_processed;
-
                 if MAX_PACKET_SIZE < response_generated {
                     // the packet larger than MAX_PACKET_SIZE bytes cannot be sent
                     // due to USB specifications.
@@ -320,12 +973,33 @@ where
 
         Ok(())
     }
+
+    fn send_next_packet(&mut self) -> Result<()> {
+        if let Some(size) = self.next_in_packet_size {
+            if size > 0 {
+                self.inner.write_packet(&self.next_in_packet[0..size])?;
+            } else {
+                self.inner.write_packet(&[])?;
+            }
+            self.next_in_packet_size = None;
+        }
+        Ok(())
+    }
+    fn process_out_packet(&mut self) -> Result<()> {
+        if self.pending_out_packet_size == 0 {
+            self.pending_out_packet_size = self
+                .inner
+                .read_packet(&mut self.pending_out_packet)
+                .map_or(0, |size| size);
+        }
+        Ok(())
+    }
 }
 
-impl<B, Swd, const MAX_PACKET_SIZE: usize> UsbClass<B> for CmsisDap<'_, B, Swd, MAX_PACKET_SIZE>
+impl<B, T, const MAX_PACKET_SIZE: usize> UsbClass<B> for CmsisDap<'_, B, T, MAX_PACKET_SIZE>
 where
     B: UsbBus,
-    Swd: SwdIo,
+    T: CmsisDapCommand,
 {
     fn get_configuration_descriptors(&self, writer: &mut DescriptorWriter) -> Result<()> {
         self.inner.get_configuration_descriptors(writer)
@@ -359,177 +1033,6 @@ where
     }
 }
 
-fn dap_info(request: &[u8], response: &mut [u8]) -> core::result::Result<(usize, usize), DapError> {
-    if request.len() > 0 {
-        let id = DapInfoId::try_from_primitive(request[0])?;
-        let length = {
-            let buffer = &mut response[1..];
-            match id {
-                DapInfoId::Vendor => write_buffer(buffer, "Hoge".as_bytes())?,
-                DapInfoId::Product => write_buffer(buffer, "Fuga".as_bytes())?,
-                DapInfoId::SerialNumber => write_buffer(buffer, "Piyo".as_bytes())?,
-                DapInfoId::CmsisDapVer => write_buffer(buffer, "2.00".as_bytes())?,
-                DapInfoId::Capabilities => {
-                    buffer[0] = 0b0000_0001;
-                    1 as usize
-                }
-                DapInfoId::PacketCount => {
-                    buffer[0] = 1;
-                    1 as usize
-                }
-                DapInfoId::PacketSize => {
-                    buffer[0] = 64;
-                    buffer[1] = 0;
-                    2 as usize
-                }
-                _ => 0 as usize,
-            }
-        };
-        response[0] = (length) as u8;
-        Ok((1, length + 1))
-    } else {
-        Err(DapError::InvalidCommand)
-    }
-}
-fn dap_connect<Swd: SwdIo>(
-    swdio: &mut Swd,
-    request: &[u8],
-    response: &mut [u8],
-) -> core::result::Result<(usize, usize), DapError> {
-    if request.len() >= 1 {
-        swdio.connect();
-        response[0] = 1; // SWD
-        Ok((1, 1))
-    } else {
-        Err(DapError::InvalidCommand)
-    }
-}
-fn dap_disconnect<Swd: SwdIo>(
-    swdio: &mut Swd,
-    _request: &[u8],
-    response: &mut [u8],
-) -> core::result::Result<(usize, usize), DapError> {
-    swdio.disconnect();
-    response[0] = DAP_OK;
-    Ok((0, 1))
-}
-fn dap_host_status(
-    request: &[u8],
-    response: &mut [u8],
-) -> core::result::Result<(usize, usize), DapError> {
-    if request.len() >= 1 {
-        response[0] = DAP_OK;
-        Ok((4, 1))
-    } else {
-        Err(DapError::InvalidCommand)
-    }
-}
-fn swj_clock(
-    request: &[u8],
-    response: &mut [u8],
-) -> core::result::Result<(usize, usize), DapError> {
-    if request.len() >= 4 {
-        let _clock = u32::from_le_bytes(request.try_into().unwrap());
-        response[0] = DAP_OK;
-        Ok((4, 1))
-    } else {
-        Err(DapError::InvalidCommand)
-    }
-}
-fn swj_sequence<Swd: SwdIo>(
-    config: &CmsisDapConfig,
-    swdio: &mut Swd,
-    request: &[u8],
-    response: &mut [u8],
-) -> core::result::Result<(usize, usize), DapError> {
-    if request.len() > 0 {
-        let count = if request[0] == 0 {
-            256
-        } else {
-            request[0] as usize
-        };
-        let count_bytes = (count + 7) >> 3;
-        if request.len() > count_bytes {
-            swdio.swj_sequence(&config.swdio, count, &request[1..count_bytes + 1]);
-            response[0] = DAP_OK;
-            Ok((count_bytes + 1, 1))
-        } else {
-            response[0] = DAP_ERROR;
-            Ok((request.len(), 1))
-        }
-    } else {
-        Err(DapError::InvalidCommand)
-    }
-}
-fn swd_sequence<Swd: SwdIo>(
-    config: &CmsisDapConfig,
-    swdio: &mut Swd,
-    request: &[u8],
-    response: &mut [u8],
-) -> core::result::Result<(usize, usize), DapError> {
-    if request.len() > 0 {
-        let mut sequence_count = request[0];
-        let mut request_index = 1;
-        let mut response_index = 1;
-        while sequence_count > 0 {
-            sequence_count -= 1;
-            let sequence_info = request[request_index];
-            request_index += 1;
-
-            let clock_count = if sequence_info & SWD_SEQUENCE_CLOCK == 0 {
-                64
-            } else {
-                sequence_info & SWD_SEQUENCE_CLOCK
-            } as usize;
-            let bytes_count = (clock_count + 7) >> 3;
-            let do_input = sequence_info & SWD_SEQUENCE_DIN != 0;
-
-            if do_input {
-                swdio.disable_output();
-                swdio.swd_read_sequence(
-                    &config.swdio,
-                    clock_count,
-                    &mut response[response_index..],
-                );
-                response_index += bytes_count;
-            } else {
-                swdio.enable_output();
-                swdio.swd_write_sequence(&config.swdio, clock_count, &request[request_index..]);
-                request_index += bytes_count;
-            }
-
-            if sequence_count == 0 {
-                swdio.enable_output()
-            }
-        }
-        response[0] = DAP_OK;
-        Ok((request_index, response_index))
-    } else {
-        Err(DapError::InvalidCommand)
-    }
-}
-
-fn swd_transfer_inner_with_retry<Swd: SwdIo>(
-    config: &CmsisDapConfig,
-    swdio: &mut Swd,
-    request: SwdRequest,
-    data: u32,
-) -> core::result::Result<u32, DapError> {
-    let mut retry_count = 0;
-    loop {
-        match swdio.swd_transfer(&config.swdio, request, data) {
-            Ok(value) => break Ok(value),
-            Err(DapError::SwdError(err)) => {
-                if err != DAP_TRANSFER_WAIT || retry_count == config.retry_count {
-                    break Err(DapError::SwdError(err));
-                }
-                retry_count += 1;
-            }
-            Err(err) => break Err(err),
-        }
-    }
-}
-
 fn read_swd_request<C: CursorRead>(cursor: &mut C) -> SwdRequest {
     let mut buffer: [u8; 1] = unsafe { core::mem::MaybeUninit::uninit().assume_init() };
     cursor.read(&mut buffer).ok();
@@ -549,326 +1052,6 @@ fn read_u32<C: CursorRead>(cursor: &mut C) -> u32 {
 fn write_u32<C: CursorWrite>(cursor: &mut C, value: u32) {
     let bytes = u32::to_le_bytes(value);
     cursor.write(&bytes).ok();
-}
-
-fn swd_transfer_config<Swd: SwdIo>(
-    config: &mut CmsisDapConfig,
-    _swdio: &mut Swd,
-    request: &[u8],
-    response: &mut [u8],
-) -> core::result::Result<(usize, usize), DapError> {
-    if request.len() < 5 {
-        return Err(DapError::InvalidCommand);
-    } else {
-        config.swdio.idle_cycles = request[0] as u32;
-        config.retry_count = u16::from_le_bytes(request[1..3].try_into().unwrap()) as u32;
-        config.match_retry_count = u16::from_le_bytes(request[3..5].try_into().unwrap()) as u32;
-        response[0] = DAP_OK;
-        Ok((5, 1))
-    }
-}
-
-fn swd_config(
-    config: &mut CmsisDapConfig,
-    request: &[u8],
-    response: &mut [u8],
-) -> core::result::Result<(usize, usize), DapError> {
-    if request.len() < 1 {
-        return Err(DapError::InvalidCommand);
-    } else {
-        config.swdio.always_generate_data_phase = (request[0] & 0b100) != 0;
-        config.swdio.turn_around_cycles = (request[0] & 3) as u32 + 1;
-        response[0] = DAP_OK;
-        Ok((1, 1))
-    }
-}
-
-fn swd_transfer_block<Swd: SwdIo>(
-    config: &mut CmsisDapConfig,
-    swdio: &mut Swd,
-    request: &[u8],
-    response: &mut [u8],
-) -> core::result::Result<(usize, usize), DapError> {
-    if request.len() == 0 {
-        return Err(DapError::InvalidCommand);
-    }
-    let (response_header, response_body) = response.split_at_mut(3);
-    let mut response = BufferCursor::new(response_body);
-    let mut request = BufferCursor::new_with_position(request, 1);
-    let request_count = read_u16(&mut request) as u32;
-    if request_count == 0 {
-        response_header[0] = 0;
-        response_header[1] = 0;
-        response_header[2] = 0;
-        return Ok((2, 3));
-    }
-
-    let swd_request = read_swd_request(&mut request);
-    let mut response_count = 0u32;
-    let result = swd_transfer_block_inner(
-        config,
-        swdio,
-        swd_request,
-        &mut request,
-        &mut response,
-        request_count,
-        &mut response_count,
-    );
-    response_header[0] = (request_count >> 0 & 0xff) as u8;
-    response_header[1] = (request_count >> 8 & 0xff) as u8;
-    response_header[2] = match result {
-        Ok(_) => DAP_TRANSFER_OK,
-        Err(err) => match err {
-            DapError::ExceedRetryCount => DAP_TRANSFER_WAIT,
-            DapError::SwdError(swd_error) => swd_error,
-            _ => DAP_TRANSFER_ERROR,
-        },
-    };
-    Ok((request.get_position(), response.get_position() + 3))
-}
-
-fn swd_transfer_block_inner<Swd: SwdIo>(
-    config: &mut CmsisDapConfig,
-    swdio: &mut Swd,
-    swd_request: SwdRequest,
-    request: &mut BufferCursor<&[u8]>,
-    response: &mut BufferCursor<&mut [u8]>,
-    mut request_count: u32,
-    response_count: &mut u32,
-) -> core::result::Result<(), DapError> {
-    if swd_request.contains(SwdRequest::RnW) {
-        // Read access
-        if swd_request.contains(SwdRequest::APnDP) {
-            // AP read?
-            swd_transfer_inner_with_retry(config, swdio, swd_request, 0)?;
-        }
-        while request_count > 0 {
-            request_count -= 1;
-            let swd_request = if request_count == 0 && swd_request.contains(SwdRequest::APnDP) {
-                // Last access of AP read
-                // Read the last result from RDBUFF.
-                SwdRequest::RDBUFF | SwdRequest::RnW
-            } else {
-                // Otherwise, transmit the original request.
-                swd_request
-            };
-            let result = swd_transfer_inner_with_retry(config, swdio, swd_request, 0)?;
-            write_u32(response, result);
-            *response_count += 1;
-        }
-    } else {
-        // Write access
-        while request_count > 0 {
-            request_count -= 1;
-            let data = read_u32(request);
-            swd_transfer_inner_with_retry(config, swdio, swd_request, data)?;
-            *response_count += 1;
-        }
-        // Check the last write result
-        swd_transfer_inner_with_retry(config, swdio, SwdRequest::RDBUFF | SwdRequest::RnW, 0)?;
-    }
-    Ok(())
-}
-
-fn swd_transfer<Swd: SwdIo>(
-    config: &mut CmsisDapConfig,
-    swdio: &mut Swd,
-    request: &[u8],
-    response: &mut [u8],
-) -> core::result::Result<(usize, usize), DapError> {
-    if request.len() == 0 {
-        return Err(DapError::InvalidCommand);
-    } else {
-        let mut request_count = request[1];
-        let mut request = BufferCursor::new_with_position(request, 2);
-        let (response_header, response_body) = response.split_at_mut(2);
-        let mut response = BufferCursor::new(response_body);
-        let mut posted_read = false;
-        let mut write_issued = false;
-        let mut response_count = 0;
-        let mut last_response = loop {
-            if request_count == 0 {
-                break Ok(0);
-            }
-            request_count -= 1;
-
-            let swd_request = read_swd_request(&mut request);
-
-            if swd_request.contains(SwdRequest::RnW) {
-                if posted_read {
-                    // read
-                    let result = if swd_request.contains(SwdRequest::APnDP)
-                        && !swd_request.contains(SwdRequest::TRANSFER_MATCH_VALUE)
-                    {
-                        swd_transfer_inner_with_retry(&config, swdio, swd_request, 0)
-                    } else {
-                        posted_read = false;
-                        swd_transfer_inner_with_retry(
-                            &config,
-                            swdio,
-                            SwdRequest::RDBUFF | SwdRequest::RnW,
-                            0,
-                        )
-                    };
-                    if let Ok(value) = result {
-                        write_u32(&mut response, value);
-                    } else {
-                        break result; // Error
-                    }
-                }
-                if swd_request.contains(SwdRequest::TRANSFER_MATCH_VALUE) {
-                    let match_value = read_u32(&mut request);
-                    let mut match_retry_count = 0;
-
-                    if swd_request.contains(SwdRequest::APnDP) {
-                        // Issue AP read
-                        match swd_transfer_inner_with_retry(&config, swdio, swd_request, 0) {
-                            Ok(_) => {}
-                            Err(err) => {
-                                break Err(err);
-                            }
-                        }
-                    }
-                    let result = loop {
-                        match swd_transfer_inner_with_retry(&config, swdio, swd_request, 0) {
-                            Ok(value) => {
-                                if value & config.match_mask == match_value {
-                                    break Ok(value);
-                                } else if match_retry_count == config.match_retry_count {
-                                    break Err(DapError::ExceedRetryCount);
-                                }
-                                match_retry_count += 1;
-                            }
-                            Err(DapError::SwdError(err)) => {
-                                if err != DAP_TRANSFER_WAIT
-                                    || match_retry_count == config.match_retry_count
-                                {
-                                    break Err(DapError::SwdError(err));
-                                }
-                                match_retry_count += 1;
-                            }
-                            Err(err) => break Err(err),
-                        }
-                    };
-                    if result.is_err() {
-                        break result; // Error
-                    }
-                } else {
-                    if swd_request.contains(SwdRequest::APnDP) {
-                        // Read AP
-                        if !posted_read {
-                            match swd_transfer_inner_with_retry(&config, swdio, swd_request, 0) {
-                                Ok(_) => {
-                                    posted_read = true;
-                                }
-                                Err(err) => {
-                                    break Err(err); // Error
-                                }
-                            }
-                        }
-                    } else {
-                        // Read DP
-                        match swd_transfer_inner_with_retry(&config, swdio, swd_request, 0) {
-                            Ok(value) => {
-                                write_u32(&mut response, value);
-                            }
-                            Err(err) => {
-                                break Err(err); // Error
-                            }
-                        }
-                    }
-                }
-                write_issued = false;
-            } else {
-                // Write register
-                if posted_read {
-                    // The last request is posted read, so we have to read-out the result.
-                    match swd_transfer_inner_with_retry(
-                        &config,
-                        swdio,
-                        SwdRequest::RDBUFF | SwdRequest::RnW,
-                        0,
-                    ) {
-                        Ok(value) => {
-                            write_u32(&mut response, value);
-                            posted_read = false;
-                        }
-                        Err(err) => {
-                            break Err(err); // Error
-                        }
-                    }
-                }
-
-                let value = read_u32(&mut request);
-                if swd_request.contains(SwdRequest::TRANSFER_MATCH_MASK) {
-                    // Update match mask
-                    config.match_mask = value
-                } else {
-                    // Write DP/AP
-                    match swd_transfer_inner_with_retry(&config, swdio, swd_request, value) {
-                        Ok(_) => {}
-                        Err(err) => {
-                            break Err(err); // Error
-                        }
-                    }
-
-                    write_issued = true;
-                }
-            }
-
-            response_count += 1;
-        };
-
-        // process remaining requests.
-        while request_count > 0 {
-            request_count -= 1;
-            let swd_request = read_swd_request(&mut request);
-
-            if swd_request.contains(SwdRequest::RnW) {
-                // Read request
-                if swd_request.contains(SwdRequest::TRANSFER_MATCH_VALUE) {
-                    // Read match value
-                    read_u32(&mut request);
-                }
-            } else {
-                // Write request
-                read_u32(&mut request);
-            }
-        }
-
-        if last_response.is_ok() {
-            if posted_read || write_issued {
-                match swd_transfer_inner_with_retry(
-                    &config,
-                    swdio,
-                    SwdRequest::RDBUFF | SwdRequest::RnW,
-                    0,
-                ) {
-                    Ok(value) => {
-                        if posted_read {
-                            write_u32(&mut response, value);
-                        }
-                    }
-                    Err(err) => {
-                        last_response = Err(err);
-                    }
-                }
-            }
-        }
-
-        response_header[0] = response_count as u8;
-        response_header[1] = last_response.map_or_else(
-            |e| {
-                if let DapError::SwdError(err) = e {
-                    err
-                } else {
-                    DAP_TRANSFER_ERROR
-                }
-            },
-            |_| DAP_TRANSFER_OK,
-        );
-        Ok((request.get_position(), response.get_position() + 2))
-    }
 }
 
 mod test {
@@ -907,6 +1090,105 @@ mod test {
         fn enable_output(&mut self) {}
 
         fn disable_output(&mut self) {}
+    }
+
+    impl CmsisDapCommand for DummyIo {
+        fn dap_info(
+            &self,
+            _capabilities: DapCapabilities,
+            _request: &[u8],
+            _response: &mut [u8],
+        ) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
+
+        fn dap_connect(
+            &mut self,
+            _config: &CmsisDapConfig,
+            _request: &[u8],
+            _response: &mut [u8],
+        ) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
+
+        fn dap_disconnect(
+            &mut self,
+            _config: &CmsisDapConfig,
+            _request: &[u8],
+            _response: &mut [u8],
+        ) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
+
+        fn transfer(
+            &mut self,
+            _config: &mut CmsisDapConfig,
+            _request: &[u8],
+            _response: &mut [u8],
+        ) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
+
+        fn transfer_block(
+            &mut self,
+            _config: &mut CmsisDapConfig,
+            _request: &[u8],
+            _response: &mut [u8],
+        ) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
+
+        fn transfer_abort(&self) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
+
+        fn write_abort(&self) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
+
+        fn delay(&self) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
+
+        fn reset_target(&self) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
+
+        fn swj_pins(
+            &mut self,
+            _config: &CmsisDapConfig,
+            _request: &[u8],
+            _response: &mut [u8],
+        ) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
+
+        fn swj_sequence(
+            &mut self,
+            _config: &CmsisDapConfig,
+            _request: &[u8],
+            _response: &mut [u8],
+        ) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
+
+        fn swd_sequence(
+            &mut self,
+            _config: &CmsisDapConfig,
+            _request: &[u8],
+            _response: &mut [u8],
+        ) -> core::result::Result<(usize, usize), DapError> {
+            Ok((1, 1))
+        }
+
+        fn swd_config(
+            &self,
+            _config: &mut CmsisDapConfig,
+            _request: &[u8],
+            _response: &mut [u8],
+        ) -> core::result::Result<(usize, usize), DapError> {
+            todo!()
+        }
     }
 
     struct DummyUsbInterface {
@@ -989,7 +1271,8 @@ mod test {
         dummy_usb_interface.read_buffer_size = 10;
         // no SWDIO Data
         let usb = UsbBusAllocator::new(dummy_usb_interface);
-        let mut dap: CmsisDap<DummyUsbInterface, DummyIo, 64> = CmsisDap::new(&usb, io);
+        let mut dap: CmsisDap<DummyUsbInterface, DummyIo, 64> =
+            CmsisDap::new(&usb, io, DapCapabilities::SWD);
         UsbDeviceBuilder::new(&usb, UsbVidPid(0x6666, 0x4444))
             .manufacturer("fugafuga.org")
             .product("CMSIS-DAP")
@@ -1018,7 +1301,8 @@ mod test {
         dummy_usb_interface.read_buffer_size = 3 * 8;
         // no SWDIO Data
         let usb = UsbBusAllocator::new(dummy_usb_interface);
-        let mut dap: CmsisDap<DummyUsbInterface, DummyIo, 64> = CmsisDap::new(&usb, io);
+        let mut dap: CmsisDap<DummyUsbInterface, DummyIo, 64> =
+            CmsisDap::new(&usb, io, DapCapabilities::SWD);
         UsbDeviceBuilder::new(&usb, UsbVidPid(0x6666, 0x4444))
             .manufacturer("fugafuga.org")
             .product("CMSIS-DAP")
