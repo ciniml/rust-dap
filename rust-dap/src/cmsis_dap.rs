@@ -885,21 +885,21 @@ mod test {
             todo!()
         }
 
-        fn swj_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]) {
+        fn swj_sequence(&mut self, _config: &SwdIoConfig, _count: usize, _data: &[u8]) {
             todo!()
         }
 
-        fn swd_read_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &mut [u8]) {}
+        fn swd_read_sequence(&mut self, _config: &SwdIoConfig, _count: usize, _data: &mut [u8]) {}
 
-        fn swd_write_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]) {
+        fn swd_write_sequence(&mut self, _config: &SwdIoConfig, _count: usize, _data: &[u8]) {
             todo!()
         }
 
         fn swd_transfer(
             &mut self,
-            config: &SwdIoConfig,
-            request: SwdRequest,
-            data: u32,
+            _config: &SwdIoConfig,
+            _request: SwdRequest,
+            _data: u32,
         ) -> core::result::Result<u32, DapError> {
             todo!()
         }
@@ -917,11 +917,11 @@ mod test {
     impl UsbBus for DummyUsbInterface {
         fn alloc_ep(
             &mut self,
-            ep_dir: usb_device::UsbDirection,
-            ep_addr: Option<EndpointAddress>,
-            ep_type: EndpointType,
-            max_packet_size: u16,
-            interval: u8,
+            _ep_dir: usb_device::UsbDirection,
+            _ep_addr: Option<EndpointAddress>,
+            _ep_type: EndpointType,
+            _max_packet_size: u16,
+            _interval: u8,
         ) -> Result<EndpointAddress> {
             Ok(EndpointAddress::from(0))
         }
@@ -932,25 +932,25 @@ mod test {
             todo!()
         }
 
-        fn set_device_address(&self, addr: u8) {
+        fn set_device_address(&self, _addr: u8) {
             todo!()
         }
 
-        fn write(&self, ep_addr: EndpointAddress, buf: &[u8]) -> Result<usize> {
+        fn write(&self, _ep_addr: EndpointAddress, buf: &[u8]) -> Result<usize> {
             Ok(buf.len())
         }
 
-        fn read(&self, ep_addr: EndpointAddress, buf: &mut [u8]) -> Result<usize> {
+        fn read(&self, _ep_addr: EndpointAddress, buf: &mut [u8]) -> Result<usize> {
             buf[..self.read_buffer_size]
                 .clone_from_slice(&self.read_buffer[..self.read_buffer_size]);
             Ok(self.read_buffer_size)
         }
 
-        fn set_stalled(&self, ep_addr: EndpointAddress, stalled: bool) {
+        fn set_stalled(&self, _ep_addr: EndpointAddress, _stalled: bool) {
             todo!()
         }
 
-        fn is_stalled(&self, ep_addr: EndpointAddress) -> bool {
+        fn is_stalled(&self, _ep_addr: EndpointAddress) -> bool {
             todo!()
         }
 
