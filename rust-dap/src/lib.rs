@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 
 #[cfg(feature = "bitbang")]
 pub mod bitbang;
