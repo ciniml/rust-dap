@@ -500,7 +500,8 @@ impl<C, D> CmsisDapCommandInner for SwdIoSet<C, D> {
         _pin_select: u8,
         _wait_us: u32,
     ) -> core::result::Result<u8, DapError> {
-        Err(DapError::InvalidCommand)
+        // TODO: write
+        Ok(0)
     }
 
     fn jtag_idcode(

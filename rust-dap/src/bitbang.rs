@@ -598,7 +598,8 @@ where
         _pin_select: u8,
         _wait_us: u32,
     ) -> core::result::Result<u8, DapError> {
-        unimplemented!();
+        // TODO: write
+        Ok(0)
     }
 
     fn jtag_idcode(
