@@ -67,7 +67,7 @@ mod app {
     #[cfg(feature = "swd")]
     type GpioSwClk = hal::gpio::bank0::Gpio2;
     #[cfg(feature = "swd")]
-    type GpioSwdIo = hal::gpio::bank0::Gpio4;
+    type GpioSwdIo = hal::gpio::bank0::Gpio3;
     // jtag
     #[cfg(feature = "jtag")]
     type JtagTmsPin = hal::gpio::bank0::Gpio11;
@@ -191,13 +191,13 @@ mod app {
             {
                 use rust_dap_rp2040::{swdio_pin::PicoSwdInputPin, util::CycleDelay};
                 let swclk_pin = PicoSwdInputPin::new(pins.gpio2.into_floating_input());
-                let swdio_pin = PicoSwdInputPin::new(pins.gpio4.into_floating_input());
+                let swdio_pin = PicoSwdInputPin::new(pins.gpio3.into_floating_input());
                 swdio = SwdIoSet::new(swclk_pin, swdio_pin, CycleDelay {});
             }
             #[cfg(not(feature = "bitbang"))]
             {
                 let mut swclk_pin = pins.gpio2.into_mode();
-                let mut swdio_pin = pins.gpio4.into_mode();
+                let mut swdio_pin = pins.gpio3.into_mode();
                 swclk_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
                 swdio_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
                 swdio = SwdIoSet::new(c.device.PIO0, swclk_pin, swdio_pin, &mut resets);
