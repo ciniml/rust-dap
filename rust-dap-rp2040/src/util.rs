@@ -18,7 +18,9 @@ use crate::line_coding::UartConfig;
 use core::result::Result;
 use hal::usb::UsbBus;
 use rp2040_hal as hal;
-use rust_dap::{CmsisDap, SwdIo, USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON};
+use rust_dap::{
+    CmsisDap, DapCapabilities, USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON,
+};
 use usb_device::device::{UsbDevice, UsbDeviceBuilder, UsbVidPid};
 use usb_device::{class_prelude::UsbBusAllocator, UsbError};
 use usbd_serial::SerialPort;
@@ -26,13 +28,29 @@ use usbd_serial::SerialPort;
 #[cfg(feature = "bitbang")]
 use crate::swdio_pin::{PicoSwdInputPin, PicoSwdOutputPin};
 #[cfg(feature = "bitbang")]
-use rust_dap::bitbang::{DelayFunc, SwdIoSet as BitbangSwdIoSet};
+use rust_dap::bitbang::{DelayFunc, JtagIoSet as BitbangJtagIoSet, SwdIoSet as BitbangSwdIoSet};
 #[cfg(feature = "bitbang")]
 pub type SwdIoSet<C, D> = BitbangSwdIoSet<
     PicoSwdInputPin<C>,
     PicoSwdOutputPin<C>,
     PicoSwdInputPin<D>,
     PicoSwdOutputPin<D>,
+    CycleDelay,
+>;
+#[cfg(feature = "bitbang")]
+pub type JtagIoSet<TCK, TMS, TDI, TDO, TRST, SRST> = BitbangJtagIoSet<
+    PicoSwdInputPin<TCK>,
+    PicoSwdOutputPin<TCK>,
+    PicoSwdInputPin<TMS>,
+    PicoSwdOutputPin<TMS>,
+    PicoSwdInputPin<TDI>,
+    PicoSwdOutputPin<TDI>,
+    PicoSwdInputPin<TDO>,
+    PicoSwdOutputPin<TDO>,
+    PicoSwdInputPin<TRST>,
+    PicoSwdOutputPin<TRST>,
+    PicoSwdInputPin<SRST>,
+    PicoSwdOutputPin<SRST>,
     CycleDelay,
 >;
 
@@ -85,20 +103,21 @@ pub struct UartConfigAndClock {
 type PicoUsbBusAllocator = UsbBusAllocator<UsbBus>;
 
 /// Initialize SWDIO, USB-UART, CMSIS-DAP and USB BUS.
-pub fn initialize_usb<'a, Swd, const MAX_PACKET_SIZE: usize>(
-    swdio: Swd,
+pub fn initialize_usb<'a, CmsisDapCommandInner, const MAX_PACKET_SIZE: usize>(
+    io: CmsisDapCommandInner,
     usb_allocator: &'a PicoUsbBusAllocator,
     serial: &'a str,
+    capabilities: DapCapabilities,
 ) -> (
     SerialPort<'a, UsbBus>,
-    CmsisDap<'a, UsbBus, Swd, MAX_PACKET_SIZE>,
+    CmsisDap<'a, UsbBus, CmsisDapCommandInner, MAX_PACKET_SIZE>,
     UsbDevice<'a, UsbBus>,
 )
 where
-    Swd: SwdIo,
+    CmsisDapCommandInner: rust_dap::CmsisDapCommandInner,
 {
     let usb_serial = SerialPort::new(usb_allocator);
-    let usb_dap = CmsisDap::new(usb_allocator, swdio);
+    let usb_dap = CmsisDap::new(usb_allocator, io, capabilities);
     let usb_bus = UsbDeviceBuilder::new(usb_allocator, UsbVidPid(0x6666, 0x4444))
         .manufacturer("fugafuga.org")
         .product("CMSIS-DAP")
