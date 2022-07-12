@@ -205,7 +205,7 @@ mod app {
             initialize_usb(
                 swdio,
                 usb_allocator,
-                "raspberry-pi-pico",
+                "raspberry-pi-pico-swd",
                 DapCapabilities::SWD,
             )
         };
@@ -235,7 +235,7 @@ mod app {
             initialize_usb(
                 jtagio,
                 usb_allocator,
-                "raspberry-pi-pico",
+                "raspberry-pi-pico-jtag",
                 DapCapabilities::JTAG,
             )
         };
