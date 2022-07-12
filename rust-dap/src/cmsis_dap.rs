@@ -17,7 +17,6 @@
 #![allow(non_upper_case_globals)]
 
 use core::convert::TryInto;
-use core::mem;
 
 use crate::cursor::{BufferCursor, CursorError, CursorRead, CursorWrite};
 use crate::interface::*;
@@ -315,6 +314,8 @@ pub trait CmsisDapCommandInner {
         data: u32,
     ) -> core::result::Result<u32, DapError>;
 
+    // TODO: Refactoring
+    #[allow(clippy::too_many_arguments)]
     fn transfer_block_inner(
         &mut self,
         config: &mut CmsisDapConfig,
@@ -623,7 +624,7 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
                     {
                         CmsisDapCommandInner::transfer_inner_with_retry(
                             self,
-                            &config,
+                            config,
                             dap_index,
                             swd_request,
                             0,
@@ -632,7 +633,7 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
                         posted_read = false;
                         CmsisDapCommandInner::transfer_inner_with_retry(
                             self,
-                            &config,
+                            config,
                             dap_index,
                             SwdRequest::RDBUFF | SwdRequest::RnW,
                             0,
@@ -652,7 +653,7 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
                         // Issue AP read
                         match CmsisDapCommandInner::transfer_inner_with_retry(
                             self,
-                            &config,
+                            config,
                             dap_index,
                             swd_request,
                             0,
@@ -666,7 +667,7 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
                     let result = loop {
                         match CmsisDapCommandInner::transfer_inner_with_retry(
                             self,
-                            &config,
+                            config,
                             dap_index,
                             swd_request,
                             0,
@@ -693,40 +694,38 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
                     if result.is_err() {
                         break result; // Error
                     }
-                } else {
-                    if swd_request.contains(SwdRequest::APnDP) {
-                        // Read AP
-                        if !posted_read {
-                            match CmsisDapCommandInner::transfer_inner_with_retry(
-                                self,
-                                &config,
-                                dap_index,
-                                swd_request,
-                                0,
-                            ) {
-                                Ok(_) => {
-                                    posted_read = true;
-                                }
-                                Err(err) => {
-                                    break Err(err); // Error
-                                }
-                            }
-                        }
-                    } else {
-                        // Read DP
+                } else if swd_request.contains(SwdRequest::APnDP) {
+                    // Read AP
+                    if !posted_read {
                         match CmsisDapCommandInner::transfer_inner_with_retry(
                             self,
-                            &config,
+                            config,
                             dap_index,
                             swd_request,
                             0,
                         ) {
-                            Ok(value) => {
-                                write_u32(&mut response, value);
+                            Ok(_) => {
+                                posted_read = true;
                             }
                             Err(err) => {
                                 break Err(err); // Error
                             }
+                        }
+                    }
+                } else {
+                    // Read DP
+                    match CmsisDapCommandInner::transfer_inner_with_retry(
+                        self,
+                        config,
+                        dap_index,
+                        swd_request,
+                        0,
+                    ) {
+                        Ok(value) => {
+                            write_u32(&mut response, value);
+                        }
+                        Err(err) => {
+                            break Err(err); // Error
                         }
                     }
                 }
@@ -737,7 +736,7 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
                     // The last request is posted read, so we have to read-out the result.
                     match CmsisDapCommandInner::transfer_inner_with_retry(
                         self,
-                        &config,
+                        config,
                         dap_index,
                         SwdRequest::RDBUFF | SwdRequest::RnW,
                         0,
@@ -760,7 +759,7 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
                     // Write DP/AP
                     match CmsisDapCommandInner::transfer_inner_with_retry(
                         self,
-                        &config,
+                        config,
                         dap_index,
                         swd_request,
                         value,
@@ -795,23 +794,21 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
             }
         }
 
-        if last_response.is_ok() {
-            if posted_read || write_issued {
-                match CmsisDapCommandInner::transfer_inner_with_retry(
-                    self,
-                    &config,
-                    dap_index,
-                    SwdRequest::RDBUFF | SwdRequest::RnW,
-                    0,
-                ) {
-                    Ok(value) => {
-                        if posted_read {
-                            write_u32(&mut response, value);
-                        }
+        if last_response.is_ok() && (posted_read || write_issued) {
+            match CmsisDapCommandInner::transfer_inner_with_retry(
+                self,
+                config,
+                dap_index,
+                SwdRequest::RDBUFF | SwdRequest::RnW,
+                0,
+            ) {
+                Ok(value) => {
+                    if posted_read {
+                        write_u32(&mut response, value);
                     }
-                    Err(err) => {
-                        last_response = Err(err);
-                    }
+                }
+                Err(err) => {
+                    last_response = Err(err);
                 }
             }
         }
@@ -836,7 +833,7 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
         request: &[u8],
         response: &mut [u8],
     ) -> core::result::Result<(usize, usize), DapError> {
-        if request.len() == 0 {
+        if request.is_empty() {
             return Err(DapError::InvalidCommand);
         }
         let dap_index = request[0];
@@ -863,7 +860,7 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
             request_count,
             &mut response_count,
         );
-        response_header[0] = (request_count >> 0 & 0xff) as u8;
+        response_header[0] = (request_count & 0xff) as u8;
         response_header[1] = (request_count >> 8 & 0xff) as u8;
         response_header[2] = match result {
             Ok(_) => DAP_TRANSFER_OK,
@@ -910,28 +907,23 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
         request: &[u8],
         response: &mut [u8],
     ) -> core::result::Result<(usize, usize), DapError> {
-        if request.len() > 0 {
-            let count = if request[0] == 0 {
-                256
-            } else {
-                request[0] as usize
-            };
-            let count_bytes = (count + 7) >> 3;
-            if request.len() > count_bytes {
-                CmsisDapCommandInner::swj_sequence(
-                    self,
-                    &config,
-                    count,
-                    &request[1..count_bytes + 1],
-                );
-                response[0] = DAP_OK;
-                Ok((count_bytes + 1, 1))
-            } else {
-                response[0] = DAP_ERROR;
-                Ok((request.len(), 1))
-            }
+        if request.is_empty() {
+            return Err(DapError::InvalidCommand);
+        }
+
+        let count = if request[0] == 0 {
+            256
         } else {
-            Err(DapError::InvalidCommand)
+            request[0] as usize
+        };
+        let count_bytes = (count + 7) >> 3;
+        if request.len() > count_bytes {
+            CmsisDapCommandInner::swj_sequence(self, config, count, &request[1..count_bytes + 1]);
+            response[0] = DAP_OK;
+            Ok((count_bytes + 1, 1))
+        } else {
+            response[0] = DAP_ERROR;
+            Ok((request.len(), 1))
         }
     }
 
@@ -941,14 +933,14 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
         request: &[u8],
         response: &mut [u8],
     ) -> core::result::Result<(usize, usize), DapError> {
-        if request.len() < 1 {
+        if request.is_empty() {
             return Err(DapError::InvalidCommand);
-        } else {
-            config.swdio.always_generate_data_phase = (request[0] & 0b100) != 0;
-            config.swdio.turn_around_cycles = (request[0] & 3) as u32 + 1;
-            response[0] = DAP_OK;
-            Ok((1, 1))
         }
+
+        config.swdio.always_generate_data_phase = (request[0] & 0b100) != 0;
+        config.swdio.turn_around_cycles = (request[0] & 3) as u32 + 1;
+        response[0] = DAP_OK;
+        Ok((1, 1))
     }
 
     fn swd_sequence(
@@ -1054,9 +1046,9 @@ where
         CmsisDap {
             inner: CmsisDapInterface::new(alloc, 64),
             io,
-            next_in_packet: unsafe { mem::MaybeUninit::uninit().assume_init() },
+            next_in_packet: [0; MAX_PACKET_SIZE],
             next_in_packet_size: None,
-            pending_out_packet: unsafe { mem::MaybeUninit::uninit().assume_init() },
+            pending_out_packet: [0; MAX_PACKET_SIZE],
             pending_out_packet_size: 0,
             config,
         }
@@ -1226,18 +1218,24 @@ where
 }
 
 fn read_swd_request<C: CursorRead>(cursor: &mut C) -> SwdRequest {
-    let mut buffer: [u8; 1] = unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+    let buffer: [core::mem::MaybeUninit<u8>; 1] =
+        unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+    let mut buffer = buffer.map(|x| unsafe { x.assume_init() });
     cursor.read(&mut buffer).ok();
     unsafe { SwdRequest::from_bits_unchecked(buffer[0]) }
 }
 fn read_u16<C: CursorRead>(cursor: &mut C) -> u16 {
-    let mut value: [u8; 2] = unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+    let value: [core::mem::MaybeUninit<u8>; 2] =
+        unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+    let mut value = value.map(|x| unsafe { x.assume_init() });
     cursor.read(&mut value).ok();
     u16::from_le_bytes(value)
 }
 
 fn read_u32<C: CursorRead>(cursor: &mut C) -> u32 {
-    let mut value: [u8; 4] = unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+    let value: [core::mem::MaybeUninit<u8>; 4] =
+        unsafe { core::mem::MaybeUninit::uninit().assume_init() };
+    let mut value = value.map(|x| unsafe { x.assume_init() });
     cursor.read(&mut value).ok();
     u32::from_le_bytes(value)
 }
@@ -1246,6 +1244,7 @@ fn write_u32<C: CursorWrite>(cursor: &mut C, value: u32) {
     cursor.write(&bytes).ok();
 }
 
+#[cfg(test)]
 mod test {
     use super::*;
     use usb_device::prelude::*;

@@ -39,10 +39,7 @@ impl<Buffer> BufferCursor<Buffer> {
         }
     }
     pub fn new_with_position(buffer: Buffer, position: usize) -> Self {
-        Self {
-            buffer,
-            position: position,
-        }
+        Self { buffer, position }
     }
     #[allow(dead_code)]
     pub fn release(self) -> Buffer {
