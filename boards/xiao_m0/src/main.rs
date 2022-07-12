@@ -17,13 +17,13 @@
 #![no_std]
 #![no_main]
 
+use embedded_hal::digital::v2::ToggleableOutputPin;
 use panic_halt as _;
 use rust_dap::bitbang::{DelayFunc, SwdIoSet};
+use rust_dap::DapCapabilities;
 use rust_dap::USB_CLASS_MISCELLANEOUS;
 use rust_dap::USB_PROTOCOL_IAD;
 use rust_dap::USB_SUBCLASS_COMMON;
-
-use embedded_hal::digital::v2::ToggleableOutputPin;
 
 use bsp::{entry, hal, pac};
 use hal::clock::GenericClockController;
@@ -96,7 +96,7 @@ fn main() -> ! {
 
     unsafe {
         USB_SERIAL = Some(SerialPort::new(&bus_allocator));
-        USB_DAP = Some(CmsisDap::new(&bus_allocator, swdio));
+        USB_DAP = Some(CmsisDap::new(&bus_allocator, swdio, DapCapabilities::SWD));
         USB_BUS = Some(
             UsbDeviceBuilder::new(&bus_allocator, UsbVidPid(0x6666, 0x4444))
                 .manufacturer("fugafuga.org")

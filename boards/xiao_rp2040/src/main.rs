@@ -28,7 +28,7 @@ mod app {
     use hal::usb::UsbBus;
     use usb_device::bus::UsbBusAllocator;
 
-    use rust_dap::CmsisDap;
+    use rust_dap::{CmsisDap, DapCapabilities};
     use usb_device::prelude::*;
     use usbd_serial::SerialPort;
 
@@ -170,7 +170,8 @@ mod app {
             swdio_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
             swdio = SwdIoSet::new(c.device.PIO0, swclk_pin, swdio_pin, &mut resets);
         }
-        let (usb_serial, usb_dap, usb_bus) = initialize_usb(swdio, usb_allocator, "xiao-rp2040");
+        let (usb_serial, usb_dap, usb_bus) =
+            initialize_usb(swdio, usb_allocator, "xiao-rp2040", DapCapabilities::SWD);
 
         let usb_led = pins.led.into_push_pull_output();
         let (uart_rx_producer, uart_rx_consumer) = c.local.uart_rx_queue.split();
