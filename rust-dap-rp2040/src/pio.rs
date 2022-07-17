@@ -214,7 +214,8 @@ impl<C, D> SwdIoSet<C, D> {
         while !self.tx_fifo.write(bits | 0) {}
         while self.rx_fifo.is_empty() {}
         let value = unsafe { self.rx_fifo.read().unwrap_unchecked() };
-        value >> ((32 - bits) & 31)
+        // next line means this: value >> ((32 - bits) & 31)
+        value.wrapping_shr(bits.wrapping_neg())
     }
 }
 
