@@ -179,10 +179,12 @@ mod app {
         // Initialize MCU reset pin.
         // Currently MCU reset pin is not used,
         // so all we have to do is just initialize the pin in case the pin is connected to the target RESET.
+        #[cfg(feature = "swd")]
         {
-            let mut reset_pin = pins.gpio4.into_push_pull_output();
-            reset_pin.set_low().ok();
-            reset_pin.set_high().ok();
+            let mut n_reset_pin = pins.gpio4.into_push_pull_output();
+            // RESET pin of Cortex Debug 10-pin connector is negarive logic
+            // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
+            n_reset_pin.set_high().ok();
         }
         #[cfg(feature = "swd")]
         let (usb_serial, usb_dap, usb_bus) = {
@@ -251,7 +253,6 @@ mod app {
         let mut debug_usb_irq_out = pins.gpio27.into_push_pull_output();
         debug_usb_irq_out.set_low().ok();
 
-        pins.gpio7.into_floating_disabled(); // Deassert nRESET pin.
         pins.gpio16.into_push_pull_output().set_high().ok();
         let mut idle_led = pins.gpio17.into_push_pull_output();
         idle_led.set_high().ok();
