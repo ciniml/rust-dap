@@ -67,6 +67,17 @@ impl DelayFunc for CycleDelay {
     fn cycle_delay(&self, cycles: u32) {
         cortex_m::asm::delay(cycles);
     }
+
+    fn delay_us(&self, micro_second: u32) {
+        let ticks_per_10ms: u64 = cortex_m::peripheral::SYST::get_ticks_per_10ms().into();
+        let micro_second: u64 = micro_second.into();
+        let mut ticks: u64 = ticks_per_10ms * micro_second / 10 / 1000;
+        while 0 < ticks {
+            let delay = ticks & 0xFFFF_FFFF;
+            cortex_m::asm::delay(delay as u32);
+            ticks -= delay;
+        }
+    }
 }
 
 pub fn read_usb_serial_byte_cs(usb_serial: &mut SerialPort<UsbBus>) -> Result<u8, UsbError> {

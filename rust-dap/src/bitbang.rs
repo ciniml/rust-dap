@@ -38,6 +38,7 @@ bitflags! {
 
 pub trait DelayFunc {
     fn cycle_delay(&self, cycles: u32);
+    fn delay_us(&self, micro_second: u32);
 }
 
 fn turn_to_in<I: InputPin + IoPin<I, O>, O: OutputPin + IoPin<I, O>>(
@@ -864,8 +865,13 @@ where
         get_input(&mut self.nsrst_in)
     }
     // delay
-    fn clock_wait(&self, config: &JtagIoConfig) {
-        self.cycle_delay.cycle_delay(config.clock_wait_cycles);
+    fn clock_wait_frequency(&self, frequency: u32) {
+        // wait to keep clock frequency for JTAG/SWD
+        let delay_us = frequency * 10_000_000;
+        self.cycle_delay.delay_us(delay_us);
+    }
+    fn delay_us(&self, micro_second: u32) {
+        self.cycle_delay.delay_us(micro_second);
     }
 }
 
@@ -901,18 +907,19 @@ pub trait BitBangJtagIo {
     fn set_nsrst_output(&mut self, output: bool);
     fn get_nsrst_input(&mut self) -> bool;
     // delay
-    fn clock_wait(&self, config: &JtagIoConfig);
+    fn clock_wait_frequency(&self, frequency: u32);
+    fn delay_us(&self, micro_second: u32);
 }
 
 pub trait PrimitiveJtagIo {
-    fn connect(&mut self, config: &JtagIoConfig);
-    fn disconnect(&mut self, config: &JtagIoConfig);
-    fn write_bit(&mut self, config: &JtagIoConfig, tms: bool, tdi: bool);
-    fn read_bit(&mut self, config: &JtagIoConfig, tms: bool, tdi: bool) -> bool;
+    fn connect(&mut self, config: &CmsisDapConfig);
+    fn disconnect(&mut self, config: &CmsisDapConfig);
+    fn write_bit(&mut self, config: &CmsisDapConfig, tms: bool, tdi: bool);
+    fn read_bit(&mut self, config: &CmsisDapConfig, tms: bool, tdi: bool) -> bool;
 }
 
 impl<Io: BitBangJtagIo> PrimitiveJtagIo for Io {
-    fn connect(&mut self, config: &JtagIoConfig) {
+    fn connect(&mut self, config: &CmsisDapConfig) {
         // initial value
         self.to_tck_out(false);
         self.to_tms_out(false);
@@ -924,15 +931,15 @@ impl<Io: BitBangJtagIo> PrimitiveJtagIo for Io {
         // reset with nTRST
         // TODO: wait 1ms
         self.set_ntrst_output(false);
-        self.clock_wait(config);
+        self.clock_wait_frequency(config.max_clock_frequency);
         self.set_ntrst_output(true);
-        self.clock_wait(config);
+        self.clock_wait_frequency(config.max_clock_frequency);
         // reset JTAG state machine
         for _i in 0..10 {
             self.write_bit(config, true, false);
         }
     }
-    fn disconnect(&mut self, config: &JtagIoConfig) {
+    fn disconnect(&mut self, config: &CmsisDapConfig) {
         // reset JTAG state machine
         for _i in 0..10 {
             self.write_bit(config, true, false);
@@ -946,35 +953,35 @@ impl<Io: BitBangJtagIo> PrimitiveJtagIo for Io {
         self.to_nsrst_in();
     }
 
-    fn write_bit(&mut self, config: &JtagIoConfig, tms: bool, tdi: bool) {
+    fn write_bit(&mut self, config: &CmsisDapConfig, tms: bool, tdi: bool) {
         self.set_tms_output(tms);
         self.set_tdi_output(tdi);
         self.set_tck_output(false);
-        self.clock_wait(config);
+        self.clock_wait_frequency(config.max_clock_frequency);
         self.set_tck_output(true);
-        self.clock_wait(config);
+        self.clock_wait_frequency(config.max_clock_frequency);
     }
 
-    fn read_bit(&mut self, config: &JtagIoConfig, tms: bool, tdi: bool) -> bool {
+    fn read_bit(&mut self, config: &CmsisDapConfig, tms: bool, tdi: bool) -> bool {
         self.set_tms_output(tms);
         self.set_tdi_output(tdi);
         self.set_tck_output(false);
-        self.clock_wait(config);
+        self.clock_wait_frequency(config.max_clock_frequency);
         let value = self.get_tdo_input();
         self.set_tck_output(true);
-        self.clock_wait(config);
+        self.clock_wait_frequency(config.max_clock_frequency);
         value
     }
 }
 
 impl<Io: PrimitiveJtagIo> JtagIo for Io {
-    fn connect(&mut self, config: &JtagIoConfig) {
+    fn connect(&mut self, config: &CmsisDapConfig) {
         PrimitiveJtagIo::connect(self, config)
     }
-    fn disconnect(&mut self, config: &JtagIoConfig) {
+    fn disconnect(&mut self, config: &CmsisDapConfig) {
         PrimitiveJtagIo::disconnect(self, config)
     }
-    fn swj_sequence(&mut self, config: &JtagIoConfig, count: usize, data: &[u8]) {
+    fn swj_sequence(&mut self, config: &CmsisDapConfig, count: usize, data: &[u8]) {
         // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__SWJ__Sequence.html
         let mut index = 0;
         let mut value = 0;
@@ -994,7 +1001,7 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
     }
     fn jtag_read_sequence(
         &mut self,
-        config: &JtagIoConfig,
+        config: &CmsisDapConfig,
         clock_count: usize,
         tms_value: bool,
         tdi_data: u64,
@@ -1011,7 +1018,7 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
 
     fn jtag_write_sequence(
         &mut self,
-        config: &JtagIoConfig,
+        config: &CmsisDapConfig,
         clock_count: usize,
         tms_value: bool,
         tdi_data: u64,
@@ -1024,14 +1031,14 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
 
     fn jtag_idcode(
         &mut self,
-        _config: &JtagIoConfig,
+        _config: &CmsisDapConfig,
         _index: u8,
     ) -> core::result::Result<u32, DapError> {
         // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__jtag__idcode.html#details
         unimplemented!();
     }
 
-    fn write_ir(&mut self, config: &JtagIoConfig, dap_index: u8, ir: u32) {
+    fn write_ir(&mut self, config: &CmsisDapConfig, dap_index: u8, ir: u32) {
         // to ShiftIR from Run-Test-Idle
         self.write_bit(config, true, false); // SelectDR
         self.write_bit(config, true, false); // SelectIR
@@ -1039,8 +1046,8 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
         self.write_bit(config, false, false); // ShiftIR
 
         // dap_indexの示すIRレジスタ以外はBYPASS(all 1)にする
-        let device_count = config.device_count;
-        let ir_length = &config.ir_length[0..(device_count as usize)];
+        let device_count = config.jtag.device_count;
+        let ir_length = &config.jtag.ir_length[0..(device_count as usize)];
         let bit_count_max = ir_length.iter().map(|x| *x as usize).sum();
         let mut bit_count: usize = 0;
         let mut ir = ir;
@@ -1065,7 +1072,7 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
         self.write_bit(config, false, false); // Run
     }
 
-    fn write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &[bool]) {
+    fn write_dr(&mut self, config: &CmsisDapConfig, dap_index: u8, dr: &[bool]) {
         if dr.is_empty() {
             // TODO: return Err
             panic!("dr have to hold least 1 bit")
@@ -1075,17 +1082,17 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
         self.write_bit(config, false, false); // CaptureDR
         self.write_bit(config, false, false); // ShiftDR
 
-        let head_bits = config.ir_length[0..(config.device_count as usize)]
+        let head_bits = config.jtag.ir_length[0..(config.jtag.device_count as usize)]
             .iter()
             .take(dap_index.into())
             .map(|x| *x as usize)
             .sum();
-        let tail_bits = config.ir_length[0..(config.device_count as usize)]
+        let tail_bits = config.jtag.ir_length[0..(config.jtag.device_count as usize)]
             .iter()
             .skip(dap_index as usize + 1)
             .map(|x| *x as usize)
             .sum();
-        let total_bits = config.ir_length[0..(config.device_count as usize)]
+        let total_bits = config.jtag.ir_length[0..(config.jtag.device_count as usize)]
             .iter()
             .map(|x| *x as usize)
             .sum();
@@ -1111,24 +1118,24 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
         self.write_bit(config, false, false); // Run
     }
 
-    fn read_write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &mut [bool]) {
+    fn read_write_dr(&mut self, config: &CmsisDapConfig, dap_index: u8, dr: &mut [bool]) {
         // to ShiftIR from Run-Test-Idle
         self.write_bit(config, true, false); // SelectDR
         self.write_bit(config, false, false); // CaptureDR
         self.write_bit(config, false, false); // ShiftDR
 
         // DRの内容を取得する
-        let head_bits = config.ir_length[0..(config.device_count as usize)]
+        let head_bits = config.jtag.ir_length[0..(config.jtag.device_count as usize)]
             .iter()
             .take(dap_index.into())
             .map(|x| *x as usize)
             .sum();
-        let tail_bits = config.ir_length[0..(config.device_count as usize)]
+        let tail_bits = config.jtag.ir_length[0..(config.jtag.device_count as usize)]
             .iter()
             .skip(dap_index as usize + 1)
             .map(|x| *x as usize)
             .sum();
-        let total_bits = config.ir_length[0..(config.device_count as usize)]
+        let total_bits = config.jtag.ir_length[0..(config.jtag.device_count as usize)]
             .iter()
             .map(|x| *x as usize)
             .sum();
@@ -1157,7 +1164,7 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
 
     fn jtag_transfer(
         &mut self,
-        config: &JtagIoConfig,
+        config: &CmsisDapConfig,
         dap_index: u8,
         request: SwdRequest,
         data: u32,
@@ -1265,14 +1272,14 @@ where
     DelayFn: DelayFunc,
 {
     fn connect(&mut self, config: &CmsisDapConfig) {
-        JtagIo::connect(self, &config.jtag);
+        JtagIo::connect(self, &config);
     }
     fn disconnect(&mut self, config: &CmsisDapConfig) {
-        JtagIo::disconnect(self, &config.jtag);
+        JtagIo::disconnect(self, &config);
     }
 
     fn swj_sequence(&mut self, config: &CmsisDapConfig, count: usize, data: &[u8]) {
-        JtagIo::swj_sequence(self, &config.jtag, count, data);
+        JtagIo::swj_sequence(self, &config, count, data);
     }
 
     fn swd_sequence(
@@ -1293,7 +1300,7 @@ where
         Ok(if sequence_info.tdo_capture {
             Some(JtagIo::jtag_read_sequence(
                 self,
-                &config.jtag,
+                &config,
                 sequence_info.number_of_tck_cycles,
                 sequence_info.tms_value,
                 tdi_data,
@@ -1301,7 +1308,7 @@ where
         } else {
             JtagIo::jtag_write_sequence(
                 self,
-                &config.jtag,
+                &config,
                 sequence_info.number_of_tck_cycles,
                 sequence_info.tms_value,
                 tdi_data,
@@ -1319,7 +1326,7 @@ where
     ) -> core::result::Result<u32, DapError> {
         let mut retry_count = 0;
         loop {
-            match JtagIo::jtag_transfer(self, &config.jtag, dap_index, request, data) {
+            match JtagIo::jtag_transfer(self, &config, dap_index, request, data) {
                 Ok(value) => break Ok(value),
                 Err(DapError::SwdError(err)) => {
                     // TODO: 動作確認

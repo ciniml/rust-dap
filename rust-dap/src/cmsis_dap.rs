@@ -110,7 +110,6 @@ pub struct SwdIoConfig {
 
 #[derive(Clone, Copy)]
 pub struct JtagIoConfig {
-    pub clock_wait_cycles: u32,
     pub device_count: u8,
     pub ir_length: [u8; 256],
     pub idle_cycles: u32,
@@ -135,40 +134,40 @@ pub trait SwdIo {
 pub trait SwjIo {}
 
 pub trait JtagIo {
-    fn connect(&mut self, config: &JtagIoConfig);
-    fn disconnect(&mut self, config: &JtagIoConfig);
-    fn swj_sequence(&mut self, config: &JtagIoConfig, count: usize, data: &[u8]);
+    fn connect(&mut self, config: &CmsisDapConfig);
+    fn disconnect(&mut self, config: &CmsisDapConfig);
+    fn swj_sequence(&mut self, config: &CmsisDapConfig, count: usize, data: &[u8]);
     fn jtag_read_sequence(
         &mut self,
-        config: &JtagIoConfig,
+        config: &CmsisDapConfig,
         clock_count: usize,
         tms_value: bool,
         tdi_data: u64,
     ) -> u64;
     fn jtag_write_sequence(
         &mut self,
-        config: &JtagIoConfig,
+        config: &CmsisDapConfig,
         clock_count: usize,
         tms_value: bool,
         tdi_data: u64,
     );
     fn jtag_idcode(
         &mut self,
-        config: &JtagIoConfig,
+        config: &CmsisDapConfig,
         index: u8,
     ) -> core::result::Result<u32, DapError>;
 
     fn jtag_transfer(
         &mut self,
-        config: &JtagIoConfig,
+        config: &CmsisDapConfig,
         dap_index: u8,
         request: SwdRequest,
         data: u32,
     ) -> core::result::Result<u32, DapError>;
 
-    fn write_ir(&mut self, config: &JtagIoConfig, dap_index: u8, ir: u32);
-    fn write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &[bool]);
-    fn read_write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &mut [bool]);
+    fn write_ir(&mut self, config: &CmsisDapConfig, dap_index: u8, ir: u32);
+    fn write_dr(&mut self, config: &CmsisDapConfig, dap_index: u8, dr: &[bool]);
+    fn read_write_dr(&mut self, config: &CmsisDapConfig, dap_index: u8, dr: &mut [bool]);
 }
 
 pub const DAP_OK: u8 = 0x00;
@@ -239,7 +238,6 @@ impl Default for SwdIoConfig {
 impl Default for JtagIoConfig {
     fn default() -> Self {
         Self {
-            clock_wait_cycles: 1000,
             device_count: 0,
             ir_length: [0; 256],
             idle_cycles: 0,
@@ -250,6 +248,7 @@ impl Default for JtagIoConfig {
 pub struct CmsisDapConfig {
     pub swdio: SwdIoConfig,
     pub jtag: JtagIoConfig,
+    pub max_clock_frequency: u32,
     pub retry_count: u32,
     pub match_mask: u32,
     pub match_retry_count: u32,
@@ -261,6 +260,7 @@ impl Default for CmsisDapConfig {
         Self {
             swdio: SwdIoConfig::default(),
             jtag: JtagIoConfig::default(),
+            max_clock_frequency: 1000,
             retry_count: 5,
             match_mask: 0xffffffff,
             match_retry_count: 5,
@@ -455,12 +455,13 @@ pub trait CmsisDapCommand {
     ) -> core::result::Result<(usize, usize), DapError>;
     fn swj_clock(
         &self,
+        config: &mut CmsisDapConfig,
         request: &[u8],
         response: &mut [u8],
     ) -> core::result::Result<(usize, usize), DapError> {
         if request.len() == 4 {
-            // TODO: use clock
-            let _clock = u32::from_le_bytes(request[0..4].try_into().unwrap());
+            let clock = u32::from_le_bytes(request[0..4].try_into().unwrap());
+            config.max_clock_frequency = clock;
             response[0] = DAP_OK;
             Ok((4, 1))
         } else {
@@ -1112,7 +1113,9 @@ where
                     DapCommandId::Delay => self.io.delay(),
                     DapCommandId::ResetTarget => self.io.reset_target(),
                     DapCommandId::SWJPins => self.io.swj_pins(&self.config, request, response_body),
-                    DapCommandId::SWJClock => self.io.swj_clock(request, response_body),
+                    DapCommandId::SWJClock => {
+                        self.io.swj_clock(&mut self.config, request, response_body)
+                    }
                     DapCommandId::SWJSequence => {
                         self.io.swj_sequence(&self.config, request, response_body)
                     }
