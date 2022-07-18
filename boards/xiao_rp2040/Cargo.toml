@@ -12,7 +12,7 @@ debug = 2
 
 [features]
 bitbang = ["rust-dap/bitbang", "rust-dap-rp2040/bitbang"]
-pio_set_clock = ["rust-dap-rp2040/pio_set_clock"]   # Enable swj_clock implementation for PIO and set appropriate SWCLK frequency. Otherwise, SWCLK is fixed to 15.625[MHz]
+set_clock = ["rust-dap-rp2040/set_clock"]   # Enable swj_clock implementation for PIO and set appropriate SWCLK frequency. Otherwise, SWCLK is fixed to 15.625[MHz]
 
 [dependencies]
 rust-dap = { path = "../../rust-dap", features = ["unproven"] }

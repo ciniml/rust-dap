@@ -138,6 +138,7 @@ pub trait SwjIo {}
 pub trait JtagIo {
     fn connect(&mut self, config: &JtagIoConfig);
     fn disconnect(&mut self, config: &JtagIoConfig);
+    fn swj_clock(&mut self, config: &mut JtagIoConfig, frequency_hz: u32) -> core::result::Result<(), DapError>;
     fn swj_sequence(&mut self, config: &JtagIoConfig, count: usize, data: &[u8]);
     fn jtag_read_sequence(
         &mut self,

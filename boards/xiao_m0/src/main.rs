@@ -34,7 +34,7 @@ use xiao_m0 as bsp;
 use usb_device::bus::UsbBusAllocator;
 use xiao_m0::hal::usb::UsbBus;
 
-use rust_dap::CmsisDap;
+use rust_dap::{CmsisDap, DapCapabilities};
 use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
@@ -96,7 +96,7 @@ fn main() -> ! {
 
     unsafe {
         USB_SERIAL = Some(SerialPort::new(&bus_allocator));
-        USB_DAP = Some(CmsisDap::new(&bus_allocator, swdio));
+        USB_DAP = Some(CmsisDap::new(&bus_allocator, swdio, DapCapabilities::SWD));
         USB_BUS = Some(
             UsbDeviceBuilder::new(&bus_allocator, UsbVidPid(0x6666, 0x4444))
                 .manufacturer("fugafuga.org")
