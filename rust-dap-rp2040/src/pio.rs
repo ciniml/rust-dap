@@ -256,7 +256,7 @@ impl<C, D> SwdIoSet<C, D> {
         self.to_swdio_in();
         self.set_clk_pindir(false);
         // Reset clock
-        #[cfg(feature="pio_set_clock")]
+        #[cfg(feature = "pio_set_clock")]
         self.set_clock(DEFAULT_SWJ_CLOCK_HZ);
     }
 }
@@ -482,10 +482,13 @@ impl<C, D> CmsisDapCommandInner for SwdIoSet<C, D> {
         SwdIo::swj_sequence(self, &config.swdio, count, data);
     }
 
-    fn swj_clock(&mut self, config: &mut CmsisDapConfig, frequency_hz: u32) -> core::result::Result<(), DapError> {
+    fn swj_clock(
+        &mut self,
+        config: &mut CmsisDapConfig,
+        frequency_hz: u32,
+    ) -> core::result::Result<(), DapError> {
         SwdIo::swj_clock(self, &mut config.swdio, frequency_hz)
     }
-    
 
     fn swd_sequence(
         &mut self,

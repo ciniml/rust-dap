@@ -119,7 +119,11 @@ pub struct JtagIoConfig {
 pub trait SwdIo {
     fn connect(&mut self);
     fn disconnect(&mut self);
-    fn swj_clock(&mut self, config: &mut SwdIoConfig, frequency_hz: u32) -> core::result::Result<(), DapError>;
+    fn swj_clock(
+        &mut self,
+        config: &mut SwdIoConfig,
+        frequency_hz: u32,
+    ) -> core::result::Result<(), DapError>;
     fn swj_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]);
     fn swd_read_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &mut [u8]);
     fn swd_write_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]);
@@ -138,7 +142,11 @@ pub trait SwjIo {}
 pub trait JtagIo {
     fn connect(&mut self, config: &JtagIoConfig);
     fn disconnect(&mut self, config: &JtagIoConfig);
-    fn swj_clock(&mut self, config: &mut JtagIoConfig, frequency_hz: u32) -> core::result::Result<(), DapError>;
+    fn swj_clock(
+        &mut self,
+        config: &mut JtagIoConfig,
+        frequency_hz: u32,
+    ) -> core::result::Result<(), DapError>;
     fn swj_sequence(&mut self, config: &JtagIoConfig, count: usize, data: &[u8]);
     fn jtag_read_sequence(
         &mut self,
@@ -1139,7 +1147,9 @@ where
                     DapCommandId::Delay => self.io.delay(),
                     DapCommandId::ResetTarget => self.io.reset_target(),
                     DapCommandId::SWJPins => self.io.swj_pins(&self.config, request, response_body),
-                    DapCommandId::SWJClock => self.io.swj_clock(&mut self.config, request, response_body),
+                    DapCommandId::SWJClock => {
+                        self.io.swj_clock(&mut self.config, request, response_body)
+                    }
                     DapCommandId::SWJSequence => {
                         self.io.swj_sequence(&self.config, request, response_body)
                     }
@@ -1287,7 +1297,11 @@ mod test {
             todo!()
         }
 
-        fn swj_clock(&mut self, _config: &mut SwdIoConfig, _frequency_hz: u32) -> core::result::Result<(), DapError> {
+        fn swj_clock(
+            &mut self,
+            _config: &mut SwdIoConfig,
+            _frequency_hz: u32,
+        ) -> core::result::Result<(), DapError> {
             todo!()
         }
 
