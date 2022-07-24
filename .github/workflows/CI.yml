@@ -36,6 +36,6 @@ jobs:
         run: |
           cargo clippy --features swd
           cargo clippy --features swd,bitbang
-          cargo clippy --features jtag
+          cargo clippy --no-default-features --features jtag
         working-directory: ${{ matrix.projects }}
         if: ${{ matrix.projects  == 'boards/rpi_pico' }}
