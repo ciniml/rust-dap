@@ -9,15 +9,25 @@ license = "Apache-2.0"
 
 [profile.release]
 debug = 2
+codegen-units = 1
+opt-level = 3
+lto = true
 
 [features]
 bitbang = ["rust-dap/bitbang", "rust-dap-rp2040/bitbang"]
 set_clock = ["rust-dap-rp2040/set_clock"]   # Enable swj_clock implementation for PIO and set appropriate SWCLK frequency. Otherwise, SWCLK is fixed to 15.625[MHz]
+ram-exec = ["rust-dap-rp2040/ram-exec"] # Execute-in-SRAM support
+
+[dependencies.rp-pico]
+git = "https://github.com/rp-rs/rp-hal.git"
+rev = "8d18abdfc7c0129debba85457d32d32175bf36bd"
+# Below is to take out "boot2" from the set of features.
+default-features = false
+features = [ "rt" ]
 
 [dependencies]
 rust-dap = { path = "../../rust-dap", features = ["unproven"] }
 rust-dap-rp2040 = { path = "../../rust-dap-rp2040" }
-rp-pico = { git = "https://github.com/rp-rs/rp-hal.git", rev = "8d18abdfc7c0129debba85457d32d32175bf36bd" }
 panic-halt = "0.2"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"

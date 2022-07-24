@@ -5,5 +5,5 @@ target = "thumbv6m-none-eabi"
 runner = "elf2uf2-rs -d"
 #runner = "./run-with-picotool.sh"
 rustflags = [
-  "-C", "link-arg=-Tlink.x", "-C", "link-arg=--nmagic",
+  "-C", "link-arg=-Tlink.ram.x", "-C", "link-arg=--nmagic",
 ]
