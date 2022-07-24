@@ -60,7 +60,7 @@ mod app {
     type GpioUartRx = hal::gpio::bank0::Gpio1;
     type GpioUsbLed = hal::gpio::bank0::Gpio25;
     type GpioIdleLed = hal::gpio::bank0::Gpio17;
-    type GpioDebugOut = hal::gpio::bank0::Gpio6;
+    type GpioDebugOut = hal::gpio::bank0::Gpio15;
     type GpioDebugIrqOut = hal::gpio::bank0::Gpio28;
     type GpioDebugUsbIrqOut = hal::gpio::bank0::Gpio27;
     // swd
@@ -246,7 +246,7 @@ mod app {
         let (uart_rx_producer, uart_rx_consumer) = c.local.uart_rx_queue.split();
         let (uart_tx_producer, uart_tx_consumer) = c.local.uart_tx_queue.split();
 
-        let mut debug_out = pins.gpio6.into_push_pull_output();
+        let mut debug_out = pins.gpio15.into_push_pull_output();
         debug_out.set_low().ok();
         let mut debug_irq_out = pins.gpio28.into_push_pull_output();
         debug_irq_out.set_low().ok();
