@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 jobs:
-  fmt:
+  format_and_clippy:
     runs-on: ubuntu-latest
     strategy:
       max-parallel: 2
@@ -18,9 +18,24 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: setup
-        run: rustup component add rustfmt
+        run: rustup component add rustfmt clippy
+      - name: target add thumbv6m-none-eabi
+        run: rustup target add thumbv6m-none-eabi
+        if: ${{ startsWith(matrix.projects, 'boards') }}
+      - name: install package dependencies
+        run: apt-get update && apt-get -y install pkg-config libudev-dev
+        if: ${{ matrix.projects == 'uart-test' }}
       - name: cargo fmt for ${{ matrix.projects }}
         run: cargo fmt --all -- --check
         working-directory: ${{ matrix.projects }}
-          
-      
+      - name: cargo clippy for ${{ matrix.projects }}
+        run: cargo clippy
+        working-directory: ${{ matrix.projects }}
+        if: ${{ matrix.projects != 'boards/rpi_pico' }}
+      - name: cargo clippy for boards/rpi_pico
+        run: |
+          cargo clippy --features swd
+          cargo clippy --features swd,bitbang
+          cargo clippy --features jtag
+        working-directory: ${{ matrix.projects }}
+        if: ${{ matrix.projects  == 'boards/rpi_pico' }}

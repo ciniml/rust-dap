@@ -13,7 +13,7 @@ where
     I: PinId,
 {
     pub fn new(pin: Pin<I, Input<Floating>>) -> Self {
-        Self { pin: pin }
+        Self { pin }
     }
 }
 
@@ -57,7 +57,7 @@ where
     I: PinId,
 {
     pub fn new(pin: Pin<I, Output<PushPull>>) -> Self {
-        Self { pin: pin }
+        Self { pin }
     }
 }
 

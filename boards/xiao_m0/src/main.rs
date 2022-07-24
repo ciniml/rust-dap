@@ -17,13 +17,13 @@
 #![no_std]
 #![no_main]
 
+use embedded_hal::digital::v2::ToggleableOutputPin;
 use panic_halt as _;
 use rust_dap::bitbang::{DelayFunc, SwdIoSet};
+use rust_dap::DapCapabilities;
 use rust_dap::USB_CLASS_MISCELLANEOUS;
 use rust_dap::USB_PROTOCOL_IAD;
 use rust_dap::USB_SUBCLASS_COMMON;
-
-use embedded_hal::digital::v2::ToggleableOutputPin;
 
 use bsp::{entry, hal, pac};
 use hal::clock::GenericClockController;
@@ -95,10 +95,10 @@ fn main() -> ! {
     );
 
     unsafe {
-        USB_SERIAL = Some(SerialPort::new(&bus_allocator));
-        USB_DAP = Some(CmsisDap::new(&bus_allocator, swdio));
+        USB_SERIAL = Some(SerialPort::new(bus_allocator));
+        USB_DAP = Some(CmsisDap::new(bus_allocator, swdio, DapCapabilities::SWD));
         USB_BUS = Some(
-            UsbDeviceBuilder::new(&bus_allocator, UsbVidPid(0x6666, 0x4444))
+            UsbDeviceBuilder::new(bus_allocator, UsbVidPid(0x6666, 0x4444))
                 .manufacturer("fugafuga.org")
                 .product("CMSIS-DAP")
                 .serial_number("test")
@@ -136,27 +136,25 @@ static mut LED: Option<Pin<PA18, Output<PushPull>>> = None;
 
 fn poll_usb() {
     unsafe {
-        USB_BUS.as_mut().map(|usb_dev| {
-            USB_SERIAL.as_mut().map(|serial| {
-                USB_DAP.as_mut().map(|dap| {
+        if let Some(usb_dev) = USB_BUS.as_mut() {
+            if let Some(serial) = USB_SERIAL.as_mut() {
+                if let Some(dap) = USB_DAP.as_mut() {
                     usb_dev.poll(&mut [serial, dap]);
 
                     dap.process().ok();
-
                     let mut buf = [0u8; 64];
-
                     if let Ok(count) = serial.read(&mut buf) {
                         for (i, c) in buf.iter().enumerate() {
                             if i >= count {
                                 break;
                             }
-                            serial.write(&[c.clone()]).unwrap();
+                            serial.write(&[*c]).unwrap();
                             LED.as_mut().map(|led| led.toggle());
                         }
                     };
-                });
-            });
-        });
+                }
+            }
+        }
     };
 }
 

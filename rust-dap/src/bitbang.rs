@@ -221,7 +221,7 @@ where
     fn get_swdio_input(&mut self) -> bool {
         self.swdio_in
             .as_mut()
-            .and_then(|p| Some(p.is_high().unwrap_or(false)))
+            .map(|p| p.is_high().unwrap_or(false))
             .unwrap()
     }
     fn clock_wait(&self, config: &SwdIoConfig) {
