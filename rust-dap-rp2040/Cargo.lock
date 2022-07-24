@@ -138,6 +138,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc-any"
+version = "2.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "774646b687f63643eb0f4bf13dc263cb581c8c9e57973b6ddf78bda3994d88df"
+dependencies = [
+ "debug-helper",
+]
+
+[[package]]
 name = "critical-section"
 version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -148,6 +157,12 @@ dependencies = [
  "cortex-m",
  "riscv",
 ]
+
+[[package]]
+name = "debug-helper"
+version = "0.3.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f578e8e2c440e7297e008bb5486a3a8a194775224bbc23729b0dbdfaeebf162e"
 
 [[package]]
 name = "either"
@@ -450,6 +465,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rp2040-boot2"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8b480fe63133f0d639f82ce5a027fee7cac7ac92f67ef1896ee036a6f9737128"
+dependencies = [
+ "crc-any",
+]
+
+[[package]]
 name = "rp2040-hal"
 version = "0.4.0"
 source = "git+https://github.com/rp-rs/rp-hal.git?rev=8d18abdfc7c0129debba85457d32d32175bf36bd#8d18abdfc7c0129debba85457d32d32175bf36bd"
@@ -528,6 +552,7 @@ dependencies = [
  "nb 0.1.3",
  "panic-halt",
  "pio",
+ "rp2040-boot2",
  "rp2040-hal",
  "rust-dap",
  "usb-device",
