@@ -52,7 +52,7 @@ const MS_VENDOR_CODE: u8 = 0x01;
 
 fn fill_utf16<const N: usize>(buf: &mut [u8], b: &[u8; N]) {
     for i in 0..N {
-        buf[i * 2 + 0] = b[i];
+        buf[i * 2] = b[i];
         buf[i * 2 + 1] = 0;
     }
 }

@@ -64,7 +64,9 @@ pub type SwdIoSet<C, D> = PioSwdIoSet<pio0::Pin<C>, pio0::Pin<D>>;
 pub struct CycleDelay {}
 #[cfg(feature = "bitbang")]
 impl CycleDelay {
+    #[allow(unused)]
     const CPU_FREQUENCY_HZ: u32 = 120000000; // Default CPU Frequency.
+    #[allow(unused)]
     const AVERAGE_OPERATION_OVERHEAD_CYCLES: u32 = 60; // Average SWD/JTAG operation overhead in cycles.
 }
 #[cfg(feature = "bitbang")]

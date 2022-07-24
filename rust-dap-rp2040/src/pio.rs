@@ -256,7 +256,7 @@ impl<C, D> SwdIoSet<C, D> {
         self.to_swdio_in();
         self.set_clk_pindir(false);
         // Reset clock
-        #[cfg(feature = "pio_set_clock")]
+        #[cfg(feature = "set_clock")]
         self.set_clock(DEFAULT_SWJ_CLOCK_HZ);
     }
 }
@@ -279,9 +279,11 @@ impl<C, D> SwdIoSet<C, D> {
 
 // Supplemental functions for SWD
 impl<C, D> SwdIoSet<C, D> {
+    #[allow(clippy::wrong_self_convention)]
     fn to_swdio_in(&mut self) {
         self.read_bits(0);
     }
+    #[allow(clippy::wrong_self_convention)]
     fn to_swdio_out(&mut self, output: bool) {
         self.write_bits(
             0,
@@ -328,7 +330,7 @@ impl<C, D> SwdIo for SwdIoSet<C, D> {
         _config: &mut SwdIoConfig,
         #[allow(unused_variables)] frequency_hz: u32,
     ) -> core::result::Result<(), DapError> {
-        #[cfg(feature = "pio_set_clock")]
+        #[cfg(feature = "set_clock")]
         self.set_clock(frequency_hz);
         Ok(())
     }
@@ -458,7 +460,7 @@ impl<C, D> SwdIo for SwdIoSet<C, D> {
         }
         self.enable_output();
         self.to_swdio_out(true);
-        return Err(DapError::SwdError(ack));
+        Err(DapError::SwdError(ack))
     }
 
     fn enable_output(&mut self) {
@@ -496,57 +498,57 @@ impl<C, D> CmsisDapCommandInner for SwdIoSet<C, D> {
         request: &[u8],
         response: &mut [u8],
     ) -> core::result::Result<(usize, usize), DapError> {
-        if request.len() > 0 {
-            let mut sequence_count = request[0];
-            let mut request_index = 1;
-            let mut response_index = 1;
-            while sequence_count > 0 {
-                sequence_count -= 1;
-                let sequence_info = request[request_index];
-                request_index += 1;
-
-                let clock_count = if sequence_info & SWD_SEQUENCE_CLOCK == 0 {
-                    64
-                } else {
-                    sequence_info & SWD_SEQUENCE_CLOCK
-                } as usize;
-                let bytes_count = (clock_count + 7) >> 3;
-                let do_input = sequence_info & SWD_SEQUENCE_DIN != 0;
-
-                if do_input {
-                    SwdIo::disable_output(self);
-                    SwdIo::swd_read_sequence(
-                        self,
-                        &config.swdio,
-                        clock_count,
-                        &mut response[response_index..],
-                    );
-                } else {
-                    SwdIo::enable_output(self);
-                    SwdIo::swd_write_sequence(
-                        self,
-                        &config.swdio,
-                        clock_count,
-                        &request[request_index..],
-                    );
-                }
-
-                if sequence_count == 0 {
-                    SwdIo::enable_output(self)
-                }
-
-                if do_input {
-                    request_index += 1;
-                    response_index += bytes_count;
-                } else {
-                    request_index = 1 + bytes_count;
-                }
-            }
-            response[0] = DAP_OK;
-            Ok((request_index, response_index))
-        } else {
-            Err(DapError::InvalidCommand)
+        if request.is_empty() {
+            return Err(DapError::InvalidCommand);
         }
+
+        let mut sequence_count = request[0];
+        let mut request_index = 1;
+        let mut response_index = 1;
+        while sequence_count > 0 {
+            sequence_count -= 1;
+            let sequence_info = request[request_index];
+            request_index += 1;
+
+            let clock_count = if sequence_info & SWD_SEQUENCE_CLOCK == 0 {
+                64
+            } else {
+                sequence_info & SWD_SEQUENCE_CLOCK
+            } as usize;
+            let bytes_count = (clock_count + 7) >> 3;
+            let do_input = sequence_info & SWD_SEQUENCE_DIN != 0;
+
+            if do_input {
+                SwdIo::disable_output(self);
+                SwdIo::swd_read_sequence(
+                    self,
+                    &config.swdio,
+                    clock_count,
+                    &mut response[response_index..],
+                );
+            } else {
+                SwdIo::enable_output(self);
+                SwdIo::swd_write_sequence(
+                    self,
+                    &config.swdio,
+                    clock_count,
+                    &request[request_index..],
+                );
+            }
+
+            if sequence_count == 0 {
+                SwdIo::enable_output(self)
+            }
+
+            if do_input {
+                request_index += 1;
+                response_index += bytes_count;
+            } else {
+                request_index = 1 + bytes_count;
+            }
+        }
+        response[0] = DAP_OK;
+        Ok((request_index, response_index))
     }
 
     fn transfer_inner_with_retry(

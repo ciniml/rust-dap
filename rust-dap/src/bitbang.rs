@@ -228,7 +228,7 @@ where
     fn get_swdio_input(&mut self) -> bool {
         self.swdio_in
             .as_mut()
-            .and_then(|p| Some(p.is_high().unwrap_or(false)))
+            .map(|p| p.is_high().unwrap_or(false))
             .unwrap()
     }
     fn clock_wait(&self, config: &SwdIoConfig) {
@@ -253,7 +253,7 @@ pub trait BitBangSwdIo {
 
 pub trait PrimitiveSwdIo {
     /// Calculates number of cycles to delay to generate the target clock frequency.
-    fn calculate_half_clock_cycles(frequency_hz: u32) -> Option<u32> {
+    fn calculate_half_clock_cycles(_frequency_hz: u32) -> Option<u32> {
         None
     }
 
