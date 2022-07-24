@@ -20,10 +20,7 @@
 use embedded_hal::digital::v2::ToggleableOutputPin;
 use panic_halt as _;
 use rust_dap::bitbang::{DelayFunc, SwdIoSet};
-use rust_dap::DapCapabilities;
-use rust_dap::USB_CLASS_MISCELLANEOUS;
-use rust_dap::USB_PROTOCOL_IAD;
-use rust_dap::USB_SUBCLASS_COMMON;
+use rust_dap::{CmsisDap, DapCapabilities, USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON};
 
 use bsp::{entry, hal, pac};
 use hal::clock::GenericClockController;
@@ -34,7 +31,6 @@ use xiao_m0 as bsp;
 use usb_device::bus::UsbBusAllocator;
 use xiao_m0::hal::usb::UsbBus;
 
-use rust_dap::{CmsisDap, DapCapabilities};
 use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
