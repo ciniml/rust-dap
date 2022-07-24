@@ -70,17 +70,17 @@ mod app {
     type GpioSwdIo = hal::gpio::bank0::Gpio3;
     // jtag
     #[cfg(feature = "jtag")]
-    type JtagTmsPin = hal::gpio::bank0::Gpio11;
+    type JtagTckPin = hal::gpio::bank0::Gpio2;
     #[cfg(feature = "jtag")]
-    type JtagTckPin = hal::gpio::bank0::Gpio18;
+    type JtagTmsPin = hal::gpio::bank0::Gpio3;
     #[cfg(feature = "jtag")]
-    type JtagTdiPin = hal::gpio::bank0::Gpio10;
+    type JtagTdoPin = hal::gpio::bank0::Gpio5;
     #[cfg(feature = "jtag")]
-    type JtagTdoPin = hal::gpio::bank0::Gpio19;
+    type JtagTdiPin = hal::gpio::bank0::Gpio6;
     #[cfg(feature = "jtag")]
-    type JtagTrstPin = hal::gpio::bank0::Gpio9;
+    type JtagTrstPin = hal::gpio::bank0::Gpio7;
     #[cfg(feature = "jtag")]
-    type JtagResetPin = hal::gpio::bank0::Gpio20;
+    type JtagResetPin = hal::gpio::bank0::Gpio4;
 
     // UART Interrupt context
     const UART_RX_QUEUE_SIZE: usize = 256;
@@ -218,12 +218,12 @@ mod app {
             #[cfg(feature = "bitbang")]
             {
                 use rust_dap_rp2040::{swdio_pin::PicoSwdInputPin, util::CycleDelay};
-                let tck_pin = PicoSwdInputPin::new(pins.gpio18.into_floating_input());
-                let tms_pin = PicoSwdInputPin::new(pins.gpio11.into_floating_input());
-                let tdi_pin = PicoSwdInputPin::new(pins.gpio10.into_floating_input());
-                let tdo_pin = PicoSwdInputPin::new(pins.gpio19.into_floating_input());
-                let trst_pin = PicoSwdInputPin::new(pins.gpio9.into_floating_input());
-                let srst_pin = PicoSwdInputPin::new(pins.gpio20.into_floating_input());
+                let tck_pin = PicoSwdInputPin::new(pins.gpio2.into_floating_input());
+                let tms_pin = PicoSwdInputPin::new(pins.gpio3.into_floating_input());
+                let tdo_pin = PicoSwdInputPin::new(pins.gpio5.into_floating_input());
+                let tdi_pin = PicoSwdInputPin::new(pins.gpio6.into_floating_input());
+                let trst_pin = PicoSwdInputPin::new(pins.gpio7.into_floating_input());
+                let srst_pin = PicoSwdInputPin::new(pins.gpio4.into_floating_input());
                 jtagio = JtagIoSet::new(
                     tck_pin,
                     tms_pin,
