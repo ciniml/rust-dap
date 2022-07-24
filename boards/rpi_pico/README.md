@@ -51,10 +51,6 @@ cargo build --release --no-default-features --features jtag
 cargo build --release --no-default-features --features jtag,set_clock
 ```
 
-
-
-
-
 ## 使い方
 
 ### pyOCDを使う場合
