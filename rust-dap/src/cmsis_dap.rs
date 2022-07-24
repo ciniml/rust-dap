@@ -118,6 +118,11 @@ pub struct JtagIoConfig {
 pub trait SwdIo {
     fn connect(&mut self);
     fn disconnect(&mut self);
+    fn swj_clock(
+        &mut self,
+        config: &mut SwdIoConfig,
+        frequency_hz: u32,
+    ) -> core::result::Result<(), DapError>;
     fn swj_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]);
     fn swd_read_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &mut [u8]);
     fn swd_write_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]);
@@ -136,6 +141,11 @@ pub trait SwjIo {}
 pub trait JtagIo {
     fn connect(&mut self, config: &JtagIoConfig);
     fn disconnect(&mut self, config: &JtagIoConfig);
+    fn swj_clock(
+        &mut self,
+        config: &mut JtagIoConfig,
+        frequency_hz: u32,
+    ) -> core::result::Result<(), DapError>;
     fn swj_sequence(&mut self, config: &JtagIoConfig, count: usize, data: &[u8]);
     fn jtag_read_sequence(
         &mut self,
@@ -372,6 +382,12 @@ pub trait CmsisDapCommandInner {
         wait_us: u32,
     ) -> core::result::Result<u8, DapError>;
 
+    fn swj_clock(
+        &mut self,
+        config: &mut CmsisDapConfig,
+        frequency_hz: u32,
+    ) -> core::result::Result<(), DapError>;
+
     fn jtag_idcode(
         &self,
         config: &mut CmsisDapConfig,
@@ -455,12 +471,13 @@ pub trait CmsisDapCommand {
         response: &mut [u8],
     ) -> core::result::Result<(usize, usize), DapError>;
     fn swj_clock(
-        &self,
+        &mut self,
+        _config: &mut CmsisDapConfig,
         request: &[u8],
         response: &mut [u8],
     ) -> core::result::Result<(usize, usize), DapError> {
+        // The default implementation does nothing.
         if request.len() == 4 {
-            // TODO: use clock
             let _clock = u32::from_le_bytes(request[0..4].try_into().unwrap());
             response[0] = DAP_OK;
             Ok((4, 1))
@@ -900,7 +917,25 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
         response[0] = pin_input.unwrap_or(0);
         Ok((6, 1))
     }
-
+    fn swj_clock(
+        &mut self,
+        config: &mut CmsisDapConfig,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> core::result::Result<(usize, usize), DapError> {
+        if request.len() >= 4 {
+            let clock_hz = u32::from_le_bytes(request.try_into().unwrap());
+            if CmsisDapCommandInner::swj_clock(self, config, clock_hz).is_ok() {
+                response[0] = DAP_OK;
+                Ok((4, 1))
+            } else {
+                response[0] = DAP_ERROR;
+                Ok((4, 1))
+            }
+        } else {
+            Err(DapError::InvalidCommand)
+        }
+    }
     fn swj_sequence(
         &mut self,
         config: &CmsisDapConfig,
@@ -1104,7 +1139,9 @@ where
                     DapCommandId::Delay => self.io.delay(),
                     DapCommandId::ResetTarget => self.io.reset_target(),
                     DapCommandId::SWJPins => self.io.swj_pins(&self.config, request, response_body),
-                    DapCommandId::SWJClock => self.io.swj_clock(request, response_body),
+                    DapCommandId::SWJClock => {
+                        self.io.swj_clock(&mut self.config, request, response_body)
+                    }
                     DapCommandId::SWJSequence => {
                         self.io.swj_sequence(&self.config, request, response_body)
                     }
@@ -1256,6 +1293,14 @@ mod test {
         }
 
         fn disconnect(&mut self) {
+            todo!()
+        }
+
+        fn swj_clock(
+            &mut self,
+            _config: &mut SwdIoConfig,
+            _frequency_hz: u32,
+        ) -> core::result::Result<(), DapError> {
             todo!()
         }
 

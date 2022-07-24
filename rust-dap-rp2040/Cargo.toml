@@ -9,6 +9,7 @@ license = "Apache-2.0"
 
 [features]
 bitbang = ["rust-dap/bitbang", "rust-dap/unproven"]
+set_clock = []  # Enable swj_clock implementation for bitbang and PIO and set appropriate SWCLK frequency. Otherwise, SWCLK is fixed to 15.625[MHz]
 
 [dependencies]
 rust-dap = { path = "../rust-dap" }

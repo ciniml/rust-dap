@@ -37,6 +37,9 @@ bitflags! {
 }
 
 pub trait DelayFunc {
+    fn calculate_half_clock_cycles(_frequency_hz: u32) -> Option<u32> {
+        None
+    }
     fn cycle_delay(&self, cycles: u32);
 }
 
@@ -146,6 +149,10 @@ where
     SwdIoOutputPin: OutputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
     DelayFn: DelayFunc,
 {
+    fn calculate_half_clock_cycles(frequency_hz: u32) -> Option<u32> {
+        DelayFn::calculate_half_clock_cycles(frequency_hz)
+    }
+
     fn to_swclk_in(&mut self) {
         let mut pin = None;
         core::mem::swap(&mut pin, &mut self.swclk_out);
@@ -230,6 +237,10 @@ where
 }
 
 pub trait BitBangSwdIo {
+    fn calculate_half_clock_cycles(_frequency_hz: u32) -> Option<u32> {
+        None
+    }
+
     fn to_swclk_in(&mut self);
     fn to_swclk_out(&mut self, output: bool);
     fn to_swdio_in(&mut self);
@@ -241,6 +252,11 @@ pub trait BitBangSwdIo {
 }
 
 pub trait PrimitiveSwdIo {
+    /// Calculates number of cycles to delay to generate the target clock frequency.
+    fn calculate_half_clock_cycles(_frequency_hz: u32) -> Option<u32> {
+        None
+    }
+
     fn connect(&mut self);
     fn disconnect(&mut self);
     fn enable_output(&mut self);
@@ -256,6 +272,10 @@ pub trait PrimitiveSwdIo {
 }
 
 impl<Io: BitBangSwdIo> PrimitiveSwdIo for Io {
+    fn calculate_half_clock_cycles(frequency_hz: u32) -> Option<u32> {
+        Io::calculate_half_clock_cycles(frequency_hz)
+    }
+
     fn connect(&mut self) {
         self.to_swclk_out(false);
         self.to_swdio_out(false);
@@ -317,6 +337,17 @@ impl<Io: PrimitiveSwdIo> SwdIo for Io {
     }
     fn disconnect(&mut self) {
         PrimitiveSwdIo::disconnect(self)
+    }
+    fn swj_clock(
+        &mut self,
+        config: &mut SwdIoConfig,
+        frequency_hz: u32,
+    ) -> core::result::Result<(), DapError> {
+        match Self::calculate_half_clock_cycles(frequency_hz) {
+            Some(cycles) => config.clock_wait_cycles = cycles, // Update clock_wait_cycles.
+            _ => {}
+        }
+        Ok(())
     }
     fn swj_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]) {
         let mut index = 0;
@@ -602,6 +633,14 @@ where
         Ok(0)
     }
 
+    fn swj_clock(
+        &mut self,
+        config: &mut CmsisDapConfig,
+        frequency_hz: u32,
+    ) -> core::result::Result<(), DapError> {
+        SwdIo::swj_clock(self, &mut config.swdio, frequency_hz)
+    }
+
     fn jtag_idcode(
         &self,
         _config: &mut CmsisDapConfig,
@@ -785,6 +824,10 @@ where
     SrstOutputPin: OutputPin + IoPin<SrstInputPin, SrstOutputPin>,
     DelayFn: DelayFunc,
 {
+    fn calculate_half_clock_cycles(frequency_hz: u32) -> Option<u32> {
+        DelayFn::calculate_half_clock_cycles(frequency_hz)
+    }
+
     // TCK
     fn to_tck_in(&mut self) {
         turn_to_in(&mut self.tck_in, &mut self.tck_out);
@@ -870,6 +913,10 @@ where
 }
 
 pub trait BitBangJtagIo {
+    fn calculate_half_clock_cycles(_frequency_hz: u32) -> Option<u32> {
+        None
+    }
+
     // TCK
     fn to_tck_in(&mut self);
     fn to_tck_out(&mut self, output: bool);
@@ -905,6 +952,10 @@ pub trait BitBangJtagIo {
 }
 
 pub trait PrimitiveJtagIo {
+    fn calculate_half_clock_cycles(_frequency_hz: u32) -> Option<u32> {
+        None
+    }
+
     fn connect(&mut self, config: &JtagIoConfig);
     fn disconnect(&mut self, config: &JtagIoConfig);
     fn write_bit(&mut self, config: &JtagIoConfig, tms: bool, tdi: bool);
@@ -912,6 +963,10 @@ pub trait PrimitiveJtagIo {
 }
 
 impl<Io: BitBangJtagIo> PrimitiveJtagIo for Io {
+    fn calculate_half_clock_cycles(frequency_hz: u32) -> Option<u32> {
+        Io::calculate_half_clock_cycles(frequency_hz)
+    }
+
     fn connect(&mut self, config: &JtagIoConfig) {
         // initial value
         self.to_tck_out(false);
@@ -974,6 +1029,19 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
     fn disconnect(&mut self, config: &JtagIoConfig) {
         PrimitiveJtagIo::disconnect(self, config)
     }
+
+    fn swj_clock(
+        &mut self,
+        config: &mut JtagIoConfig,
+        frequency_hz: u32,
+    ) -> core::result::Result<(), DapError> {
+        match Self::calculate_half_clock_cycles(frequency_hz) {
+            Some(cycles) => config.clock_wait_cycles = cycles,
+            _ => {}
+        }
+        Ok(())
+    }
+
     fn swj_sequence(&mut self, config: &JtagIoConfig, count: usize, data: &[u8]) {
         // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__SWJ__Sequence.html
         let mut index = 0;
@@ -1273,6 +1341,14 @@ where
 
     fn swj_sequence(&mut self, config: &CmsisDapConfig, count: usize, data: &[u8]) {
         JtagIo::swj_sequence(self, &config.jtag, count, data);
+    }
+
+    fn swj_clock(
+        &mut self,
+        config: &mut CmsisDapConfig,
+        frequency_hz: u32,
+    ) -> core::result::Result<(), DapError> {
+        JtagIo::swj_clock(self, &mut config.jtag, frequency_hz)
     }
 
     fn swd_sequence(
