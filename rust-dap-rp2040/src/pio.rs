@@ -270,10 +270,11 @@ impl<C, D> SwdIoSet<C, D> {
     }
     // if bits > 32 , result is undefined.
     fn read_bits(&mut self, bits: u32) -> u32 {
-        while !self.get_context().tx_fifo.write(bits | 0) {}
+        while !self.get_context().tx_fifo.write(bits) {}
         while self.get_context().rx_fifo.is_empty() {}
         let value = unsafe { self.get_context().rx_fifo.read().unwrap_unchecked() };
-        value >> ((32 - bits) & 31)
+        // next line means this: value >> ((32 - bits) & 31)
+        value.wrapping_shr(bits.wrapping_neg())
     }
 }
 
