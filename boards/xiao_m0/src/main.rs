@@ -20,7 +20,9 @@
 use embedded_hal::digital::v2::ToggleableOutputPin;
 use panic_halt as _;
 use rust_dap::bitbang::{DelayFunc, SwdIoSet};
-use rust_dap::{CmsisDap, DapCapabilities, USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON};
+use rust_dap::{
+    CmsisDap, DapCapabilities, USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON,
+};
 
 use bsp::{entry, hal, pac};
 use hal::clock::GenericClockController;
