@@ -38,3 +38,17 @@ pub mod line_coding;
 pub mod pio;
 pub mod swdio_pin;
 pub mod util;
+
+use cortex_m_rt::pre_init;
+
+#[pre_init]
+unsafe fn pre_init() -> () {
+    // clear_locks : this is what expected to be done by #[rp2040_hal::entry] .
+    // but because we are gonna use #[rtic::app(...)] , we ought to do it here.
+    const SIO_BASE: u32 = 0xd0000000;
+    const SPINLOCK0_PTR: *mut u32 = (SIO_BASE + 0x100) as *mut u32;
+    const SPINLOCK_COUNT: usize = 32;
+    for i in 0..SPINLOCK_COUNT {
+        SPINLOCK0_PTR.wrapping_add(i).write_volatile(1);
+    }
+}
