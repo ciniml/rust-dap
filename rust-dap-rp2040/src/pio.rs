@@ -527,6 +527,7 @@ impl<C, D> CmsisDapCommandInner for SwdIoSet<C, D> {
                     clock_count,
                     &mut response[response_index..],
                 );
+                response_index += bytes_count;
             } else {
                 SwdIo::enable_output(self);
                 SwdIo::swd_write_sequence(
@@ -535,17 +536,11 @@ impl<C, D> CmsisDapCommandInner for SwdIoSet<C, D> {
                     clock_count,
                     &request[request_index..],
                 );
+                request_index += bytes_count;
             }
 
             if sequence_count == 0 {
                 SwdIo::enable_output(self)
-            }
-
-            if do_input {
-                request_index += 1;
-                response_index += bytes_count;
-            } else {
-                request_index = 1 + bytes_count;
             }
         }
         response[0] = DAP_OK;
