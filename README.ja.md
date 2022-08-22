@@ -1,5 +1,6 @@
 # A CMSIS-DAP implementation in Rust
 
+[English](./README.md) 日本語
 ## 概要
 
 Arm用のデバッグ・アダプタのプロトコルおよびファームウェアの規格であるCMSIS-DAPのRust実装です。

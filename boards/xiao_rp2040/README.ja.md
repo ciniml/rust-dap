@@ -1,6 +1,8 @@
 
 # XIAO RP2040 port
 
+[English](./README.md) 日本語
+
 ## ピン配置
 
 | ピン番号 | ピン名 | SWDピン接続先 |

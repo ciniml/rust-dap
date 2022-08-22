@@ -1,5 +1,7 @@
 # Raspberry Pi Pico port
 
+[English](./README.md) 日本語
+
 ## ピン配置
 
 ![ピン配置](./rust-dap-pico.svg)
