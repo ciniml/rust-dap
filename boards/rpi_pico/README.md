@@ -1,10 +1,12 @@
 # Raspberry Pi Pico port
 
-## ピン配置
+English [日本語](./README.ja.md)
 
-![ピン配置](./rust-dap-pico.svg)
+## Pin assignments
 
-| ピン番号 | ピン名 | SWDピン接続先 | JTAGピン接続先 |
+![Pin assignments](./rust-dap-pico.svg)
+
+| Pin Number | Pin Name | SWD pin | JTAG pin |
 |:--------|:-------|:-------------|:--------------|
 | 3       | GND    | GND          | GND           |
 | 4       | GPIO2  | SWCLK        | TCK           |
@@ -14,62 +16,63 @@
 | 9       | GPIO6  |              | TDI           |
 | 10      | GPIO7  |              | nTRST         |
 
-## ビルド
+## How to build
 
-### SWD用
+### For SWD
 
-デフォルトのfeatureではPIOを使ったSWD用のrust-dapをビルドします。
+By default, this project is configured to use `features` to build the firmware for SWD with PIO.
 
 ```
 cargo build --release
 ```
 
-feature `bitbang` を有効にすると、PIOを使ったSWD通信処理ではなく、GPIOをCPUで制御してSWD通信処理を行います。
+When the feature `bitbang` is enabled, the firmware performs SWD communication by controlling GPIO from CPU instead of PIO.
 
 ```
 cargo build --release --features bitbang
 ```
 
-ホストからのクロックレートの設定を有効にするには feature `set_clock` を有効にします。 PIO向けの場合はかなり正確にクロックレートを設定できますが、bitbangの場合はそれなりです。
+When the feature `set_clock` is enabled, the firmware supports setting clock rate from the host. If the firmware uses PIO, the accuracy of the clock rate is fairly accurate. If the firmware uses bitbang, the accuracy is not good.
 
 ```
 cargo build --release --features set_clock # PIO
 cargo build --release --features set_clock,bitbang # bitbang
 ```
 
-### JTAG用
+### For JTAG
 
-JTAG用のファームウェアをビルドするには、 `--no-default-featrues` をつけて デフォルトで有効であるSWD機能のfeatureを無効化したうえで、 `jtag` featureを有効にします。
+In order to build firmware for JTAG, disable the default SWD features by specifying `--no-default-features` option and then enable the `jtag` feature.
 
 ```
 cargo build --release --no-default-features --features jtag
 ```
 
-ホストからのクロックレートの設定を有効にするには feature `set_clock` を有効にします。
+Enable the feature `set_clock` to enable setting clock rate from the host PC.
 
 ```
 cargo build --release --no-default-features --features jtag,set_clock
 ```
 
-## 使い方
+## How to use
 
-### pyOCDを使う場合
+### Use with pyOCD
 
-#### pyOCDのインストール
+#### Install pyOCD
 
 ```
 python3 -m pip install pyocd
 ```
 
-#### pyOCDの実行とGDB接続
+#### Run pyOCD and GDB connection
 
 ```sh
 pyocd gdbserver --target rp2040_core0
 ```
 
-別のターミナルでgdb実行
+Run GDB in another terminal.
 
-Ubuntuのaptで入れられる `gdb-multiarch` だとアーキテクチャの認識に失敗するようなので、[Armのサイトからツールチェインをダウンロード](https://developer.arm.com/downloads/-/gnu-rm) して、その中のGDBを使う。
+`gdb-multiarch`, which is installed with `apt`, seems to fail to recognize the architecture correctly, so [download the toolchain from Arm's website](https://developer.arm.com/downloads/-/gnu-rm)
+ and use GDB in it.
 
 ```sh
 arm-none-eabi-gdb <target elf file> -ex "target extended-remote localhost:3333"

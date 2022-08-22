@@ -1,34 +1,38 @@
-
 # XIAO RP2040 port
 
-## ピン配置
+English [日本語](./README.ja.md)
 
-| ピン番号 | ピン名 | SWDピン接続先 |
+## Pin assignments
+
+| Pin Number | Pin Name | SWD pin |
 |:--------|:-------|:-------------|
 | GND     | GND    | GND          |
 | 8       | GPIO2  | SWCLK        |
 | 9       | GPIO4  | SWDIO        |
 | 0       | GPIO26 | RESET        |
 
-## 使い方
+## How to build
 
-### pyOCDを使う場合
+## How to use
 
-#### pyOCDのインストール
+### Use with pyOCD
+
+#### Install pyOCD
 
 ```
 python3 -m pip install pyocd
 ```
 
-#### pyOCDの実行とGDB接続
+#### Run pyOCD and GDB connection
 
 ```sh
 pyocd gdbserver --target rp2040_core0
 ```
 
-別のターミナルでgdb実行
+Run GDB in another terminal.
 
-Ubuntuのaptで入れられる `gdb-multiarch` だとアーキテクチャの認識に失敗するようなので、[Armのサイトからツールチェインをダウンロード](https://developer.arm.com/downloads/-/gnu-rm) して、その中のGDBを使う。
+`gdb-multiarch`, which is installed with `apt`, seems to fail to recognize the architecture correctly, so [download the toolchain from Arm's website](https://developer.arm.com/downloads/-/gnu-rm)
+ and use GDB in it.
 
 ```sh
 arm-none-eabi-gdb <target elf file> -ex "target extended-remote localhost:3333"
