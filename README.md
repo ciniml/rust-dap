@@ -4,6 +4,8 @@ English [日本語](./README.ja.md)
 
 ## About this project
 
+![Debug Board](./doc/figure/debug_board.drawio.svg)
+
 This is a Rust implementation of CMSIS-DAP, which is a protocol and firmware standard of debug adapters for Arm processors.
 
 At this time, it has no performance or feature advantage over other implementations as a debug adapter , but by returning the correct WCID (Windows Compatibility ID), it can be used on Windows without manual driver installation.

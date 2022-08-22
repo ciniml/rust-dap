@@ -3,6 +3,8 @@
 [English](./README.md) 日本語
 ## 概要
 
+![デバッグボード](./doc/figure/debug_board.drawio.svg)
+
 Arm用のデバッグ・アダプタのプロトコルおよびファームウェアの規格であるCMSIS-DAPのRust実装です。
 
 現時点では他の実装と比較して性能やデバッグ・アダプタとしての機能面での優位性はありませんが、正しいWCID (Windows Compatibility ID) を返すことにより、Windowsでドライバの手動インストールを行わずに使用できます。
