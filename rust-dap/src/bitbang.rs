@@ -522,14 +522,7 @@ impl<Io: PrimitiveSwdIo> SwdIo for Io {
     }
 }
 
-impl<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn> CmsisDapCommandInner
-    for SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn>
-where
-    SwClkInputPin: InputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
-    SwClkOutputPin: OutputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
-    SwdIoInputPin: InputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
-    SwdIoOutputPin: OutputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
-    DelayFn: DelayFunc,
+impl<Io: SwdIo> CmsisDapCommandInner for Io
 {
     fn connect(&mut self, _config: &CmsisDapConfig) {
         SwdIo::connect(self);
