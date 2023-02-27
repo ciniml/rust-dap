@@ -328,7 +328,7 @@ mod app {
 
     #[task(
         binds = UART0_IRQ,
-        priority = 2,
+        priority = 1,
         shared = [uart_reader],
         local = [uart_rx_producer, debug_out, debug_irq_out],
     )]
@@ -351,7 +351,7 @@ mod app {
 
     #[task(
         binds = USBCTRL_IRQ,
-        priority = 1,
+        priority = 2,   // USBCTRL_IRQ priority must be greater than or equal to UART0_IRQ not to hang up the UART when UART FIFO is full.
         shared = [uart_reader, uart_writer, usb_serial, uart_rx_consumer, uart_tx_producer, uart_tx_consumer],
         local = [usb_bus, usb_dap, uart_config, usb_led, debug_usb_irq_out],
     )]
