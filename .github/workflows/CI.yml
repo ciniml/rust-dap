@@ -14,7 +14,7 @@ jobs:
       matrix:
         projects: ["rust-dap", "rust-dap-rp2040", "uart-test", "boards/rpi_pico", "boards/xiao_m0", "boards/xiao_rp2040"]
     container:
-      image: rust:1.61.0-slim-bullseye
+      image: rust:1.72-slim-bookworm
     steps:
       - uses: actions/checkout@v2
       - name: setup
