@@ -114,7 +114,7 @@ pub struct UartConfigAndClock {
     /// UART configuraion
     pub config: UartConfig,
     /// UART peripheral clock frequency
-    pub clock: embedded_time::rate::Hertz,
+    pub clock: fugit::HertzU32,
 }
 
 type PicoUsbBusAllocator = UsbBusAllocator<UsbBus>;
