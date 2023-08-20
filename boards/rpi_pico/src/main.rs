@@ -39,7 +39,9 @@ mod app {
     use rust_dap_rp2040::util::{
         initialize_usb, read_usb_serial_byte_cs, write_usb_serial_byte_cs, UartConfigAndClock,
     };
-    #[cfg(feature = "swd")]
+    #[cfg(all(feature = "swd", feature = "bitbang"))]
+    type SwdIoSet = rust_dap_rp2040::util::SwdIoSet<GpioSwClk, GpioSwdIo, GpioReset>;
+    #[cfg(all(feature = "swd", not(feature = "bitbang")))]
     type SwdIoSet = rust_dap_rp2040::util::SwdIoSet<GpioSwClk, GpioSwdIo>;
     #[cfg(feature = "jtag")]
     type JtagIoSet = rust_dap_rp2040::util::JtagIoSet<
@@ -68,6 +70,8 @@ mod app {
     type GpioSwClk = hal::gpio::bank0::Gpio2;
     #[cfg(feature = "swd")]
     type GpioSwdIo = hal::gpio::bank0::Gpio3;
+    #[cfg(feature = "swd")]
+    type GpioReset = hal::gpio::bank0::Gpio4;
     // jtag
     #[cfg(feature = "jtag")]
     type JtagTckPin = hal::gpio::bank0::Gpio2;
@@ -175,26 +179,24 @@ mod app {
         ));
         c.local.USB_ALLOCATOR.replace(usb_allocator);
         let usb_allocator = c.local.USB_ALLOCATOR.as_ref().unwrap();
-
-        // Initialize MCU reset pin.
-        // Currently MCU reset pin is not used,
-        // so all we have to do is just initialize the pin in case the pin is connected to the target RESET.
         #[cfg(feature = "swd")]
-        {
+        let (usb_serial, usb_dap, usb_bus) = {
+            // Initialize MCU reset pin.
             let mut n_reset_pin = pins.gpio4.into_push_pull_output();
             // RESET pin of Cortex Debug 10-pin connector is negarive logic
             // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
             n_reset_pin.set_high().ok();
-        }
-        #[cfg(feature = "swd")]
-        let (usb_serial, usb_dap, usb_bus) = {
+
             let swdio;
             #[cfg(feature = "bitbang")]
             {
-                use rust_dap_rp2040::{swdio_pin::PicoSwdInputPin, util::CycleDelay};
+                use rust_dap_rp2040::{
+                    swdio_pin::PicoSwdInputPin, swdio_pin::PicoSwdOutputPin, util::CycleDelay,
+                };
                 let swclk_pin = PicoSwdInputPin::new(pins.gpio2.into_floating_input());
                 let swdio_pin = PicoSwdInputPin::new(pins.gpio3.into_floating_input());
-                swdio = SwdIoSet::new(swclk_pin, swdio_pin, CycleDelay {});
+                let reset_pin = PicoSwdOutputPin::new(n_reset_pin);
+                swdio = SwdIoSet::new(swclk_pin, swdio_pin, reset_pin, CycleDelay {});
             }
             #[cfg(not(feature = "bitbang"))]
             {

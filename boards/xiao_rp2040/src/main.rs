@@ -39,11 +39,15 @@ mod app {
     use rust_dap_rp2040::util::{
         initialize_usb, read_usb_serial_byte_cs, write_usb_serial_byte_cs, UartConfigAndClock,
     };
+    #[cfg(feature = "bitbang")]
+    type SwdIoSet = rust_dap_rp2040::util::SwdIoSet<GpioSwClk, GpioSwdIo, GpioReset>;
+    #[cfg(not(feature = "bitbang"))]
     type SwdIoSet = rust_dap_rp2040::util::SwdIoSet<GpioSwClk, GpioSwdIo>;
 
     // GPIO mappings
     type GpioSwClk = hal::gpio::bank0::Gpio2;
     type GpioSwdIo = hal::gpio::bank0::Gpio4;
+    type GpioReset = hal::gpio::bank0::Gpio26;
     type GpioUartTx = hal::gpio::bank0::Gpio0;
     type GpioUartRx = hal::gpio::bank0::Gpio1;
     type GpioUsbLed = hal::gpio::bank0::Gpio25;
@@ -146,33 +150,34 @@ mod app {
         c.local.USB_ALLOCATOR.replace(usb_allocator);
         let usb_allocator = c.local.USB_ALLOCATOR.as_ref().unwrap();
 
-        // Initialize MCU reset pin.
-        // Currently MCU reset pin is not used,
-        // so all we have to do is just initialize the pin in case the pin is connected to the target RESET.
-        {
+        let (usb_serial, usb_dap, usb_bus) = {
+            // Initialize MCU reset pin.
             let mut n_reset_pin = pins.gpio26.into_push_pull_output();
             // RESET pin of Cortex Debug 10-pin connector is negarive logic
             // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
             n_reset_pin.set_high().ok();
-        }
-        let swdio;
-        #[cfg(feature = "bitbang")]
-        {
-            use rust_dap_rp2040::{swdio_pin::PicoSwdInputPin, util::CycleDelay};
-            let swclk_pin = PicoSwdInputPin::new(pins.gpio2.into_floating_input());
-            let swdio_pin = PicoSwdInputPin::new(pins.gpio4.into_floating_input());
-            swdio = SwdIoSet::new(swclk_pin, swdio_pin, CycleDelay {});
-        }
-        #[cfg(not(feature = "bitbang"))]
-        {
-            let mut swclk_pin = pins.gpio2.into_mode();
-            let mut swdio_pin = pins.gpio4.into_mode();
-            swclk_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-            swdio_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-            swdio = SwdIoSet::new(c.device.PIO0, swclk_pin, swdio_pin, &mut resets);
-        }
-        let (usb_serial, usb_dap, usb_bus) =
-            initialize_usb(swdio, usb_allocator, "xiao-rp2040", DapCapabilities::SWD);
+
+            let swdio;
+            #[cfg(feature = "bitbang")]
+            {
+                use rust_dap_rp2040::{
+                    swdio_pin::PicoSwdInputPin, swdio_pin::PicoSwdOutputPin, util::CycleDelay,
+                };
+                let swclk_pin = PicoSwdInputPin::new(pins.gpio2.into_floating_input());
+                let swdio_pin = PicoSwdInputPin::new(pins.gpio4.into_floating_input());
+                let reset_pin = PicoSwdOutputPin::new(n_reset_pin);
+                swdio = SwdIoSet::new(swclk_pin, swdio_pin, reset_pin, CycleDelay {});
+            }
+            #[cfg(not(feature = "bitbang"))]
+            {
+                let mut swclk_pin = pins.gpio2.into_mode();
+                let mut swdio_pin = pins.gpio4.into_mode();
+                swclk_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+                swdio_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+                swdio = SwdIoSet::new(c.device.PIO0, swclk_pin, swdio_pin, &mut resets);
+            }
+            initialize_usb(swdio, usb_allocator, "xiao-rp2040", DapCapabilities::SWD)
+        };
 
         let usb_led = pins.led.into_push_pull_output();
         let (uart_rx_producer, uart_rx_consumer) = c.local.uart_rx_queue.split();
