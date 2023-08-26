@@ -21,6 +21,7 @@
 mod app {
     use panic_halt as _;
 
+    use hal::clocks::Clock;
     use hal::gpio::{Output, Pin, PushPull};
     use hal::pac;
     use rp_pico::hal;
@@ -154,8 +155,8 @@ mod app {
             pins.gpio1.into_mode::<hal::gpio::FunctionUart>(), // RxD
         );
         let uart_config = UartConfigAndClock {
-            config: UartConfig::from(hal::uart::common_configs::_115200_8_N_1),
-            clock: clocks.peripheral_clock.into(),
+            config: UartConfig::from(hal::uart::UartConfig::default()),
+            clock: clocks.peripheral_clock.freq(),
         };
         let mut uart = hal::uart::UartPeripheral::new(c.device.UART0, uart_pins, &mut resets)
             .enable((&uart_config.config).into(), uart_config.clock)
