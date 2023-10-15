@@ -30,8 +30,8 @@ pub mod pio0 {
 
 const DEFAULT_CORE_CLOCK: u32 = 125000000;
 const DEFAULT_PIO_DIVISOR: f32 = 1.0f32; // Default PIO Divisor. Generate 125/8 = 15.625[MHz] SWCLK clock.
-                                         // const DEFAULT_SWJ_CLOCK_HZ: u32 = ((DEFAULT_CORE_CLOCK / 8) as f32 / DEFAULT_PIO_DIVISOR) as u32;
-                                         // const SWJ_PINS_CLOCK_DIVIDER: f32 = // set 1us
+#[cfg(feature = "set_clock")]
+const DEFAULT_SWJ_CLOCK_HZ: u32 = ((125000000 / 8) as f32 / DEFAULT_PIO_DIVISOR) as u32;
 
 struct SwdPioContext {
     pio: hal::pio::PIO<PIO0>,
@@ -41,7 +41,9 @@ struct SwdPioContext {
 }
 
 pub struct SwdIoSet<C, D, E> {
+    #[allow(unused)]
     clk_pin_id: u8,
+    #[allow(unused)]
     dat_pin_id: u8,
     rst_pin_id: u8,
     context: Option<SwdPioContext>,
@@ -277,16 +279,19 @@ impl<C, D, E> SwdIoSet<C, D, E> {
     }
 
     fn set_clk_pindir(&mut self, oe: bool) {
-        self.get_context().running_sm.exec_instruction(
-            pio::InstructionOperands::SET {
-                destination: pio::SetDestination::PINDIRS,
-                data: match oe {
-                    true => 1,
-                    false => 0,
+        self.get_context()
+            .running_sm
+            .exec_instruction(pio::Instruction {
+                operands: pio::InstructionOperands::SET {
+                    destination: pio::SetDestination::PINDIRS,
+                    data: match oe {
+                        true => 1,
+                        false => 0,
+                    },
                 },
-            }
-            .encode(),
-        );
+                delay: 0,
+                side_set: Some(1), // SWCLK will be set to High when it is Output
+            });
     }
 
     fn build_pio<P: PIOExt>(
@@ -309,10 +314,11 @@ impl<C, D, E> SwdIoSet<C, D, E> {
             .out_shift_direction(hal::pio::ShiftDirection::Right)
             .in_pin_base(in_pins_id)
             .in_shift_direction(hal::pio::ShiftDirection::Right)
-            .clock_divisor(divisor)
+            .clock_divisor_fixed_point(divisor as u16, (divisor * 256.0) as u8)
             .build(sm0)
     }
 
+    #[cfg(feature = "set_clock")]
     fn set_clock(&mut self, frequency_hz: u32) {
         // Calculate divisor.
         let divisor = if frequency_hz > 0 {

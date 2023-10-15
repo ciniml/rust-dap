@@ -176,17 +176,17 @@ impl From<uart::UartConfig> for UartConfig {
             data_bits: value.data_bits.into(),
             stop_bits: value.stop_bits.into(),
             parity_type: value.parity.into(),
-            data_rate: value.baudrate.0,
+            data_rate: value.baudrate.raw(),
         }
     }
 }
 impl From<&UartConfig> for uart::UartConfig {
     fn from(value: &UartConfig) -> Self {
-        let mut config = uart::common_configs::_115200_8_N_1;
+        let mut config = uart::UartConfig::default();
         config.data_bits = value.data_bits.into();
         config.stop_bits = value.stop_bits.into();
         config.parity = value.parity_type.into();
-        config.baudrate = embedded_time::rate::Baud(value.data_rate);
+        config.baudrate = fugit::HertzU32::from_raw(value.data_rate);
         config
     }
 }
