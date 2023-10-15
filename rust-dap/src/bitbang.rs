@@ -15,28 +15,7 @@
 // limitations under the License.
 
 use crate::cmsis_dap::*;
-use bitflags::bitflags;
 use embedded_hal::digital::v2::{InputPin, IoPin, OutputPin, PinState};
-
-// Bit 0: SWCLK/TCK
-// Bit 1: SWDIO/TMS
-// Bit 2: TDI
-// Bit 3: TDO
-// Bit 5: nTRST
-// Bit 7: nRESET
-// https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__SWJ__Pins.html
-bitflags! {
-    struct SwjPins: u8 {
-        const TCK_SWDCLK = 1 << 0;
-        const TMS_SWDIO  = 1 << 1;
-        const TDI        = 1 << 2;
-        const TDO        = 1 << 3;
-        const UNKNOWN4   = 1 << 4;
-        const N_TRST     = 1 << 5;
-        const UNKNOWN6   = 1 << 6;
-        const N_RESET    = 1 << 7;
-    }
-}
 
 pub trait DelayFunc {
     fn calculate_half_clock_cycles(_frequency_hz: u32) -> Option<u32> {

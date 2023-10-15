@@ -42,7 +42,7 @@ mod app {
     #[cfg(feature = "bitbang")]
     type SwdIoSet = rust_dap_rp2040::util::SwdIoSet<GpioSwClk, GpioSwdIo, GpioReset>;
     #[cfg(not(feature = "bitbang"))]
-    type SwdIoSet = rust_dap_rp2040::util::SwdIoSet<GpioSwClk, GpioSwdIo>;
+    type SwdIoSet = rust_dap_rp2040::util::SwdIoSet<GpioSwClk, GpioSwdIo, GpioReset>;
 
     // GPIO mappings
     type GpioSwClk = hal::gpio::bank0::Gpio2;
@@ -174,7 +174,15 @@ mod app {
                 let mut swdio_pin = pins.gpio4.into_mode();
                 swclk_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
                 swdio_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-                swdio = SwdIoSet::new(c.device.PIO0, swclk_pin, swdio_pin, &mut resets);
+                let mut n_reset_pin = n_reset_pin.into_mode();
+                n_reset_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+                swdio = SwdIoSet::new(
+                    c.device.PIO0,
+                    swclk_pin,
+                    swdio_pin,
+                    n_reset_pin,
+                    &mut resets,
+                );
             }
             initialize_usb(swdio, usb_allocator, "xiao-rp2040", DapCapabilities::SWD)
         };
