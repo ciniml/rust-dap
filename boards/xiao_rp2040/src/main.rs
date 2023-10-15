@@ -153,7 +153,7 @@ mod app {
         let (usb_serial, usb_dap, usb_bus) = {
             // Initialize MCU reset pin.
             let mut n_reset_pin = pins.gpio26.into_push_pull_output();
-            // RESET pin of Cortex Debug 10-pin connector is negarive logic
+            // RESET pin of Cortex Debug 10-pin connector is negative logic
             // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
             n_reset_pin.set_high().ok();
 
