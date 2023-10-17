@@ -14,9 +14,18 @@ opt-level = 3
 lto = true
 
 [features]
+defmt = [
+    "dep:defmt",
+    "dep:defmt-rtt",
+    "dep:panic-probe",
+    "rust-dap-rp2040/defmt",
+    "rust-dap/defmt",
+]
 default = ["swd"]
 bitbang = ["rust-dap/bitbang", "rust-dap-rp2040/bitbang"]
-set_clock = ["rust-dap-rp2040/set_clock"]   # Enable swj_clock implementation for PIO and set appropriate SWCLK frequency. Otherwise, SWCLK is fixed to 15.625[MHz]
+set_clock = [
+    "rust-dap-rp2040/set_clock",
+] # Enable swj_clock implementation for PIO and set appropriate SWCLK frequency. Otherwise, SWCLK is fixed to 15.625[MHz]
 jtag = ["bitbang"]
 swd = []
 swj = []
@@ -26,18 +35,21 @@ ram-exec = ["rust-dap-rp2040/ram-exec"] # Execute-in-SRAM support
 version = "0.7"
 # Below is to take out "boot2" from the set of features.
 default-features = false
-features = [ "rt", "critical-section-impl" ]
+features = ["rt", "critical-section-impl"]
 
 [dependencies]
 rust-dap = { path = "../../rust-dap", features = ["unproven"] }
 rust-dap-rp2040 = { path = "../../rust-dap-rp2040" }
 panic-halt = "0.2"
-cortex-m = "0.7"
+cortex-m = { version = "0.7" }
 cortex-m-rt = "0.7"
 cortex-m-rtic = "1.0"
 
-usb-device = { version = "0.2", features = ["control-buffer-256"]}
+usb-device = { version = "0.2", features = ["control-buffer-256"] }
 usbd-serial = "0.1"
 nb = "0.1"
 heapless = "0.7"
-embedded-hal = { version = "0.2", features = ["unproven"]}
+embedded-hal = { version = "0.2", features = ["unproven"] }
+defmt = { version = "0.3", optional = true }
+defmt-rtt = { version = "0.4", optional = true }
+panic-probe = { version = "0.3", features = ["print-defmt"], optional = true }

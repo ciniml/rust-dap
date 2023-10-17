@@ -19,7 +19,10 @@
 
 #[rtic::app(device = rp_pico::hal::pac, peripherals = true)]
 mod app {
+    #[cfg(not(feature = "defmt"))]
     use panic_halt as _;
+    #[cfg(feature = "defmt")]
+    use {defmt_rtt as _, panic_probe as _};
 
     use hal::clocks::Clock;
     use hal::gpio::{Output, Pin, PushPull};
