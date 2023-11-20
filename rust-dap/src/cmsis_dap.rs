@@ -21,6 +21,8 @@ use core::convert::TryInto;
 use crate::cursor::{BufferCursor, CursorError, CursorRead, CursorWrite};
 use crate::interface::*;
 use bitflags::bitflags;
+use bitvec;
+use bitvec::slice::BitSlice;
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use usb_device::class_prelude::*;
 use usb_device::Result;
@@ -196,8 +198,8 @@ pub trait JtagIo {
     ) -> core::result::Result<u32, DapError>;
 
     fn write_ir(&mut self, config: &JtagIoConfig, dap_index: u8, ir: u32);
-    fn write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &[bool]);
-    fn read_write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &mut [bool]);
+    fn write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &BitSlice<u32>);
+    fn read_write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &mut BitSlice<u32>);
 }
 
 pub const DAP_OK: u8 = 0x00;

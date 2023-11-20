@@ -15,6 +15,13 @@
 // limitations under the License.
 
 use crate::cmsis_dap::*;
+use bitflags::bitflags;
+use bitvec::{
+    bits,
+    prelude::{BitArray, Lsb0},
+    slice::BitSlice,
+    BitArr,
+};
 use embedded_hal::digital::v2::{InputPin, IoPin, OutputPin, PinState};
 
 pub trait DelayFunc {
@@ -1315,7 +1322,7 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
         self.write_bit(config, false, false); // Run
     }
 
-    fn write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &[bool]) {
+    fn write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &BitSlice<u32>) {
         if dr.is_empty() {
             // TODO: return Err
             panic!("dr have to hold least 1 bit")
@@ -1361,7 +1368,7 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
         self.write_bit(config, false, false); // Run
     }
 
-    fn read_write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &mut [bool]) {
+    fn read_write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &mut BitSlice<u32>) {
         // to ShiftIR from Run-Test-Idle
         self.write_bit(config, true, false); // SelectDR
         self.write_bit(config, false, false); // CaptureDR
@@ -1388,11 +1395,11 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
             bit_count += 1;
             self.write_bit(config, false, false);
         }
-        for dr_bit in dr {
+        for mut dr_bit in dr {
             bit_count += 1;
             let tms = bit_count == total_bits;
             let tdo = self.read_bit(config, tms, *dr_bit);
-            *dr_bit = tdo;
+            dr_bit.set(tdo);
         }
         for _i in 0..head_bits {
             bit_count += 1;
@@ -1431,7 +1438,7 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
         // DRを書き込む
         if read {
             let mut dr = build_acc(data, a3, a2, true);
-            self.read_write_dr(config, dap_index, &mut dr);
+            self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
             // TODO: OK_FALSE等の情報を返す必要がないか調べる
             let dr_data = &dr[3..35];
             let mut result: u32 = 0;
@@ -1441,22 +1448,18 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
             Ok(result)
         } else {
             let dr = build_acc(data, a3, a2, false);
-            self.write_dr(config, dap_index, &dr);
+            self.write_dr(config, dap_index, dr.as_bitslice());
             Ok(0)
         }
     }
 }
 
-fn build_acc(data: u32, a3: bool, a2: bool, read: bool) -> [bool; 35] {
-    let mut data = data;
-    let mut dr = [false; 35];
-    dr[0] = read;
-    dr[1] = a2;
-    dr[2] = a3;
-    for i in 0..32 {
-        dr[3 + i] = (data & 1) != 0;
-        data >>= 1;
-    }
+fn build_acc(data: u32, a3: bool, a2: bool, read: bool) -> BitArray<[u32; 2], Lsb0> {
+    let mut dr: BitArr!(for 35, in u32, Lsb0) = BitArray::new([data, 0]);
+    dr.shift_left(3);
+    *dr.get_mut(0).unwrap() = read;
+    *dr.get_mut(1).unwrap() = a2;
+    *dr.get_mut(2).unwrap() = a3;
     dr
 }
 
