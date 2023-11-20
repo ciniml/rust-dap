@@ -547,6 +547,7 @@ dependencies = [
 name = "rust-dap-rp2040"
 version = "0.2.0"
 dependencies = [
+ "bitvec",
  "cortex-m",
  "cortex-m-rt",
  "cortex-m-rtic",

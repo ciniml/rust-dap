@@ -21,8 +21,12 @@ use core::convert::TryInto;
 use crate::cursor::{BufferCursor, CursorError, CursorRead, CursorWrite};
 use crate::interface::*;
 use bitflags::bitflags;
-use bitvec;
-use bitvec::slice::BitSlice;
+use bitvec::{
+    self,
+    prelude::{BitArray, Lsb0},
+    slice::BitSlice,
+    BitArr,
+};
 use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use usb_device::class_prelude::*;
 use usb_device::Result;
@@ -121,6 +125,15 @@ pub const DAP_TRANSFER_FAULT: u8 = 0x04;
 pub const DAP_TRANSFER_ERROR: u8 = 0x08;
 pub const DAP_TRANSFER_MISMATCH: u8 = 0x10;
 
+#[allow(dead_code)]
+pub enum JtagInstruction {
+    ABORT = 0b1000,
+    DPACC = 0b1010,
+    APACC = 0b1011,
+    IDCODE = 0b1110,
+    BYPASS = 0b1111,
+}
+
 #[derive(Clone, Copy)]
 pub struct SwdIoConfig {
     pub clock_wait_cycles: u32,
@@ -198,8 +211,16 @@ pub trait JtagIo {
     ) -> core::result::Result<u32, DapError>;
 
     fn write_ir(&mut self, config: &JtagIoConfig, dap_index: u8, ir: u32);
-    fn write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &BitSlice<u32>);
     fn read_write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &mut BitSlice<u32>);
+}
+
+pub fn build_acc(data: u32, a3: bool, a2: bool, read: bool) -> BitArray<[u32; 2], Lsb0> {
+    let mut dr: BitArr!(for 35, in u32, Lsb0) = BitArray::new([data, 0]);
+    dr.shift_left(3);
+    *dr.get_mut(0).unwrap() = read;
+    *dr.get_mut(1).unwrap() = a2;
+    *dr.get_mut(2).unwrap() = a3;
+    dr
 }
 
 pub const DAP_OK: u8 = 0x00;
@@ -300,6 +321,7 @@ impl Default for CmsisDapConfig {
     }
 }
 
+#[derive(Debug)]
 pub struct JtagSequenceInfo {
     pub number_of_tck_cycles: usize,
     pub tms_value: bool,
@@ -1029,7 +1051,7 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
         let mut response_body_count = 0;
 
         for _i in 0..sequence_count {
-            let sequence_info = JtagSequenceInfo::from(request[0]);
+            let sequence_info: JtagSequenceInfo = JtagSequenceInfo::from(request[0]);
             request_proceeded += 1;
             request = &request[1..];
 

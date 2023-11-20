@@ -247,8 +247,34 @@ mod app {
                     trst_pin,
                     srst_pin,
                     CycleDelay {},
-                );
-            }
+                )
+            };
+            #[cfg(not(feature = "bitbang"))]
+            {
+                // PIO
+                let mut tck_pin = pins.gpio2.into_mode();
+                let mut tms_pin = pins.gpio3.into_mode();
+                let mut tdo_pin = pins.gpio5.into_mode();
+                let mut tdi_pin = pins.gpio6.into_mode();
+                let mut trst_pin = pins.gpio7.into_mode();
+                let mut srst_pin = pins.gpio4.into_mode();
+                tck_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+                tms_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+                tdo_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+                tdi_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+                trst_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+                srst_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+                jtagio = JtagIoSet::new(
+                    c.device.PIO0,
+                    tck_pin,
+                    tms_pin,
+                    tdi_pin,
+                    tdo_pin,
+                    Some(trst_pin),
+                    Some(srst_pin),
+                    &mut resets,
+                )
+            };
             initialize_usb(
                 jtagio,
                 usb_allocator,

@@ -31,3 +31,4 @@ heapless = "0.7"
 embedded-hal = { version = "0.2", features = ["unproven"] }
 fugit = "0.3"
 defmt = { version = "0.3", optional = true }
+bitvec = { version = "1.0.1", default-features = false }
