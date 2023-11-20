@@ -17,7 +17,7 @@
 #![no_std]
 #![no_main]
 
-use embedded_hal::digital::v2::ToggleableOutputPin;
+use embedded_hal::digital::v2::{OutputPin, ToggleableOutputPin};
 use panic_halt as _;
 use rust_dap::bitbang::{DelayFunc, SwdIoSet};
 use rust_dap::{
@@ -43,16 +43,26 @@ mod swdio_pin;
 use swdio_pin::*;
 
 // Import pin types.
-use hal::gpio::v2::{PA05, PA07, PA18};
+use hal::gpio::v2::{PA02, PA05, PA07, PA18};
 
-type SwdIoPin = PA05;
-type SwClkPin = PA07;
+type SwdIoPin = PA05; // D9
+type SwClkPin = PA07; // D8
+type ResetPin = PA02; // D0
 type SwdIoInputPin = XiaoSwdInputPin<SwdIoPin>;
 type SwdIoOutputPin = XiaoSwdOutputPin<SwdIoPin>;
 type SwClkInputPin = XiaoSwdInputPin<SwClkPin>;
 type SwClkOutputPin = XiaoSwdOutputPin<SwClkPin>;
-type MySwdIoSet =
-    SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, CycleDelay>;
+type ResetInputPin = XiaoSwdInputPin<ResetPin>;
+type ResetOutputPin = XiaoSwdOutputPin<ResetPin>;
+type MySwdIoSet = SwdIoSet<
+    SwClkInputPin,
+    SwClkOutputPin,
+    SwdIoInputPin,
+    SwdIoOutputPin,
+    ResetInputPin,
+    ResetOutputPin,
+    CycleDelay,
+>;
 
 struct CycleDelay {}
 impl DelayFunc for CycleDelay {
@@ -86,9 +96,15 @@ fn main() -> ! {
         USB_ALLOCATOR.as_ref().unwrap()
     };
 
+    let mut n_reset_pin = pins.a0.into_push_pull_output();
+    // RESET pin of Cortex Debug 10-pin connector is negative logic
+    // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
+    n_reset_pin.set_high().ok();
+
     let swdio = MySwdIoSet::new(
         XiaoSwdInputPin::new(pins.a8.into_floating_input()),
         XiaoSwdInputPin::new(pins.a9.into_floating_input()),
+        XiaoSwdOutputPin::new(n_reset_pin),
         CycleDelay {},
     );
 

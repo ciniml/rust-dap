@@ -14,156 +14,255 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use cortex_m::asm;
+use pio::Program;
 use rust_dap::*;
 // use rust_dap::{SwdIo, SwdIoConfig, SwdRequest, DapError};
 // use rust_dap::{DAP_TRANSFER_OK, DAP_TRANSFER_WAIT, DAP_TRANSFER_FAULT, /* DAP_TRANSFER_ERROR, */ DAP_TRANSFER_MISMATCH};
 use hal::gpio::{bank0, PinId};
-use hal::pac;
-use hal::pio::PIOExt;
+use hal::pac::{self, PIO0};
+use hal::pio::{InstalledProgram, PIOExt};
 use rp2040_hal as hal;
 pub mod pio0 {
     use crate::pio::hal::{self, gpio::FunctionPio0};
     pub type Pin<P> = hal::gpio::Pin<P, FunctionPio0>;
 }
 
+const DEFAULT_CORE_CLOCK: u32 = 125000000;
 const DEFAULT_PIO_DIVISOR: f32 = 1.0f32; // Default PIO Divisor. Generate 125/8 = 15.625[MHz] SWCLK clock.
 #[cfg(feature = "set_clock")]
 const DEFAULT_SWJ_CLOCK_HZ: u32 = ((125000000 / 8) as f32 / DEFAULT_PIO_DIVISOR) as u32;
 
 struct SwdPioContext {
+    pio: hal::pio::PIO<PIO0>,
     running_sm: hal::pio::StateMachine<hal::pio::PIO0SM0, hal::pio::Running>,
     rx_fifo: hal::pio::Rx<hal::pio::PIO0SM0>,
     tx_fifo: hal::pio::Tx<hal::pio::PIO0SM0>,
 }
 
-pub struct SwdIoSet<C, D> {
+pub struct SwdIoSet<C, D, E> {
     #[allow(unused)]
     clk_pin_id: u8,
     #[allow(unused)]
     dat_pin_id: u8,
+    rst_pin_id: u8,
     context: Option<SwdPioContext>,
-    _pins: core::marker::PhantomData<(C, D)>,
+    _pins: core::marker::PhantomData<(C, D, E)>,
 }
 
-impl<C, D> SwdIoSet<pio0::Pin<C>, pio0::Pin<D>>
+fn swd_program() -> Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
+    type Assembler = pio::Assembler<{ pio::RP2040_MAX_PROGRAM_SIZE }>;
+    let mut a = Assembler::new_with_side_set(pio::SideSet::new(true, 1, false));
+    let mut write_loop = a.label();
+    let mut write_loop_enter = a.label();
+    let mut read_start = a.label();
+    let mut read_loop = a.label();
+    let mut read_loop_enter = a.label();
+    let mut wrap_target = a.label();
+    let mut wrap_source = a.label();
+    const HI: u8 = 1;
+    const LO: u8 = 0;
+    // As we are using side set in optional mode, maximum delay is 7.
+    const Q: u8 = 4 - 1; // delay
+
+    a.bind(&mut wrap_target);
+    // Get number of bits and direction bit from FIFO to OSR.
+    a.pull(false, true);
+    // Move number of bits to X register.
+    a.out(pio::OutDestination::X, 31);
+    // Copy direction bit to Y register.
+    a.mov(
+        pio::MovDestination::Y,
+        pio::MovOperation::None,
+        pio::MovSource::OSR,
+    );
+    // Y == 0 means Read , Y != 0 means Write
+    a.jmp(pio::JmpCondition::YIsZero, &mut read_start);
+
+    // Write-Bits
+    // Get data from FIFO to OSR.
+    a.pull(false, true);
+    // We want to prepare output value before setting pin direction.
+    a.out(pio::OutDestination::PINS, 1);
+    // Use ISP as a temporary store.
+    a.mov(
+        pio::MovDestination::ISR,
+        pio::MovOperation::None,
+        pio::MovSource::OSR,
+    );
+    // Y register has value 1. Copy that 1 to OSR.
+    a.mov(
+        pio::MovDestination::OSR,
+        pio::MovOperation::None,
+        pio::MovSource::Y,
+    );
+    // Set IO direction of SWDIO pin to output.
+    a.out(pio::OutDestination::PINDIRS, 1);
+    // Restore rest of data from ISR to OSR.
+    a.mov(
+        pio::MovDestination::OSR,
+        pio::MovOperation::None,
+        pio::MovSource::ISR,
+    );
+    // Jump if X register is not 0. with post decrement.
+    a.jmp(pio::JmpCondition::XDecNonZero, &mut write_loop_enter);
+
+    // We have updated state of SWDIO pin while keeping SWCLK static.
+    // Start over.
+    a.jmp(pio::JmpCondition::Always, &mut wrap_target);
+
+    a.bind(&mut write_loop);
+    // Output 1-bit. and set SWCLK to High.
+    a.set(pio::SetDestination::PINS, HI);
+    a.out_with_delay(
+        pio::OutDestination::PINS,
+        1,
+        match Q {
+            0 => 0,
+            _ => Q - 1,
+        },
+    );
+    a.bind(&mut write_loop_enter);
+    // Keep looping unless X register is 0. and set SWCLK to Low.
+    a.jmp_with_delay_and_side_set(pio::JmpCondition::XDecNonZero, &mut write_loop, Q, LO);
+    // Set SWCLK to High.
+    a.set(pio::SetDestination::PINS, HI);
+    // Start over.
+    a.jmp(pio::JmpCondition::Always, &mut wrap_target);
+
+    // Read-Bits
+    a.bind(&mut read_start);
+    // Set IO direction of SWDIO pin to input.
+    a.out_with_delay(
+        pio::OutDestination::PINDIRS,
+        1,
+        match Q {
+            0 => 0,
+            _ => Q - 1,
+        },
+    );
+    // Jump if X register is not 0. with post decrement.
+    a.jmp(pio::JmpCondition::XDecNonZero, &mut read_loop_enter);
+    // Wait before reading SWDIO pin.
+    a.nop_with_delay(Q);
+    // Read state of SWDIO pin without clocking SWCLK.
+    a.r#in(pio::InSource::PINS, 1);
+    // Shift in 31 bits of 0 to MSB of ISR.
+    a.r#in(pio::InSource::NULL, 31);
+    // Put result data from ISR to FIFO.
+    a.push(false, true);
+    // Start over.
+    a.jmp(pio::JmpCondition::Always, &mut wrap_target);
+
+    a.bind(&mut read_loop);
+    // Shift-in 1-bit to ISR. and set SWCLK to High.
+    a.r#in_with_delay_and_side_set(pio::InSource::PINS, 1, Q, HI);
+    a.bind(&mut read_loop_enter);
+    // Keep looping unless X register is 0. and set SWCLK to Low.
+    a.jmp_with_delay_and_side_set(pio::JmpCondition::XDecNonZero, &mut read_loop, Q, LO);
+    a.r#in_with_side_set(pio::InSource::PINS, 1, HI);
+    // Put result data from ISR to FIFO.
+    a.push(false, true);
+    a.bind(&mut wrap_source);
+    // Start over.
+    // a.jmp(pio::JmpCondition::Always, &mut wrap_target);
+
+    // The labels wrap_target and wrap_source, as set above,
+    // define a loop which is executed repeatedly by the PIO
+    // state machine.
+    a.assemble_with_wrap(wrap_source, wrap_target)
+}
+
+fn swj_pins_program() -> Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
+    type Assembler = pio::Assembler<{ pio::RP2040_MAX_PROGRAM_SIZE }>;
+    let mut a = Assembler::new();
+    let mut delay_loop = a.label();
+    let mut wrap_target = a.label();
+    let mut wrap_source = a.label();
+
+    a.bind(&mut wrap_target);
+
+    // command data
+    // [
+    //      pin_output_values: u32,
+    //      pin_directions: u32,
+    //      wait_us:    u32
+    // ]
+
+    // load and set output value
+    a.pull(false, true);
+    a.out(pio::OutDestination::PINS, 32);
+    // load and set direction
+    a.pull(false, true);
+    a.out(pio::OutDestination::PINDIRS, 32);
+
+    // load output delay to Y
+    a.pull(false, true);
+    a.out(pio::OutDestination::Y, 32);
+
+    // wait_us
+    a.bind(&mut delay_loop);
+    // delay 9(+1) cycles * 0.1us/cycle = 1us
+    a.jmp_with_delay(pio::JmpCondition::YDecNonZero, &mut delay_loop, 9);
+
+    // check all pin status
+    a.r#in(pio::InSource::PINS, 32);
+    a.push(false, true);
+
+    a.bind(&mut wrap_source);
+
+    a.assemble_with_wrap(wrap_source, wrap_target)
+}
+
+fn all_pins_to_input_program() -> Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
+    type Assembler = pio::Assembler<{ pio::RP2040_MAX_PROGRAM_SIZE }>;
+    let mut a = Assembler::new();
+    let mut wrap_target = a.label();
+    let mut wrap_source = a.label();
+
+    a.bind(&mut wrap_target);
+
+    a.mov(
+        pio::MovDestination::X,
+        pio::MovOperation::None,
+        pio::MovSource::NULL,
+    );
+    a.out(pio::OutDestination::PINDIRS, 32);
+
+    a.bind(&mut wrap_source);
+
+    a.assemble_with_wrap(wrap_source, wrap_target)
+}
+
+impl<C, D, E> SwdIoSet<pio0::Pin<C>, pio0::Pin<D>, pio0::Pin<E>>
 where
     C: PinId + bank0::BankPinId,
     D: PinId + bank0::BankPinId,
+    E: PinId + bank0::BankPinId,
 {
     #[rustfmt::skip]
-    pub fn new(pio0: pac::PIO0, _: pio0::Pin<C>, _: pio0::Pin<D>, resets: &mut pac::RESETS) -> Self {
+    pub fn new(pio0: pac::PIO0, _: pio0::Pin<C>, _: pio0::Pin<D>, _: pio0::Pin<E>, resets: &mut pac::RESETS) -> Self {
         let clk_pin_id = C::DYN.num;
         let dat_pin_id = D::DYN.num;
+        let rst_pin_id = E::DYN.num;
         // Currently HAL does not provide any way to disable schmitt trigger.
         // unsafe { core::ptr::write_volatile((0x4001C004 + clk_pin_id as u32 * 4) as *mut u32, 0x71 as u32) };
         // unsafe { core::ptr::write_volatile((0x4001C004 + dat_pin_id as u32 * 4) as *mut u32, 0x71 as u32); }
-
-        type Assembler = pio::Assembler<{ pio::RP2040_MAX_PROGRAM_SIZE }>;
-        let mut a = Assembler::new_with_side_set(pio::SideSet::new(true, 1, false));
-        let mut write_loop = a.label();
-        let mut write_loop_enter = a.label();
-        let mut read_start = a.label();
-        let mut read_loop = a.label();
-        let mut read_loop_enter = a.label();
-        let mut wrap_target = a.label();
-        let mut wrap_source = a.label();
-        const HI: u8 = 1;
-        const LO: u8 = 0;
-        // As we are using side set in optional mode, maximum delay is 7.
-        const Q: u8 = 4 - 1; // delay
-
-        a.bind(&mut wrap_target);
-        // Get number of bits and direction bit from FIFO to OSR.
-        a.pull(false, true);
-        // Move number of bits to X register.
-        a.out(pio::OutDestination::X, 31);
-        // Copy direction bit to Y register.
-        a.mov(pio::MovDestination::Y, pio::MovOperation::None, pio::MovSource::OSR);
-        // Y == 0 means Read , Y != 0 means Write
-        a.jmp(pio::JmpCondition::YIsZero, &mut read_start);
-
-        // Write-Bits
-        // Get data from FIFO to OSR.
-        a.pull(false, true);
-        // We want to prepare output value before setting pin direction.
-        a.out(pio::OutDestination::PINS, 1);
-        // Use ISP as a temporary store.
-        a.mov(pio::MovDestination::ISR, pio::MovOperation::None, pio::MovSource::OSR);
-        // Y register has value 1. Copy that 1 to OSR.
-        a.mov(pio::MovDestination::OSR, pio::MovOperation::None, pio::MovSource::Y);
-        // Set IO direction of SWDIO pin to output.
-        a.out(pio::OutDestination::PINDIRS, 1);
-        // Restore rest of data from ISR to OSR.
-        a.mov(pio::MovDestination::OSR, pio::MovOperation::None, pio::MovSource::ISR);
-        // Jump if X register is not 0. with post decrement.
-        a.jmp(pio::JmpCondition::XDecNonZero, &mut write_loop_enter);
-
-        // We have updated state of SWDIO pin while keeping SWCLK static.
-        // Start over.
-        a.jmp(pio::JmpCondition::Always, &mut wrap_target);
-
-        a.bind(&mut write_loop);
-        // Output 1-bit. and set SWCLK to High.
-        a.set(pio::SetDestination::PINS, HI);
-        a.out_with_delay(pio::OutDestination::PINS, 1, match Q { 0 => 0, _ => Q - 1 });
-        a.bind(&mut write_loop_enter);
-        // Keep looping unless X register is 0. and set SWCLK to Low.
-        a.jmp_with_delay_and_side_set(pio::JmpCondition::XDecNonZero, &mut write_loop, Q, LO);
-        // Set SWCLK to High.
-        a.set(pio::SetDestination::PINS, HI);
-        // Start over.
-        a.jmp(pio::JmpCondition::Always, &mut wrap_target);
-
-        // Read-Bits
-        a.bind(&mut read_start);
-        // Set IO direction of SWDIO pin to input.
-        a.out_with_delay(pio::OutDestination::PINDIRS, 1, match Q { 0 => 0, _ => Q - 1 });
-        // Jump if X register is not 0. with post decrement.
-        a.jmp(pio::JmpCondition::XDecNonZero, &mut read_loop_enter);
-        // Wait before reading SWDIO pin.
-        a.nop_with_delay(Q);
-        // Read state of SWDIO pin without clocking SWCLK.
-        a.r#in(pio::InSource::PINS, 1);
-        // Shift in 31 bits of 0 to MSB of ISR.
-        a.r#in(pio::InSource::NULL, 31);
-        // Put result data from ISR to FIFO.
-        a.push(false, true);
-        // Start over.
-        a.jmp(pio::JmpCondition::Always, &mut wrap_target);
-
-        a.bind(&mut read_loop);
-        // Shift-in 1-bit to ISR. and set SWCLK to High.
-        a.r#in_with_delay_and_side_set(pio::InSource::PINS, 1, Q, HI);
-        a.bind(&mut read_loop_enter);
-        // Keep looping unless X register is 0. and set SWCLK to Low.
-        a.jmp_with_delay_and_side_set(pio::JmpCondition::XDecNonZero, &mut read_loop, Q, LO);
-        a.r#in_with_side_set(pio::InSource::PINS, 1, HI);
-        // Put result data from ISR to FIFO.
-        a.push(false, true);
-        a.bind(&mut wrap_source);
-        // Start over.
-        // a.jmp(pio::JmpCondition::Always, &mut wrap_target);
-
-        // The labels wrap_target and wrap_source, as set above,
-        // define a loop which is executed repeatedly by the PIO
-        // state machine.
-        let program = a.assemble_with_wrap(wrap_source, wrap_target);
-        // let program = a.assemble_program();
-        // let program = program.set_origin(Some(0));
+        let program = all_pins_to_input_program();
 
         // Initialize and start PIO
+        // install swj_pin to pull-up RESET PIN
         let (mut pio, sm0, _, _, _) = pio0.split(resets);
         let installed = pio.install(&program).unwrap();
-        let (sm, rx, tx) = Self::build_pio(clk_pin_id, dat_pin_id, installed, DEFAULT_PIO_DIVISOR, sm0);
-        // Pin modes are controlled in connect() and disconnect() .
-        // sm.set_pindirs([(clk_pin_id, hal::pio::PinDir::Output), (dat_pin_id, hal::pio::PinDir::Output)]);
-
+        let (sm, rx, tx) = Self::build_pio((0,5) ,0, (0,32),0, installed, DEFAULT_PIO_DIVISOR, sm0);
         let running_sm = sm.start();
 
         Self {
             clk_pin_id,
             dat_pin_id,
+            rst_pin_id,
             context: Some(SwdPioContext {
+                pio,
                 running_sm,
                 rx_fifo: rx,
                 tx_fifo: tx,
@@ -174,7 +273,7 @@ where
 }
 
 // Auxiliary low-level function
-impl<C, D> SwdIoSet<C, D> {
+impl<C, D, E> SwdIoSet<C, D, E> {
     fn get_context(&mut self) -> &mut SwdPioContext {
         self.context.as_mut().unwrap()
     }
@@ -196,9 +295,11 @@ impl<C, D> SwdIoSet<C, D> {
     }
 
     fn build_pio<P: PIOExt>(
-        clk_pin_id: u8,
-        dat_pin_id: u8,
-        installed: hal::pio::InstalledProgram<P>,
+        (set_pin_id, set_pin_count): (u8, u8),
+        side_set_pin_id: u8,
+        (out_pins_id, out_pins_count): (u8, u8),
+        in_pins_id: u8,
+        installed: InstalledProgram<P>,
         divisor: f32,
         sm0: hal::pio::UninitStateMachine<(P, hal::pio::SM0)>,
     ) -> (
@@ -207,11 +308,11 @@ impl<C, D> SwdIoSet<C, D> {
         hal::pio::Tx<(P, hal::pio::SM0)>,
     ) {
         hal::pio::PIOBuilder::from_program(installed)
-            .set_pins(clk_pin_id, 1)
-            .side_set_pin_base(clk_pin_id)
-            .out_pins(dat_pin_id, 1)
+            .set_pins(set_pin_id, set_pin_count)
+            .side_set_pin_base(side_set_pin_id)
+            .out_pins(out_pins_id, out_pins_count)
             .out_shift_direction(hal::pio::ShiftDirection::Right)
-            .in_pin_base(dat_pin_id)
+            .in_pin_base(in_pins_id)
             .in_shift_direction(hal::pio::ShiftDirection::Right)
             .clock_divisor_fixed_point(divisor as u16, (divisor * 256.0) as u8)
             .build(sm0)
@@ -221,7 +322,7 @@ impl<C, D> SwdIoSet<C, D> {
     fn set_clock(&mut self, frequency_hz: u32) {
         // Calculate divisor.
         let divisor = if frequency_hz > 0 {
-            ((125000000u32 / 8) / frequency_hz) as f32
+            ((DEFAULT_CORE_CLOCK / 8) / frequency_hz) as f32
         } else {
             DEFAULT_PIO_DIVISOR
         };
@@ -237,7 +338,9 @@ impl<C, D> SwdIoSet<C, D> {
         let context = context.unwrap();
         let (sm0, installed) = context.running_sm.uninit(context.rx_fifo, context.tx_fifo);
         let (sm0, rx_fifo, tx_fifo) = Self::build_pio(
+            (self.clk_pin_id, 1),
             self.clk_pin_id,
+            (self.dat_pin_id, 1),
             self.dat_pin_id,
             installed,
             divisor as f32,
@@ -245,6 +348,90 @@ impl<C, D> SwdIoSet<C, D> {
         );
         let running_sm = sm0.start();
         let mut new_context = Some(SwdPioContext {
+            pio: context.pio,
+            running_sm,
+            rx_fifo,
+            tx_fifo,
+        });
+        core::mem::swap(&mut self.context, &mut new_context);
+    }
+
+    fn setup_swd(&mut self) {
+        // Stop SM, Reconstruct SM with new program.
+        let mut context = None;
+        core::mem::swap(&mut self.context, &mut context);
+        let context = context.unwrap();
+        let (sm0, installed) = context.running_sm.uninit(context.rx_fifo, context.tx_fifo);
+        let mut pio = context.pio;
+        pio.uninstall(installed);
+        let installed = pio.install(&swd_program()).unwrap();
+        let (sm0, rx_fifo, tx_fifo) = Self::build_pio(
+            (self.clk_pin_id, 1),
+            self.clk_pin_id,
+            (self.dat_pin_id, 1),
+            self.dat_pin_id,
+            installed,
+            DEFAULT_PIO_DIVISOR,
+            sm0,
+        );
+        let running_sm = sm0.start();
+        let mut new_context = Some(SwdPioContext {
+            pio,
+            running_sm,
+            rx_fifo,
+            tx_fifo,
+        });
+        core::mem::swap(&mut self.context, &mut new_context);
+    }
+
+    fn setup_all_pins_to_input_program(&mut self) {
+        // Stop SM, Reconstruct SM with new program.
+        let mut context = None;
+        core::mem::swap(&mut self.context, &mut context);
+        let context = context.unwrap();
+        let (sm0, installed) = context.running_sm.uninit(context.rx_fifo, context.tx_fifo);
+        let mut pio = context.pio;
+        pio.uninstall(installed);
+        let installed = pio.install(&all_pins_to_input_program()).unwrap();
+        let (sm0, rx_fifo, tx_fifo) = Self::build_pio(
+            (self.clk_pin_id, 1),
+            self.clk_pin_id,
+            (self.dat_pin_id, 1),
+            self.dat_pin_id,
+            installed,
+            DEFAULT_PIO_DIVISOR,
+            sm0,
+        );
+        let running_sm = sm0.start();
+        let mut new_context = Some(SwdPioContext {
+            pio,
+            running_sm,
+            rx_fifo,
+            tx_fifo,
+        });
+        core::mem::swap(&mut self.context, &mut new_context);
+    }
+
+    fn setup_swj_pins(&mut self) {
+        // Calculate divisor.
+        // set 0.1us = 10 MHz
+        // core frequency(MHz) / 100(MHz) = 0.1us/clock
+        let system_clock = f32::try_from((DEFAULT_CORE_CLOCK / 1_000_000) as u16).unwrap();
+        let divisor = system_clock / 10f32;
+
+        // Stop SM, Reconstruct SM with new program.
+        let mut context = None;
+        core::mem::swap(&mut self.context, &mut context);
+        let context = context.unwrap();
+        let (sm0, installed) = context.running_sm.uninit(context.rx_fifo, context.tx_fifo);
+        let mut pio = context.pio;
+        pio.uninstall(installed);
+        let installed = pio.install(&swj_pins_program()).unwrap();
+        let (sm0, rx_fifo, tx_fifo) =
+            Self::build_pio((0, 1), 0, (0, 32), 0, installed, divisor as f32, sm0);
+        let running_sm = sm0.start();
+        let mut new_context = Some(SwdPioContext {
+            pio,
             running_sm,
             rx_fifo,
             tx_fifo,
@@ -254,14 +441,14 @@ impl<C, D> SwdIoSet<C, D> {
 }
 
 // Connect and disconnect function
-impl<C, D> SwdIoSet<C, D> {
+impl<C, D, E> SwdIoSet<C, D, E> {
     fn connect(&mut self) {
+        self.setup_swd();
         self.set_clk_pindir(true);
         self.to_swdio_out(true);
     }
     fn disconnect(&mut self) {
-        self.to_swdio_in();
-        self.set_clk_pindir(false);
+        self.setup_all_pins_to_input_program();
         // Reset clock
         #[cfg(feature = "set_clock")]
         self.set_clock(DEFAULT_SWJ_CLOCK_HZ);
@@ -269,7 +456,7 @@ impl<C, D> SwdIoSet<C, D> {
 }
 
 // Basis of SWD interface
-impl<C, D> SwdIoSet<C, D> {
+impl<C, D, E> SwdIoSet<C, D, E> {
     // if bits > 32 , it will behave as if value is extended with zeros.
     fn write_bits(&mut self, bits: u32, value: u32) {
         while !self.get_context().tx_fifo.write(bits | 1 << 31) {}
@@ -286,7 +473,7 @@ impl<C, D> SwdIoSet<C, D> {
 }
 
 // Supplemental functions for SWD
-impl<C, D> SwdIoSet<C, D> {
+impl<C, D, E> SwdIoSet<C, D, E> {
     #[allow(clippy::wrong_self_convention)]
     fn to_swdio_in(&mut self) {
         self.read_bits(0);
@@ -326,7 +513,7 @@ pub trait SupplementSwdIo {
 }
 */
 
-impl<C, D> SwdIo for SwdIoSet<C, D> {
+impl<C, D, E> SwdIo for SwdIoSet<C, D, E> {
     fn connect(&mut self) {
         self.connect();
     }
@@ -480,7 +667,7 @@ impl<C, D> SwdIo for SwdIoSet<C, D> {
     }
 }
 
-impl<C, D> CmsisDapCommandInner for SwdIoSet<C, D> {
+impl<C, D, E> CmsisDapCommandInner for SwdIoSet<C, D, E> {
     fn connect(&mut self, _config: &CmsisDapConfig) {
         SwdIo::connect(self);
     }
@@ -578,12 +765,83 @@ impl<C, D> CmsisDapCommandInner for SwdIoSet<C, D> {
     fn swj_pins(
         &mut self,
         _config: &CmsisDapConfig,
-        _pin_output: u8,
-        _pin_select: u8,
-        _wait_us: u32,
+        pin_output: u8,
+        pin_select: u8,
+        wait_us: u32,
     ) -> core::result::Result<u8, DapError> {
-        // TODO: write
-        Ok(0)
+        // install swj_pins program
+        self.setup_swj_pins();
+
+        // clean rx fifo
+        while !self.get_context().rx_fifo.is_empty() {
+            let _ = self.get_context().rx_fifo.read();
+        }
+
+        let pin_output = SwjPins::from_bits(pin_output).unwrap();
+        let pin_select = SwjPins::from_bits(pin_select).unwrap();
+
+        // output
+        let mut pio_pin_out: u32 = 0;
+        if pin_select.contains(SwjPins::TCK_SWDCLK) {
+            pio_pin_out |= if pin_output.contains(SwjPins::TCK_SWDCLK) {
+                1
+            } else {
+                0
+            } << self.clk_pin_id;
+        }
+        if pin_select.contains(SwjPins::TMS_SWDIO) {
+            pio_pin_out |= if pin_output.contains(SwjPins::TMS_SWDIO) {
+                1
+            } else {
+                0
+            } << self.dat_pin_id;
+        }
+        if pin_select.contains(SwjPins::N_RESET) {
+            pio_pin_out |= if pin_output.contains(SwjPins::N_RESET) {
+                1
+            } else {
+                0
+            } << self.rst_pin_id;
+        }
+        self.context.as_mut().unwrap().tx_fifo.write(pio_pin_out);
+
+        // directions
+        let pio_pin_directions = 1 << self.clk_pin_id | 0 << self.dat_pin_id | 1 << self.rst_pin_id;
+        // let pio_pin_directions:u32 = 0;
+        self.context
+            .as_mut()
+            .unwrap()
+            .tx_fifo
+            .write(pio_pin_directions);
+
+        // wait_us
+        self.context.as_mut().unwrap().tx_fifo.write(wait_us);
+
+        // input
+        let tmp = loop {
+            if let Some(x) = self.context.as_mut().unwrap().rx_fifo.read() {
+                break x;
+            } else {
+                asm::nop();
+            };
+        };
+
+        // convert
+        let mut input = SwjPins::empty();
+        if tmp & (1 << self.clk_pin_id) != 0 {
+            input |= SwjPins::TCK_SWDCLK;
+        }
+        if tmp & (1 << self.dat_pin_id) != 0 {
+            input |= SwjPins::TMS_SWDIO;
+        }
+        if tmp & (1 << self.rst_pin_id) != 0 {
+            input |= SwjPins::N_RESET;
+        }
+
+        // restore SWD program
+        self.setup_swd();
+
+        Ok(input.bits())
     }
 
     fn jtag_idcode(

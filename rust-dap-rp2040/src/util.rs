@@ -30,11 +30,13 @@ use crate::swdio_pin::{PicoSwdInputPin, PicoSwdOutputPin};
 #[cfg(feature = "bitbang")]
 use rust_dap::bitbang::{DelayFunc, JtagIoSet as BitbangJtagIoSet, SwdIoSet as BitbangSwdIoSet};
 #[cfg(feature = "bitbang")]
-pub type SwdIoSet<C, D> = BitbangSwdIoSet<
+pub type SwdIoSet<C, D, E> = BitbangSwdIoSet<
     PicoSwdInputPin<C>,
     PicoSwdOutputPin<C>,
     PicoSwdInputPin<D>,
     PicoSwdOutputPin<D>,
+    PicoSwdInputPin<E>,
+    PicoSwdOutputPin<E>,
     CycleDelay,
 >;
 #[cfg(feature = "bitbang")]
@@ -57,7 +59,7 @@ pub type JtagIoSet<TCK, TMS, TDI, TDO, TRST, SRST> = BitbangJtagIoSet<
 #[cfg(not(feature = "bitbang"))]
 use crate::pio::{pio0, SwdIoSet as PioSwdIoSet};
 #[cfg(not(feature = "bitbang"))]
-pub type SwdIoSet<C, D> = PioSwdIoSet<pio0::Pin<C>, pio0::Pin<D>>;
+pub type SwdIoSet<C, D, E> = PioSwdIoSet<pio0::Pin<C>, pio0::Pin<D>, pio0::Pin<E>>;
 
 /// DelayFunc implementation which uses cortex_m::asm::delay
 #[cfg(feature = "bitbang")]

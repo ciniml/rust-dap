@@ -15,26 +15,7 @@
 // limitations under the License.
 
 use crate::cmsis_dap::*;
-use bitflags::bitflags;
 use embedded_hal::digital::v2::{InputPin, IoPin, OutputPin, PinState};
-
-// Bit 0: SWCLK/TCK
-// Bit 1: SWDIO/TMS
-// Bit 2: TDI
-// Bit 3: TDO
-// Bit 5: nTRST
-// Bit 7: nRESET
-// https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__SWJ__Pins.html
-bitflags! {
-    struct SwjPins: u8 {
-        const TCK_SWDCLK = 1;
-        const TMS_SWDIO = 1 << 1;
-        const TDI = 1 << 2;
-        const TDO = 1 << 3;
-        const N_TRST = 1 << 5;
-        const N_RESET = 1 << 7;
-    }
-}
 
 pub trait DelayFunc {
     fn calculate_half_clock_cycles(_frequency_hz: u32) -> Option<u32> {
@@ -105,48 +86,102 @@ fn get_input<I: InputPin + IoPin<I, O>, O: OutputPin + IoPin<I, O>>(
 ///////////////////
 /////// SWD ///////
 ///////////////////
-pub struct SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn>
-where
+pub struct SwdIoSet<
+    SwClkInputPin,
+    SwClkOutputPin,
+    SwdIoInputPin,
+    SwdIoOutputPin,
+    ResetInputPin,
+    ResetOutputPin,
+    DelayFn,
+> where
     SwClkInputPin: InputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
     SwClkOutputPin: OutputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
     SwdIoInputPin: InputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
     SwdIoOutputPin: OutputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
+    ResetInputPin: InputPin + IoPin<ResetInputPin, ResetOutputPin>,
+    ResetOutputPin: OutputPin + IoPin<ResetInputPin, ResetOutputPin>,
     DelayFn: DelayFunc,
 {
     swdio_in: Option<SwdIoInputPin>,
     swdio_out: Option<SwdIoOutputPin>,
     swclk_in: Option<SwClkInputPin>,
     swclk_out: Option<SwClkOutputPin>,
+    reset_in: Option<ResetInputPin>,
+    reset_out: Option<ResetOutputPin>,
     cycle_delay: DelayFn,
 }
 
-impl<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn>
-    SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn>
+impl<
+        SwClkInputPin,
+        SwClkOutputPin,
+        SwdIoInputPin,
+        SwdIoOutputPin,
+        ResetInputPin,
+        ResetOutputPin,
+        DelayFn,
+    >
+    SwdIoSet<
+        SwClkInputPin,
+        SwClkOutputPin,
+        SwdIoInputPin,
+        SwdIoOutputPin,
+        ResetInputPin,
+        ResetOutputPin,
+        DelayFn,
+    >
 where
     SwClkInputPin: InputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
     SwClkOutputPin: OutputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
     SwdIoInputPin: InputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
     SwdIoOutputPin: OutputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
+    ResetInputPin: InputPin + IoPin<ResetInputPin, ResetOutputPin>,
+    ResetOutputPin: OutputPin + IoPin<ResetInputPin, ResetOutputPin>,
     DelayFn: DelayFunc,
 {
-    pub fn new(swclk: SwClkInputPin, swdio: SwdIoInputPin, cycle_delay: DelayFn) -> Self {
+    pub fn new(
+        swclk: SwClkInputPin,
+        swdio: SwdIoInputPin,
+        reset: ResetOutputPin,
+        cycle_delay: DelayFn,
+    ) -> Self {
         Self {
             swdio_in: Some(swdio),
             swdio_out: None,
             swclk_in: Some(swclk),
             swclk_out: None,
+            reset_in: None,
+            reset_out: Some(reset),
             cycle_delay,
         }
     }
 }
 
-impl<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn> BitBangSwdIo
-    for SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn>
+impl<
+        SwClkInputPin,
+        SwClkOutputPin,
+        SwdIoInputPin,
+        SwdIoOutputPin,
+        ResetInputPin,
+        ResetOutputPin,
+        DelayFn,
+    > BitBangSwdIo
+    for SwdIoSet<
+        SwClkInputPin,
+        SwClkOutputPin,
+        SwdIoInputPin,
+        SwdIoOutputPin,
+        ResetInputPin,
+        ResetOutputPin,
+        DelayFn,
+    >
 where
     SwClkInputPin: InputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
     SwClkOutputPin: OutputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
     SwdIoInputPin: InputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
     SwdIoOutputPin: OutputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
+    ResetInputPin: InputPin + IoPin<ResetInputPin, ResetOutputPin>,
+    ResetOutputPin: OutputPin + IoPin<ResetInputPin, ResetOutputPin>,
     DelayFn: DelayFunc,
 {
     fn calculate_half_clock_cycles(frequency_hz: u32) -> Option<u32> {
@@ -207,6 +242,33 @@ where
             );
         }
     }
+    fn to_reset_in(&mut self) {
+        let mut pin = None;
+        core::mem::swap(&mut pin, &mut self.reset_out);
+        if let Some(reset_out) = pin {
+            self.reset_in = Some(
+                reset_out
+                    .into_input_pin()
+                    .unwrap_or_else(|_| panic!("Failed to turn RESET pin to input.")),
+            );
+        }
+    }
+    fn to_reset_out(&mut self, output: bool) {
+        let mut pin = None;
+        core::mem::swap(&mut pin, &mut self.reset_in);
+        if let Some(reset_in) = pin {
+            let state = if output {
+                PinState::High
+            } else {
+                PinState::Low
+            };
+            self.reset_out = Some(
+                reset_in
+                    .into_output_pin(state)
+                    .unwrap_or_else(|_| panic!("Failed to turn RESET pin to output.")),
+            );
+        }
+    }
     fn set_swclk_output(&mut self, output: bool) {
         self.swclk_out.as_mut().and_then(|p| {
             if output {
@@ -225,8 +287,29 @@ where
             }
         });
     }
+    fn set_reset_output(&mut self, output: bool) {
+        self.reset_out.as_mut().and_then(|p| {
+            if output {
+                p.set_high().ok()
+            } else {
+                p.set_low().ok()
+            }
+        });
+    }
     fn get_swdio_input(&mut self) -> bool {
         self.swdio_in
+            .as_mut()
+            .map(|p| p.is_high().unwrap_or(false))
+            .unwrap()
+    }
+    fn get_swclk_input(&mut self) -> bool {
+        self.swclk_in
+            .as_mut()
+            .map(|p| p.is_high().unwrap_or(false))
+            .unwrap()
+    }
+    fn get_reset_input(&mut self) -> bool {
+        self.reset_in
             .as_mut()
             .map(|p| p.is_high().unwrap_or(false))
             .unwrap()
@@ -240,14 +323,18 @@ pub trait BitBangSwdIo {
     fn calculate_half_clock_cycles(_frequency_hz: u32) -> Option<u32> {
         None
     }
-
     fn to_swclk_in(&mut self);
     fn to_swclk_out(&mut self, output: bool);
     fn to_swdio_in(&mut self);
     fn to_swdio_out(&mut self, output: bool);
+    fn to_reset_in(&mut self);
+    fn to_reset_out(&mut self, output: bool);
     fn set_swclk_output(&mut self, output: bool);
     fn set_swdio_output(&mut self, output: bool);
+    fn set_reset_output(&mut self, output: bool);
+    fn get_swclk_input(&mut self) -> bool;
     fn get_swdio_input(&mut self) -> bool;
+    fn get_reset_input(&mut self) -> bool;
     fn clock_wait(&self, config: &SwdIoConfig);
 }
 
@@ -522,13 +609,31 @@ impl<Io: PrimitiveSwdIo> SwdIo for Io {
     }
 }
 
-impl<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn> CmsisDapCommandInner
-    for SwdIoSet<SwClkInputPin, SwClkOutputPin, SwdIoInputPin, SwdIoOutputPin, DelayFn>
+impl<
+        SwClkInputPin,
+        SwClkOutputPin,
+        SwdIoInputPin,
+        SwdIoOutputPin,
+        ResetInputPin,
+        ResetOutputPin,
+        DelayFn,
+    > CmsisDapCommandInner
+    for SwdIoSet<
+        SwClkInputPin,
+        SwClkOutputPin,
+        SwdIoInputPin,
+        SwdIoOutputPin,
+        ResetInputPin,
+        ResetOutputPin,
+        DelayFn,
+    >
 where
     SwClkInputPin: InputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
     SwClkOutputPin: OutputPin + IoPin<SwClkInputPin, SwClkOutputPin>,
     SwdIoInputPin: InputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
     SwdIoOutputPin: OutputPin + IoPin<SwdIoInputPin, SwdIoOutputPin>,
+    ResetInputPin: InputPin + IoPin<ResetInputPin, ResetOutputPin>,
+    ResetOutputPin: OutputPin + IoPin<ResetInputPin, ResetOutputPin>,
     DelayFn: DelayFunc,
 {
     fn connect(&mut self, _config: &CmsisDapConfig) {
@@ -620,12 +725,94 @@ where
     fn swj_pins(
         &mut self,
         _config: &CmsisDapConfig,
-        _pin_output: u8,
-        _pin_select: u8,
-        _wait_us: u32,
+        pin_output: u8,
+        pin_select: u8,
+        wait_us: u32,
     ) -> core::result::Result<u8, DapError> {
-        // TODO: write
-        Ok(0)
+        let pin_output = SwjPins::from_bits(pin_output).unwrap();
+        let pin_select = SwjPins::from_bits(pin_select).unwrap();
+
+        let flags = [
+            SwjPins::TCK_SWDCLK,
+            SwjPins::TMS_SWDIO,
+            SwjPins::TDI,
+            SwjPins::TDO,
+            SwjPins::N_TRST,
+            SwjPins::N_RESET,
+        ];
+
+        // output
+        for f in flags {
+            if pin_select.contains(f) {
+                let output = pin_output.contains(f);
+                match f {
+                    SwjPins::TCK_SWDCLK => {
+                        // TODO: inputならoutputにする
+                        // TODO: outputする値を覚えておいて、最後にもとに戻す
+                        self.set_swclk_output(output);
+                    }
+                    SwjPins::TMS_SWDIO => {
+                        self.set_swdio_output(output);
+                    }
+                    SwjPins::N_RESET => {
+                        self.set_reset_output(output);
+                    }
+                    _ => (),
+                }
+            }
+        }
+
+        // FIXIT: get core clock from system
+        // CORE_CLOCK / 1000000 * wait_us
+        const CORE_CLOCK: u64 = 125000000;
+        self.cycle_delay
+            .cycle_delay((CORE_CLOCK * wait_us as u64 / 1000000u64) as u32);
+
+        // backup
+        let swclk_is_output = self.swclk_out.is_some();
+        let swdio_is_output = self.swdio_out.is_some();
+        let n_reset_is_output = self.reset_out.is_some();
+
+        // change io
+        if swclk_is_output {
+            self.to_swclk_in();
+        }
+        if swdio_is_output {
+            self.to_swdio_in();
+        }
+        if n_reset_is_output {
+            self.to_reset_in();
+        }
+
+        // input
+        let mut pin_input = if self.get_swclk_input() {
+            SwjPins::TCK_SWDCLK
+        } else {
+            SwjPins::empty()
+        };
+        pin_input |= if self.get_swdio_input() {
+            SwjPins::TMS_SWDIO
+        } else {
+            SwjPins::empty()
+        };
+        pin_input |= if self.get_reset_input() {
+            SwjPins::N_RESET
+        } else {
+            SwjPins::empty()
+        };
+
+        // restore io
+        if swclk_is_output {
+            self.to_swclk_out(false);
+        }
+        if swdio_is_output {
+            self.to_swdio_out(false);
+        }
+        if n_reset_is_output {
+            self.to_reset_out(true);
+        }
+
+        Ok(pin_input.bits())
     }
 
     fn swj_clock(
