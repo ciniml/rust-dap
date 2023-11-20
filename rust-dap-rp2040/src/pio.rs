@@ -254,7 +254,7 @@ where
         // install swj_pin to pull-up RESET PIN
         let (mut pio, sm0, _, _, _) = pio0.split(resets);
         let installed = pio.install(&program).unwrap();
-        let (sm, rx, tx) = Self::build_pio((0,32) ,0, (0,32),0, installed, DEFAULT_PIO_DIVISOR, sm0);
+        let (sm, rx, tx) = Self::build_pio((0,5) ,0, (0,32),0, installed, DEFAULT_PIO_DIVISOR, sm0);
         let running_sm = sm.start();
 
         Self {
