@@ -87,15 +87,13 @@ fn jtag_pin_set() -> pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
     program
 }
 
-fn jtag_program() -> pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
+fn jtag_sequence_program() -> pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
     type Assembler = pio::Assembler<{ pio::RP2040_MAX_PROGRAM_SIZE }>;
     let mut a = Assembler::new_with_side_set(pio::SideSet::new(true, 1, false));
     let mut wrap_target = a.label();
     let mut wrap_source = a.label();
     let mut tdi_shift_start = a.label();
-    let mut tdi_shift_init = a.label();
-    let mut tdi_shift_end = a.label();
-    let mut last_one_bit = a.label();
+    let mut push_unaligned = a.label();
 
     // data format
     // [
@@ -107,9 +105,6 @@ fn jtag_program() -> pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
 
     a.bind(&mut wrap_target);
 
-    // set tms = 0
-    a.set(pio::SetDestination::PINS, 0);
-
     // pull size(31bit) | tms_value(1bit)
     a.pull(false, true);
     // out tms_value
@@ -117,57 +112,32 @@ fn jtag_program() -> pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
     // out bit length to X
     a.out(pio::OutDestination::X, 31);
 
-    // pull first 32bit
-    a.pull(false, true);
+    // set tms value
+    a.set(pio::SetDestination::PINS, 0);
+    a.jmp(pio::JmpCondition::YIsZero, &mut tdi_shift_start);
+    a.set(pio::SetDestination::PINS, 1);
 
-    a.jmp_with_side_set(pio::JmpCondition::Always, &mut tdi_shift_init, 1);
-
-    // do {
     {
         a.bind(&mut tdi_shift_start);
-
-        // falling edge
-        // LowのときにOutして、HighのときにInする
-
-        // falling part(4 clock)
-        // set 1 bit from OSR
-        // MEMO: outとnopは一緒にしても大丈夫？
-        // a.out(pio::OutDestination::PINS, 1);
-        // a.nop_with_delay_and_side_set(2, 0);
-        a.out_with_delay_and_side_set(pio::OutDestination::PINS, 1, 3, 0);
-
-        // rising part(4 instruction)
-        a.in_with_side_set(pio::InSource::PINS, 1, 1);
-        a.bind(&mut tdi_shift_init);
-        // push if (32 <= bit count)
-        a.push(true, true);
         // pull if (32 <= bit count)
         a.pull(true, true);
+        // falling part(4 clock)
+        a.out_with_delay_and_side_set(pio::OutDestination::PINS, 1, 2, 0);
+        // rising part(4 clock)
+        a.in_with_delay_and_side_set(pio::InSource::PINS, 1, 1, 1);
+        // push if (32 <= bit count)
+        a.push(true, true);
         // jmp
         a.jmp(pio::JmpCondition::XDecNonZero, &mut tdi_shift_start);
-
-        a.bind(&mut tdi_shift_end);
-    } // } while(0 < x--);
-
-    // send last 1 bit
-    // tms == 0 now
-    // if tms bit(Y) != 0
-    a.jmp(pio::JmpCondition::YIsZero, &mut last_one_bit);
-    {
-        // set tms high
-        a.set(pio::SetDestination::PINS, 1);
     }
 
-    a.bind(&mut last_one_bit);
-
-    // falling part(4 cycle)
-    // set 1 bit from OSR
-    a.out(pio::OutDestination::PINS, 1);
-    a.nop_with_delay_and_side_set(3, 0);
-    // rising part(4 cycle)
-    // input TDO
-    a.in_with_delay_and_side_set(pio::InSource::PINS, 1, 2, 1);
-    // send last bit
+    a.jmp(
+        pio::JmpCondition::OutputShiftRegisterNotEmpty,
+        &mut push_unaligned,
+    );
+    a.jmp(pio::JmpCondition::Always, &mut wrap_target);
+    a.bind(&mut push_unaligned);
+    // push unaligned part
     a.push(false, true);
 
     a.bind(&mut wrap_source);
@@ -369,7 +339,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
         core::mem::swap(&mut self.context, &mut new_context);
     }
 
-    fn install_jtag_program(&mut self) {
+    fn install_jtag_sequence_program(&mut self) {
         // Stop SM, Reconstruct SM with new program.
         let mut context = None;
         core::mem::swap(&mut self.context, &mut context);
@@ -377,7 +347,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
         let (sm0, installed) = context.running_sm.uninit(context.rx_fifo, context.tx_fifo);
         let mut pio = context.pio;
         pio.uninstall(installed);
-        let installed = pio.install(&jtag_program()).unwrap();
+        let installed = pio.install(&jtag_sequence_program()).unwrap();
         let divisor = self.divisor;
         let (sm, rx_fifo, tx_fifo) = hal::pio::PIOBuilder::from_program(installed)
             .set_pins(self.tms_pin_id, 1)
@@ -400,13 +370,12 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
         core::mem::swap(&mut self.context, &mut new_context);
     }
 
-    fn jtag_program_interface(&mut self, data: &mut BitSlice<u32>, tms: bool) {
+    fn jtag_sequence_program_interface(&mut self, data: &mut BitSlice<u32>, tms: bool) {
         if data.len() == 0 {
             panic!("data.len() must be greater than 0");
         }
         let con = self.get_context();
         // send length
-        // Pio has only post-decrementinstruction, so pre-decrement the length here
         while !con
             .tx_fifo
             .write((u32::try_from(data.len()).unwrap() - 1) << 1 | if tms { 1 } else { 0 })
@@ -474,7 +443,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
             };
         self.jtag_pin_set_program_interface(pin_out, pindirs);
 
-        self.install_jtag_program();
+        self.install_jtag_sequence_program();
     }
 
     fn disconnect_inner(&mut self) {
@@ -490,7 +459,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
 
     fn write_tms(&mut self, tms: bool) {
         let data = bits![mut u32, Lsb0; 0;1];
-        self.jtag_program_interface(data, tms);
+        self.jtag_sequence_program_interface(data, tms);
     }
 }
 
@@ -539,7 +508,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIo for JtagIoSet<Tck, Tms, Tdi, Tdo, Tr
         // https://docs.rs/bitvec/latest/src/bitvec/store.rs.html#194-195
         let mut data = bitarr!(u32, Lsb0; 0; 64);
         data.data.copy_from_slice(&[tdi_data_lo, tdi_data_hi]);
-        self.jtag_program_interface(&mut data.as_mut_bitslice()[..clock_count], tms_value);
+        self.jtag_sequence_program_interface(&mut data.as_mut_bitslice()[..clock_count], tms_value);
 
         data.load()
     }
@@ -634,7 +603,11 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIo for JtagIoSet<Tck, Tms, Tdi, Tdo, Tr
         }
 
         // write ir bits
-        self.jtag_program_interface(&mut ir_bits[0..total_ir_bit_length], true);
+        self.jtag_sequence_program_interface(&mut ir_bits[0..total_ir_bit_length - 1], false);
+        self.jtag_sequence_program_interface(
+            &mut ir_bits[total_ir_bit_length - 1..total_ir_bit_length],
+            true,
+        );
 
         // to Run from Exit-IR
         self.write_tms(true); // Update-IR
@@ -656,7 +629,8 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIo for JtagIoSet<Tck, Tms, Tdi, Tdo, Tr
         }
 
         // send bits
-        self.jtag_program_interface(&mut dr_bits[0..total_bits], true);
+        self.jtag_sequence_program_interface(&mut dr_bits[0..total_bits - 1], false);
+        self.jtag_sequence_program_interface(&mut dr_bits[total_bits - 1..total_bits], true);
 
         // take out target dr bits
         for (i, mut x) in dr.iter_mut().enumerate() {
@@ -827,7 +801,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> CmsisDapCommandInner
             });
 
         // restore JTAG program
-        self.install_jtag_program();
+        self.install_jtag_sequence_program();
 
         Ok(input.bits())
     }
