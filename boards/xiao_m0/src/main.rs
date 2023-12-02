@@ -17,7 +17,7 @@
 #![no_std]
 #![no_main]
 
-use embedded_hal::digital::v2::{OutputPin, ToggleableOutputPin};
+use embedded_hal::digital::v2::ToggleableOutputPin;
 use panic_halt as _;
 use rust_dap::bitbang::{DelayFunc, SwdIoSet};
 use rust_dap::{
@@ -96,15 +96,14 @@ fn main() -> ! {
         USB_ALLOCATOR.as_ref().unwrap()
     };
 
-    let mut n_reset_pin = pins.a0.into_push_pull_output();
     // RESET pin of Cortex Debug 10-pin connector is negative logic
     // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
-    n_reset_pin.set_high().ok();
+    let reset_pin = pins.a0.into_floating_input();
 
     let swdio = MySwdIoSet::new(
         XiaoSwdInputPin::new(pins.a8.into_floating_input()),
         XiaoSwdInputPin::new(pins.a9.into_floating_input()),
-        XiaoSwdOutputPin::new(n_reset_pin),
+        XiaoSwdInputPin::new(reset_pin),
         CycleDelay {},
     );
 

@@ -142,7 +142,7 @@ where
     pub fn new(
         swclk: SwClkInputPin,
         swdio: SwdIoInputPin,
-        reset: ResetOutputPin,
+        reset: ResetInputPin,
         cycle_delay: DelayFn,
     ) -> Self {
         Self {
@@ -150,8 +150,8 @@ where
             swdio_out: None,
             swclk_in: Some(swclk),
             swclk_out: None,
-            reset_in: None,
-            reset_out: Some(reset),
+            reset_in: Some(reset),
+            reset_out: None,
             cycle_delay,
         }
     }
@@ -366,10 +366,12 @@ impl<Io: BitBangSwdIo> PrimitiveSwdIo for Io {
     fn connect(&mut self) {
         self.to_swclk_out(false);
         self.to_swdio_out(false);
+        self.to_reset_out(true);
     }
     fn disconnect(&mut self) {
         self.to_swclk_in();
         self.to_swdio_in();
+        self.to_reset_in();
     }
     fn enable_output(&mut self) {
         self.to_swdio_out(false);
