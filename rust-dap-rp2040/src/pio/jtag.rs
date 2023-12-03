@@ -36,10 +36,10 @@ use super::{swj_pins_program, DEFAULT_CORE_CLOCK, DEFAULT_PIO_DIVISOR};
 // TCKを1周期実行するのに必要なサイクル数
 // number of cycles required to send 1 TCK clock
 #[cfg(feature = "set_clock")]
-const NUM_OF_CYCLE_PER_TCK_CLOCK: usize = 8;
+const NUM_OF_CYCLE_PER_TCK_CLOCK: u32 = 8;
 #[cfg(feature = "set_clock")]
 const DEFAULT_SWJ_CLOCK_HZ: u32 =
-    ((125000000 / NUM_OF_CYCLE_PER_TCK_CLOCK) as f32 / DEFAULT_PIO_DIVISOR) as u32;
+    ((DEFAULT_CORE_CLOCK / NUM_OF_CYCLE_PER_TCK_CLOCK) as f32 / DEFAULT_PIO_DIVISOR) as u32;
 
 const MAX_IR_LENGTH: usize = 128;
 
@@ -119,12 +119,12 @@ fn jtag_sequence_program() -> pio::Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
 
     {
         a.bind(&mut tdi_shift_start);
+        // falling part(4 clock)
         // pull if (32 <= bit count)
         a.pull(true, true);
-        // falling part(4 clock)
-        a.out_with_delay_and_side_set(pio::OutDestination::PINS, 1, 2, 0);
+        a.out_with_delay_and_side_set(pio::OutDestination::PINS, 1, 3, 0);
         // rising part(4 clock)
-        a.in_with_delay_and_side_set(pio::InSource::PINS, 1, 1, 1);
+        a.in_with_side_set(pio::InSource::PINS, 1, 1);
         // push if (32 <= bit count)
         a.push(true, true);
         // jmp
@@ -235,7 +235,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
     fn set_clock(&mut self, frequency_hz: u32) {
         // Calculate divisor.
         let divisor = if frequency_hz > 0 {
-            ((125000000u32 / NUM_OF_CYCLE_PER_TCK_CLOCK as u32) / frequency_hz) as f32
+            ((DEFAULT_CORE_CLOCK / NUM_OF_CYCLE_PER_TCK_CLOCK as u32) / frequency_hz) as f32
         } else {
             DEFAULT_PIO_DIVISOR
         };
