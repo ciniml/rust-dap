@@ -1,7 +1,4 @@
-// original author(this code is based on swd.rs):
-//      Copyright 2022 Ein Terakawa
-// jtag part author:
-//      Copyright 2023 Toshifumi Nishinaga
+// Copyright 2023 Toshifumi Nishinaga
 //
 // SPDX-License-Identifier: Apache-2.0
 //
