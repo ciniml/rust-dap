@@ -15,7 +15,7 @@
 // limitations under the License.
 
 use embedded_hal::digital::v2::{InputPin, IoPin, OutputPin, PinState};
-use hal::gpio::{Disabled, Floating, Input, Output, OutputOverride, Pin, PinId, PushPull};
+use hal::gpio::{Disabled, Floating, Input, Output, Pin, PinId, PushPull};
 use rp2040_hal as hal;
 
 /// InputPin implementation for SWD pin
@@ -56,18 +56,9 @@ where
     fn into_input_pin(self) -> Result<PicoSwdInputPin<I>, Self::Error> {
         Ok(self)
     }
-    fn into_output_pin(mut self, state: PinState) -> Result<PicoSwdOutputPin<I>, Self::Error> {
-        let output_override = if state == PinState::High {
-            OutputOverride::AlwaysHigh
-        } else {
-            OutputOverride::AlwaysLow
-        };
-        self.pin.set_output_override(output_override);
-        let mut output_pin = self.pin.into_push_pull_output();
-        output_pin.set_output_override(OutputOverride::DontInvert);
-        let mut new_pin = PicoSwdOutputPin::new(output_pin);
-        new_pin.set_state(state)?;
-        Ok(new_pin)
+    fn into_output_pin(self, state: PinState) -> Result<PicoSwdOutputPin<I>, Self::Error> {
+        let output_pin = self.pin.into_push_pull_output_in_state(state);
+        Ok(PicoSwdOutputPin::new(output_pin))
     }
 }
 
@@ -110,8 +101,8 @@ where
 {
     type Error = core::convert::Infallible;
     fn into_input_pin(self) -> Result<PicoSwdInputPin<I>, Self::Error> {
-        let new_pin = self.pin.into_floating_input();
-        Ok(PicoSwdInputPin::new(new_pin))
+        let input_pin = self.pin.into_floating_input();
+        Ok(PicoSwdInputPin::new(input_pin))
     }
     fn into_output_pin(mut self, state: PinState) -> Result<PicoSwdOutputPin<I>, Self::Error> {
         self.set_state(state)?;
@@ -137,9 +128,7 @@ where
         Ok(PicoSwdInputPin::new(input_pin))
     }
     fn into_output_pin(self, state: PinState) -> Result<PicoSwdOutputPin<I>, Self::Error> {
-        let output_pin = self.pin.into_push_pull_output();
-        let mut new_pin = PicoSwdOutputPin::new(output_pin);
-        new_pin.set_state(state)?;
-        Ok(new_pin)
+        let output_pin = self.pin.into_push_pull_output_in_state(state);
+        Ok(PicoSwdOutputPin::new(output_pin))
     }
 }

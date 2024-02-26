@@ -153,37 +153,28 @@ mod app {
 
         let (usb_serial, usb_dap, usb_bus) = {
             // Initialize MCU reset pin.
-            let mut n_reset_pin = pins.gpio26.into_push_pull_output();
             // RESET pin of Cortex Debug 10-pin connector is negative logic
             // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
-            n_reset_pin.set_high().ok();
+            let reset_pin = pins.gpio26.into_floating_input();
 
             let swdio;
             #[cfg(feature = "bitbang")]
             {
-                use rust_dap_rp2040::{
-                    swdio_pin::PicoSwdInputPin, swdio_pin::PicoSwdOutputPin, util::CycleDelay,
-                };
+                use rust_dap_rp2040::{swdio_pin::PicoSwdInputPin, util::CycleDelay};
                 let swclk_pin = PicoSwdInputPin::new(pins.gpio2.into_floating_input());
                 let swdio_pin = PicoSwdInputPin::new(pins.gpio4.into_floating_input());
-                let reset_pin = PicoSwdOutputPin::new(n_reset_pin);
+                let reset_pin = PicoSwdInputPin::new(reset_pin);
                 swdio = SwdIoSet::new(swclk_pin, swdio_pin, reset_pin, CycleDelay {});
             }
             #[cfg(not(feature = "bitbang"))]
             {
                 let mut swclk_pin = pins.gpio2.into_mode();
                 let mut swdio_pin = pins.gpio4.into_mode();
+                let mut reset_pin = reset_pin.into_mode();
                 swclk_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
                 swdio_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-                let mut n_reset_pin = n_reset_pin.into_mode();
-                n_reset_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-                swdio = SwdIoSet::new(
-                    c.device.PIO0,
-                    swclk_pin,
-                    swdio_pin,
-                    n_reset_pin,
-                    &mut resets,
-                );
+                reset_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+                swdio = SwdIoSet::new(c.device.PIO0, swclk_pin, swdio_pin, reset_pin, &mut resets);
             }
             initialize_usb(swdio, usb_allocator, "xiao-rp2040", DapCapabilities::SWD)
         };
