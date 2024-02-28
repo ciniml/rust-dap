@@ -20,3 +20,4 @@ heapless = "0.7"
 num_enum = { version = "0.5", default-features = false }
 bitflags = "1.2"
 embedded-hal = { version = "0.2", optional = true, features = ["unproven"] }
+bitvec = { version = "1.0.1", default-features = false }

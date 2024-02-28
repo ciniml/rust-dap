@@ -15,6 +15,8 @@
 // limitations under the License.
 
 use crate::cmsis_dap::*;
+use bitflags::bitflags;
+use bitvec::slice::BitSlice;
 use embedded_hal::digital::v2::{InputPin, IoPin, OutputPin, PinState};
 
 pub trait DelayFunc {
@@ -1317,53 +1319,7 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
         self.write_bit(config, false, false); // Run
     }
 
-    fn write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &[bool]) {
-        if dr.is_empty() {
-            // TODO: return Err
-            panic!("dr have to hold least 1 bit")
-        }
-        // to ShiftIR from Run-Test-Idle
-        self.write_bit(config, true, false); // SelectDR
-        self.write_bit(config, false, false); // CaptureDR
-        self.write_bit(config, false, false); // ShiftDR
-
-        let head_bits = config.ir_length[0..(config.device_count as usize)]
-            .iter()
-            .take(dap_index.into())
-            .map(|x| *x as usize)
-            .sum();
-        let tail_bits = config.ir_length[0..(config.device_count as usize)]
-            .iter()
-            .skip(dap_index as usize + 1)
-            .map(|x| *x as usize)
-            .sum();
-        let total_bits = config.ir_length[0..(config.device_count as usize)]
-            .iter()
-            .map(|x| *x as usize)
-            .sum();
-        let mut bit_count: usize = 0;
-        for _i in 0..tail_bits {
-            // dap_index以降のDR用
-            bit_count += 1;
-            self.write_bit(config, false, false);
-        }
-        for dr_bit in dr {
-            bit_count += 1;
-            let tms = bit_count == total_bits;
-            self.write_bit(config, tms, *dr_bit);
-        }
-        for _i in 0..head_bits {
-            bit_count += 1;
-            let tms = bit_count == total_bits;
-            self.write_bit(config, tms, false);
-        }
-
-        // to Run from Exit-DR
-        self.write_bit(config, true, false); // Update-DR
-        self.write_bit(config, false, false); // Run
-    }
-
-    fn read_write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &mut [bool]) {
+    fn read_write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &mut BitSlice<u32>) {
         // to ShiftIR from Run-Test-Idle
         self.write_bit(config, true, false); // SelectDR
         self.write_bit(config, false, false); // CaptureDR
@@ -1390,11 +1346,11 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
             bit_count += 1;
             self.write_bit(config, false, false);
         }
-        for dr_bit in dr {
+        for mut dr_bit in dr {
             bit_count += 1;
             let tms = bit_count == total_bits;
             let tdo = self.read_bit(config, tms, *dr_bit);
-            *dr_bit = tdo;
+            dr_bit.set(tdo);
         }
         for _i in 0..head_bits {
             bit_count += 1;
@@ -1433,7 +1389,7 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
         // DRを書き込む
         if read {
             let mut dr = build_acc(data, a3, a2, true);
-            self.read_write_dr(config, dap_index, &mut dr);
+            self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
             // TODO: OK_FALSE等の情報を返す必要がないか調べる
             let dr_data = &dr[3..35];
             let mut result: u32 = 0;
@@ -1442,33 +1398,11 @@ impl<Io: PrimitiveJtagIo> JtagIo for Io {
             }
             Ok(result)
         } else {
-            let dr = build_acc(data, a3, a2, false);
-            self.write_dr(config, dap_index, &dr);
+            let mut dr = build_acc(data, a3, a2, false);
+            self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
             Ok(0)
         }
     }
-}
-
-fn build_acc(data: u32, a3: bool, a2: bool, read: bool) -> [bool; 35] {
-    let mut data = data;
-    let mut dr = [false; 35];
-    dr[0] = read;
-    dr[1] = a2;
-    dr[2] = a3;
-    for i in 0..32 {
-        dr[3 + i] = (data & 1) != 0;
-        data >>= 1;
-    }
-    dr
-}
-
-#[allow(dead_code)]
-enum JtagInstruction {
-    ABORT = 0b1000,
-    DPACC = 0b1010,
-    APACC = 0b1011,
-    IDCODE = 0b1110,
-    BYPASS = 0b1111,
 }
 
 impl<

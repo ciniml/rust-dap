@@ -19,19 +19,16 @@ use pio::Program;
 use rust_dap::*;
 // use rust_dap::{SwdIo, SwdIoConfig, SwdRequest, DapError};
 // use rust_dap::{DAP_TRANSFER_OK, DAP_TRANSFER_WAIT, DAP_TRANSFER_FAULT, /* DAP_TRANSFER_ERROR, */ DAP_TRANSFER_MISMATCH};
+use crate::pio::*;
 use hal::gpio::{bank0, PinId};
 use hal::pac::{self, PIO0};
 use hal::pio::{InstalledProgram, PIOExt};
-use rp2040_hal as hal;
-pub mod pio0 {
-    use crate::pio::hal::{self, gpio::FunctionPio0};
-    pub type Pin<P> = hal::gpio::Pin<P, FunctionPio0>;
-}
 
-const DEFAULT_CORE_CLOCK: u32 = 125000000;
-const DEFAULT_PIO_DIVISOR: f32 = 1.0f32; // Default PIO Divisor. Generate 125/8 = 15.625[MHz] SWCLK clock.
 #[cfg(feature = "set_clock")]
-const DEFAULT_SWJ_CLOCK_HZ: u32 = ((125000000 / 8) as f32 / DEFAULT_PIO_DIVISOR) as u32;
+const CLK_CLOCK_CYCLE: usize = 8;
+#[cfg(feature = "set_clock")]
+const DEFAULT_SWJ_CLOCK_HZ: u32 =
+    ((125000000 / CLK_CLOCK_CYCLE) as f32 / DEFAULT_PIO_DIVISOR) as u32;
 
 struct SwdPioContext {
     pio: hal::pio::PIO<PIO0>,
@@ -170,67 +167,6 @@ fn swd_program() -> Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
     // The labels wrap_target and wrap_source, as set above,
     // define a loop which is executed repeatedly by the PIO
     // state machine.
-    a.assemble_with_wrap(wrap_source, wrap_target)
-}
-
-fn swj_pins_program() -> Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
-    type Assembler = pio::Assembler<{ pio::RP2040_MAX_PROGRAM_SIZE }>;
-    let mut a = Assembler::new();
-    let mut delay_loop = a.label();
-    let mut wrap_target = a.label();
-    let mut wrap_source = a.label();
-
-    a.bind(&mut wrap_target);
-
-    // command data
-    // [
-    //      pin_output_values: u32,
-    //      pin_directions: u32,
-    //      wait_us:    u32
-    // ]
-
-    // load and set output value
-    a.pull(false, true);
-    a.out(pio::OutDestination::PINS, 32);
-    // load and set direction
-    a.pull(false, true);
-    a.out(pio::OutDestination::PINDIRS, 32);
-
-    // load output delay to Y
-    a.pull(false, true);
-    a.out(pio::OutDestination::Y, 32);
-
-    // wait_us
-    a.bind(&mut delay_loop);
-    // delay 9(+1) cycles * 0.1us/cycle = 1us
-    a.jmp_with_delay(pio::JmpCondition::YDecNonZero, &mut delay_loop, 9);
-
-    // check all pin status
-    a.r#in(pio::InSource::PINS, 32);
-    a.push(false, true);
-
-    a.bind(&mut wrap_source);
-
-    a.assemble_with_wrap(wrap_source, wrap_target)
-}
-
-fn all_pins_to_input_program() -> Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
-    type Assembler = pio::Assembler<{ pio::RP2040_MAX_PROGRAM_SIZE }>;
-    let mut a = Assembler::new();
-    let mut wrap_target = a.label();
-    let mut wrap_source = a.label();
-
-    a.bind(&mut wrap_target);
-
-    a.mov(
-        pio::MovDestination::X,
-        pio::MovOperation::None,
-        pio::MovSource::NULL,
-    );
-    a.out(pio::OutDestination::PINDIRS, 32);
-
-    a.bind(&mut wrap_source);
-
     a.assemble_with_wrap(wrap_source, wrap_target)
 }
 
@@ -475,6 +411,7 @@ impl<C, D, E> SwdIoSet<C, D, E> {
 // Supplemental functions for SWD
 impl<C, D, E> SwdIoSet<C, D, E> {
     #[allow(clippy::wrong_self_convention)]
+    #[allow(dead_code)]
     fn to_swdio_in(&mut self) {
         self.read_bits(0);
     }

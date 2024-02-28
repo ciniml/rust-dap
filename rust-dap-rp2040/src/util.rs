@@ -57,9 +57,18 @@ pub type JtagIoSet<TCK, TMS, TDI, TDO, TRST, SRST> = BitbangJtagIoSet<
 >;
 
 #[cfg(not(feature = "bitbang"))]
-use crate::pio::{pio0, SwdIoSet as PioSwdIoSet};
+use crate::pio::{jtag::JtagIoSet as PioJtagIoSet, pio0, swd::SwdIoSet as PioSwdIoSet};
 #[cfg(not(feature = "bitbang"))]
 pub type SwdIoSet<C, D, E> = PioSwdIoSet<pio0::Pin<C>, pio0::Pin<D>, pio0::Pin<E>>;
+#[cfg(not(feature = "bitbang"))]
+pub type JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> = PioJtagIoSet<
+    pio0::Pin<Tck>,
+    pio0::Pin<Tms>,
+    pio0::Pin<Tdi>,
+    pio0::Pin<Tdo>,
+    pio0::Pin<Trst>,
+    pio0::Pin<Srst>,
+>;
 
 /// DelayFunc implementation which uses cortex_m::asm::delay
 #[cfg(feature = "bitbang")]
