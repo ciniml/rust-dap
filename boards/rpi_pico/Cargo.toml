@@ -1,6 +1,6 @@
 [package]
 name = "rust-dap-raspberrypi-pico"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Kenta IDA <fuga@fugafuga.org>"]
 edition = "2021"
 license = "Apache-2.0"
@@ -32,7 +32,7 @@ swj = []
 ram-exec = ["rust-dap-rp2040/ram-exec"] # Execute-in-SRAM support
 
 [dependencies.rp-pico]
-version = "0.7"
+version = "0.8"
 # Below is to take out "boot2" from the set of features.
 default-features = false
 features = ["rt", "critical-section-impl"]

@@ -1,6 +1,6 @@
 [package]
 name = "rust-dap-rp2040"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Kenta IDA <fuga@fugafuga.org>"]
 edition = "2021"
 license = "Apache-2.0"
@@ -17,7 +17,7 @@ defmt = ["dep:defmt"]
 [dependencies]
 rust-dap = { path = "../rust-dap" }
 rp2040-boot2 = "0.2"
-rp2040-hal = "0.8"
+rp2040-hal = "0.9"
 pio = "0.2"
 panic-halt = "0.2"
 cortex-m = "0.7"

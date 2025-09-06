@@ -16,15 +16,15 @@
 
 use cortex_m::asm;
 use hal::{
-    gpio::{bank0, PinId},
+    gpio::PinId,
     pac::{self, PIO0},
     pio::PIOExt,
 };
 use rp2040_hal as hal;
 use rust_dap::*;
 pub mod pio0 {
-    use crate::pio::hal::{self, gpio::FunctionPio0};
-    pub type Pin<P> = hal::gpio::Pin<P, FunctionPio0>;
+    use crate::pio::hal::{self, gpio::FunctionPio0, gpio::PullUp};
+    pub type Pin<P> = hal::gpio::Pin<P, FunctionPio0, PullUp>;
 }
 use bitvec::prelude::*;
 
@@ -153,34 +153,34 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst>
         pio0::Pin<Srst>,
     >
 where
-    Tck: PinId + bank0::BankPinId,
-    Tms: PinId + bank0::BankPinId,
-    Tdi: PinId + bank0::BankPinId,
-    Tdo: PinId + bank0::BankPinId,
-    Trst: PinId + bank0::BankPinId,
-    Srst: PinId + bank0::BankPinId,
+    Tck: PinId,
+    Tms: PinId,
+    Tdi: PinId,
+    Tdo: PinId,
+    Trst: PinId,
+    Srst: PinId,
 {
     pub fn new(
         pio0: pac::PIO0,
-        _tck: pio0::Pin<Tck>,
-        _tms: pio0::Pin<Tms>,
-        _tdi: pio0::Pin<Tdi>,
-        _tdo: pio0::Pin<Tdo>,
+        tck: pio0::Pin<Tck>,
+        tms: pio0::Pin<Tms>,
+        tdi: pio0::Pin<Tdi>,
+        tdo: pio0::Pin<Tdo>,
         trst: Option<pio0::Pin<Trst>>,
         srst: Option<pio0::Pin<Srst>>,
         resets: &mut pac::RESETS,
     ) -> Self {
-        let tck_pin_id = Tck::DYN.num;
-        let tms_pin_id = Tms::DYN.num;
-        let tdi_pin_id = Tdi::DYN.num;
-        let tdo_pin_id = Tdo::DYN.num;
-        let trst_pin_id = if trst.is_some() {
-            Some(Trst::DYN.num)
+        let tck_pin_id = tck.id().num;
+        let tms_pin_id = tms.id().num;
+        let tdi_pin_id = tdi.id().num;
+        let tdo_pin_id = tdo.id().num;
+        let trst_pin_id = if let Some(trst) = trst {
+            Some(trst.id().num)
         } else {
             None
         };
-        let srst_pin_id: Option<u8> = if srst.is_some() {
-            Some(Srst::DYN.num)
+        let srst_pin_id: Option<u8> = if let Some(srst) = srst {
+            Some(srst.id().num)
         } else {
             None
         };
