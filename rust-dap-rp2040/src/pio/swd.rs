@@ -243,7 +243,7 @@ impl<C, D, E> SwdIoSet<C, D, E> {
         hal::pio::Rx<(P, hal::pio::SM0)>,
         hal::pio::Tx<(P, hal::pio::SM0)>,
     ) {
-        hal::pio::PIOBuilder::from_program(installed)
+        hal::pio::PIOBuilder::from_installed_program(installed)
             .set_pins(set_pin_id, set_pin_count)
             .side_set_pin_base(side_set_pin_id)
             .out_pins(out_pins_id, out_pins_count)

@@ -15,15 +15,32 @@
 // limitations under the License.
 
 use crate::cmsis_dap::*;
-use bitflags::bitflags;
 use bitvec::slice::BitSlice;
-use embedded_hal::digital::v2::{InputPin, IoPin, OutputPin, PinState};
+use embedded_hal::digital::{ErrorType, InputPin, OutputPin, PinState};
 
 pub trait DelayFunc {
     fn calculate_half_clock_cycles(_frequency_hz: u32) -> Option<u32> {
         None
     }
     fn cycle_delay(&self, cycles: u32);
+}
+
+// A copy of digital::v2::IoPin taken from embedded-hal = "0.2" .
+pub trait IoPin<TInput, TOutput>: ErrorType
+where
+    TInput: InputPin + IoPin<TInput, TOutput>,
+    TOutput: OutputPin + IoPin<TInput, TOutput>,
+{
+    /// Tries to convert this pin to input mode.
+    ///
+    /// If the pin is already in input mode, this method should succeed.
+    fn into_input_pin(self) -> Result<TInput, Self::Error>;
+
+    /// Tries to convert this pin to output mode with the given initial state.
+    ///
+    /// If the pin is already in the requested state, this method should
+    /// succeed.
+    fn into_output_pin(self, state: PinState) -> Result<TOutput, Self::Error>;
 }
 
 fn turn_to_in<I: InputPin + IoPin<I, O>, O: OutputPin + IoPin<I, O>>(

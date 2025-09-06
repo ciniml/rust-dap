@@ -36,6 +36,7 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 pub mod line_coding;
 #[cfg(not(feature = "bitbang"))]
 pub mod pio;
+#[cfg(feature = "bitbang")]
 pub mod swdio_pin;
 pub mod util;
 

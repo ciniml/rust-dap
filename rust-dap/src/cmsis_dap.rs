@@ -1272,7 +1272,7 @@ where
     fn get_bos_descriptors(&self, writer: &mut BosWriter) -> Result<()> {
         self.inner.get_bos_descriptors(writer)
     }
-    fn get_string(&self, index: StringIndex, lang_id: u16) -> Option<&str> {
+    fn get_string(&self, index: StringIndex, lang_id: LangID) -> Option<&str> {
         self.inner.get_string(index, lang_id)
     }
     fn reset(&mut self) {
@@ -1577,18 +1577,22 @@ mod test {
         }
         dummy_usb_interface.read_buffer_size = 10;
         // no SWDIO Data
+        let usb_strings = StringDescriptors::default()
+            .manufacturer("fugafuga.org")
+            .product("CMSIS-DAP")
+            .serial_number("serialnumber");
         let usb = UsbBusAllocator::new(dummy_usb_interface);
         let mut dap: CmsisDap<DummyUsbInterface, DummyIo, 64> =
             CmsisDap::new(&usb, io, DapCapabilities::SWD);
         UsbDeviceBuilder::new(&usb, UsbVidPid(0x6666, 0x4444))
-            .manufacturer("fugafuga.org")
-            .product("CMSIS-DAP")
-            .serial_number("serialnumber")
+            .strings(&[usb_strings])
+            .unwrap()
             .device_class(USB_CLASS_MISCELLANEOUS)
             .device_class(USB_SUBCLASS_COMMON)
             .device_protocol(USB_PROTOCOL_IAD)
             .composite_with_iads()
             .max_packet_size_0(64)
+            .unwrap()
             .build();
         assert!(dap.process().is_ok());
 
@@ -1611,14 +1615,14 @@ mod test {
         let mut dap: CmsisDap<DummyUsbInterface, DummyIo, 64> =
             CmsisDap::new(&usb, io, DapCapabilities::SWD);
         UsbDeviceBuilder::new(&usb, UsbVidPid(0x6666, 0x4444))
-            .manufacturer("fugafuga.org")
-            .product("CMSIS-DAP")
-            .serial_number("serialnumber")
+            .strings(&[usb_strings])
+            .unwrap()
             .device_class(USB_CLASS_MISCELLANEOUS)
             .device_class(USB_SUBCLASS_COMMON)
             .device_protocol(USB_PROTOCOL_IAD)
             .composite_with_iads()
             .max_packet_size_0(64)
+            .unwrap()
             .build();
         assert!(dap.process().is_ok());
     }

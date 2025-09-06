@@ -36,8 +36,8 @@ mod app {
     use usb_device::prelude::*;
     use usbd_serial::SerialPort;
 
-    use embedded_hal::digital::v2::{OutputPin, ToggleableOutputPin};
-    use embedded_hal::serial::{Read, Write};
+    use embedded_hal::digital::{OutputPin, StatefulOutputPin};
+    use embedded_hal_nb::serial::{Read, Write};
 
     use rust_dap_rp2040::line_coding::*;
     use rust_dap_rp2040::util::{

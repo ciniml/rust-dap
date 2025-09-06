@@ -14,10 +14,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use embedded_hal::digital::v2::{InputPin, IoPin, OutputPin, PinState};
+use embedded_hal::digital::{ErrorType, InputPin, OutputPin, PinState};
 use hal::gpio::{FunctionNull, FunctionSioInput, FunctionSioOutput};
 use hal::gpio::{Pin, PinId, PullNone, ValidFunction};
 use rp2040_hal as hal;
+use rust_dap::bitbang::IoPin;
 
 /// InputPin implementation for SWD pin
 pub struct PicoSwdInputPin<I>
@@ -25,6 +26,13 @@ where
     I: PinId,
 {
     pin: Pin<I, FunctionSioInput, PullNone>,
+}
+
+impl<I> ErrorType for PicoSwdInputPin<I>
+where
+    I: PinId + ValidFunction<FunctionSioInput>,
+{
+    type Error = core::convert::Infallible;
 }
 
 impl<I> PicoSwdInputPin<I>
@@ -40,11 +48,10 @@ impl<I> InputPin for PicoSwdInputPin<I>
 where
     I: PinId + ValidFunction<FunctionSioInput>,
 {
-    type Error = core::convert::Infallible;
-    fn is_high(&self) -> Result<bool, Self::Error> {
+    fn is_high(&mut self) -> Result<bool, Self::Error> {
         self.pin.is_high()
     }
-    fn is_low(&self) -> Result<bool, Self::Error> {
+    fn is_low(&mut self) -> Result<bool, Self::Error> {
         self.pin.is_low()
     }
 }
@@ -53,7 +60,6 @@ impl<I> IoPin<PicoSwdInputPin<I>, PicoSwdOutputPin<I>> for PicoSwdInputPin<I>
 where
     I: PinId + ValidFunction<FunctionSioInput> + ValidFunction<FunctionSioOutput>,
 {
-    type Error = core::convert::Infallible;
     fn into_input_pin(self) -> Result<PicoSwdInputPin<I>, Self::Error> {
         Ok(self)
     }
@@ -71,6 +77,13 @@ where
     pin: Pin<I, FunctionSioOutput, PullNone>,
 }
 
+impl<I> ErrorType for PicoSwdOutputPin<I>
+where
+    I: PinId + ValidFunction<FunctionSioOutput>,
+{
+    type Error = core::convert::Infallible;
+}
+
 impl<I> PicoSwdOutputPin<I>
 where
     I: PinId + ValidFunction<FunctionSioOutput>,
@@ -84,7 +97,6 @@ impl<I> OutputPin for PicoSwdOutputPin<I>
 where
     I: PinId + ValidFunction<FunctionSioOutput>,
 {
-    type Error = core::convert::Infallible;
     fn set_high(&mut self) -> Result<(), Self::Error> {
         self.pin.set_high()
     }
@@ -100,7 +112,6 @@ impl<I> IoPin<PicoSwdInputPin<I>, PicoSwdOutputPin<I>> for PicoSwdOutputPin<I>
 where
     I: PinId + ValidFunction<FunctionSioInput> + ValidFunction<FunctionSioOutput>,
 {
-    type Error = core::convert::Infallible;
     fn into_input_pin(self) -> Result<PicoSwdInputPin<I>, Self::Error> {
         let input_pin = self.pin.into_floating_input();
         Ok(PicoSwdInputPin::new(input_pin))
@@ -119,11 +130,17 @@ where
     pin: Pin<I, FunctionNull, PullNone>,
 }
 
-impl<I> IoPin<PicoSwdInputPin<I>, PicoSwdOutputPin<I>> for PicoSwdPin<I>
+impl<I> ErrorType for PicoSwdPin<I>
 where
     I: PinId + ValidFunction<FunctionSioInput> + ValidFunction<FunctionSioOutput>,
 {
     type Error = core::convert::Infallible;
+}
+
+impl<I> IoPin<PicoSwdInputPin<I>, PicoSwdOutputPin<I>> for PicoSwdPin<I>
+where
+    I: PinId + ValidFunction<FunctionSioInput> + ValidFunction<FunctionSioOutput>,
+{
     fn into_input_pin(self) -> Result<PicoSwdInputPin<I>, Self::Error> {
         let input_pin = self.pin.into_floating_input();
         Ok(PicoSwdInputPin::new(input_pin))
