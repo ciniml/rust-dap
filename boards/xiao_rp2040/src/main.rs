@@ -22,7 +22,7 @@ mod app {
     use panic_halt as _;
 
     use hal::clocks::Clock;
-    use hal::gpio::{Output, Pin, PushPull};
+    use hal::gpio::{FunctionSioOutput, FunctionUart, Pin, PullDown};
     use hal::pac;
     use rp_pico::hal;
 
@@ -33,8 +33,8 @@ mod app {
     use usb_device::prelude::*;
     use usbd_serial::SerialPort;
 
-    use embedded_hal::digital::v2::{OutputPin, ToggleableOutputPin};
-    use embedded_hal::serial::{Read, Write};
+    use embedded_hal::digital::{OutputPin, StatefulOutputPin};
+    use embedded_hal_nb::serial::{Read, Write};
 
     use rust_dap_rp2040::line_coding::*;
     use rust_dap_rp2040::util::{
@@ -62,8 +62,8 @@ mod app {
     const UART_TX_QUEUE_SIZE: usize = 128;
     // UART Shared context
     type UartPins = (
-        hal::gpio::Pin<GpioUartTx, hal::gpio::Function<hal::gpio::Uart>>,
-        hal::gpio::Pin<GpioUartRx, hal::gpio::Function<hal::gpio::Uart>>,
+        Pin<GpioUartTx, FunctionUart, PullDown>,
+        Pin<GpioUartRx, FunctionUart, PullDown>,
     );
     type Uart = hal::uart::UartPeripheral<hal::uart::Enabled, pac::UART0, UartPins>;
     pub struct UartReader(hal::uart::Reader<pac::UART0, UartPins>);
@@ -89,11 +89,11 @@ mod app {
         uart_rx_producer: heapless::spsc::Producer<'static, u8, UART_RX_QUEUE_SIZE>,
         usb_bus: UsbDevice<'static, UsbBus>,
         usb_dap: CmsisDap<'static, UsbBus, SwdIoSet, 64>,
-        usb_led: Pin<GpioUsbLed, Output<PushPull>>,
-        idle_led: Pin<GpioIdleLed, Output<PushPull>>,
-        debug_out: Pin<GpioDebugOut, Output<PushPull>>,
-        debug_irq_out: Pin<GpioDebugIrqOut, Output<PushPull>>,
-        debug_usb_irq_out: Pin<GpioDebugUsbIrqOut, Output<PushPull>>,
+        usb_led: Pin<GpioUsbLed, FunctionSioOutput, PullDown>,
+        idle_led: Pin<GpioIdleLed, FunctionSioOutput, PullDown>,
+        debug_out: Pin<GpioDebugOut, FunctionSioOutput, PullDown>,
+        debug_irq_out: Pin<GpioDebugIrqOut, FunctionSioOutput, PullDown>,
+        debug_usb_irq_out: Pin<GpioDebugUsbIrqOut, FunctionSioOutput, PullDown>,
     }
 
     #[init(local = [
@@ -125,8 +125,8 @@ mod app {
         .unwrap();
 
         let uart_pins = (
-            pins.gpio0.into_mode::<hal::gpio::FunctionUart>(), // TxD
-            pins.gpio1.into_mode::<hal::gpio::FunctionUart>(), // RxD
+            pins.gpio0.reconfigure(), // TxD
+            pins.gpio1.reconfigure(), // RxD
         );
         let uart_config = UartConfigAndClock {
             config: UartConfig::from(hal::uart::UartConfig::default()),
@@ -168,9 +168,9 @@ mod app {
             }
             #[cfg(not(feature = "bitbang"))]
             {
-                let mut swclk_pin = pins.gpio2.into_mode();
-                let mut swdio_pin = pins.gpio4.into_mode();
-                let mut reset_pin = reset_pin.into_mode();
+                let mut swclk_pin = pins.gpio2.reconfigure();
+                let mut swdio_pin = pins.gpio4.reconfigure();
+                let mut reset_pin = reset_pin.reconfigure();
                 swclk_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
                 swdio_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
                 reset_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);

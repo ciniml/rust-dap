@@ -21,7 +21,7 @@ use rp2040_hal as hal;
 use rust_dap::{
     CmsisDap, DapCapabilities, USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON,
 };
-use usb_device::device::{UsbDevice, UsbDeviceBuilder, UsbVidPid};
+use usb_device::device::{StringDescriptors, UsbDevice, UsbDeviceBuilder, UsbVidPid};
 use usb_device::{class_prelude::UsbBusAllocator, UsbError};
 use usbd_serial::SerialPort;
 
@@ -147,14 +147,17 @@ where
     let usb_serial = SerialPort::new(usb_allocator);
     let usb_dap = CmsisDap::new(usb_allocator, io, capabilities);
     let usb_bus = UsbDeviceBuilder::new(usb_allocator, UsbVidPid(0x6666, 0x4444))
-        .manufacturer("fugafuga.org")
-        .product("CMSIS-DAP")
-        .serial_number(serial)
+        .strings(&[StringDescriptors::default()
+            .manufacturer("fugafuga.org")
+            .product("CMSIS-DAP")
+            .serial_number(serial)])
+        .unwrap()
         .device_class(USB_CLASS_MISCELLANEOUS)
         .device_class(USB_SUBCLASS_COMMON)
         .device_protocol(USB_PROTOCOL_IAD)
         .composite_with_iads()
         .max_packet_size_0(64)
+        .unwrap()
         .build();
     (usb_serial, usb_dap, usb_bus)
 }

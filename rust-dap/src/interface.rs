@@ -250,7 +250,7 @@ impl<B: UsbBus> UsbClass<B> for CmsisDapInterface<'_, B> {
         Ok(())
     }
 
-    fn get_string(&self, index: StringIndex, lang_id: u16) -> Option<&str> {
+    fn get_string(&self, index: StringIndex, lang_id: LangID) -> Option<&str> {
         let _ = lang_id;
         if index == self.serial_string {
             Some("CMSIS-DAP interface")

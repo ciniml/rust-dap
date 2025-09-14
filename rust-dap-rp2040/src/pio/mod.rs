@@ -18,8 +18,8 @@
 use pio::Program;
 use rp2040_hal as hal;
 pub mod pio0 {
-    use crate::pio::hal::{self, gpio::FunctionPio0};
-    pub type Pin<P> = hal::gpio::Pin<P, FunctionPio0>;
+    use crate::pio::hal::{self, gpio::FunctionPio0, gpio::PullUp};
+    pub type Pin<P> = hal::gpio::Pin<P, FunctionPio0, PullUp>;
 }
 
 pub mod jtag;

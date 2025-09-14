@@ -100,7 +100,7 @@ impl From<UartParityType> for usbd_serial::ParityType {
     fn from(value: UartParityType) -> Self {
         match value {
             UartParityType::None => Self::None,
-            UartParityType::Even => Self::Event,
+            UartParityType::Even => Self::Even,
             UartParityType::Odd => Self::Odd,
         }
     }
@@ -110,7 +110,7 @@ impl TryFrom<usbd_serial::ParityType> for UartParityType {
     fn try_from(value: usbd_serial::ParityType) -> Result<Self, Self::Error> {
         match value {
             usbd_serial::ParityType::None => Ok(Self::None),
-            usbd_serial::ParityType::Event => Ok(Self::Even),
+            usbd_serial::ParityType::Even => Ok(Self::Even),
             usbd_serial::ParityType::Odd => Ok(Self::Odd),
             _ => Err(Self::Error::Incompatible),
         }
