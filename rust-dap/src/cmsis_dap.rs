@@ -31,6 +31,8 @@ use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use usb_device::class_prelude::*;
 use usb_device::Result;
 
+pub const FW_VER: Option<&str> = option_env!("GIT_FW_VER");
+
 #[derive(IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 enum DapCommandId {
@@ -62,11 +64,16 @@ enum DapInfoId {
     Product = 2,
     SerialNumber = 3,
     CmsisDapVer = 4,
-    DeviceVendor = 5,
-    DeviceName = 6,
+    // DeviceVendor = 5,
+    // DeviceName = 6,
+    // BoardVendor = 7,
+    // BoardName = 8,
+    FirmwareVersion = 9,
     Capabilities = 0xf0,
-    TimeStampClock = 0xf1,
-    SwoBufferSize = 0xf2,
+    // TimeStampClock = 0xf1,
+    // UartRxBufferSize = 0xfb,
+    // UartTxBufferSize = 0xfc,
+    // SwoBufferSize = 0xfd,
     PacketCount = 0xfe,
     PacketSize = 0xff,
 }
@@ -228,9 +235,12 @@ pub const DAP_ERROR: u8 = 0xff;
 pub const SWD_SEQUENCE_CLOCK: u8 = 0x3f;
 pub const SWD_SEQUENCE_DIN: u8 = 0x80;
 
-fn write_buffer(buffer: &mut [u8], data: &[u8]) -> core::result::Result<usize, CursorError> {
+fn write_string(buffer: &mut [u8], data: &str) -> core::result::Result<usize, CursorError> {
     let mut writer = BufferCursor::new(buffer);
-    writer.write(data).map(|_| data.len())
+    let data = data.as_bytes();
+    writer.write(data)?;
+    writer.write(&[0])?;
+    Ok(writer.get_position())
 }
 
 #[derive(Debug, PartialEq)]
@@ -615,14 +625,21 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
         if request.is_empty() {
             return Err(DapError::InvalidCommand);
         }
-        let id = DapInfoId::try_from_primitive(request[0])?;
-        let length: usize = {
+        let id = DapInfoId::try_from_primitive(request[0]);
+        let length: usize = if let Ok(id) = id {
             let buffer = &mut response[1..];
             match id {
-                DapInfoId::Vendor => write_buffer(buffer, "Hoge".as_bytes())?,
-                DapInfoId::Product => write_buffer(buffer, "Fuga".as_bytes())?,
-                DapInfoId::SerialNumber => write_buffer(buffer, "Piyo".as_bytes())?,
-                DapInfoId::CmsisDapVer => write_buffer(buffer, "2.00".as_bytes())?,
+                DapInfoId::Vendor => write_string(buffer, "Hoge")?,
+                DapInfoId::Product => write_string(buffer, "Fuga")?,
+                DapInfoId::SerialNumber => write_string(buffer, "Piyo")?,
+                DapInfoId::CmsisDapVer => write_string(buffer, "2.1.0")?,
+                DapInfoId::FirmwareVersion => {
+                    if let Some(fw_ver) = FW_VER {
+                        write_string(buffer, fw_ver)?
+                    } else {
+                        0
+                    }
+                }
                 DapInfoId::Capabilities => {
                     let bits = capabilities.bits().to_le_bytes();
                     buffer[0] = bits[0];
@@ -644,8 +661,9 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
                     buffer[1] = 0;
                     2
                 }
-                _ => 0,
             }
+        } else {
+            0
         };
         response[0] = (length) as u8;
         Ok((1, length + 1))
