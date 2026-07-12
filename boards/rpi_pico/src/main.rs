@@ -17,7 +17,7 @@
 #![no_std]
 #![no_main]
 
-#[rtic::app(device = rp_pico::hal::pac, peripherals = true)]
+#[rtic::app(device = rp_pico::hal::pac, peripherals = true, dispatchers = [PIO1_IRQ_0])]
 mod app {
     #[cfg(not(feature = "defmt"))]
     use panic_halt as _;
@@ -101,8 +101,9 @@ mod app {
     type Uart = hal::uart::UartPeripheral<hal::uart::Enabled, pac::UART0, UartPins>;
     pub struct UartReader(hal::uart::Reader<pac::UART0, UartPins>);
     pub struct UartWriter(hal::uart::Writer<pac::UART0, UartPins>);
-    unsafe impl Sync for UartReader {}
-    unsafe impl Sync for UartWriter {}
+    // SAFETY: Reader/Writer own their halves of the UART peripheral exclusively
+    // and are only ever accessed through RTIC resource locks, so moving them
+    // between task contexts is sound.
     unsafe impl Send for UartReader {}
     unsafe impl Send for UartWriter {}
 
@@ -111,6 +112,7 @@ mod app {
         uart_reader: Option<UartReader>,
         uart_writer: Option<UartWriter>,
         usb_serial: SerialPort<'static, UsbBus>,
+        usb_dap: CmsisDap<'static, UsbBus, IoSet, 64>,
         uart_rx_consumer: heapless::spsc::Consumer<'static, u8, UART_RX_QUEUE_SIZE>,
         uart_tx_producer: heapless::spsc::Producer<'static, u8, UART_TX_QUEUE_SIZE>,
         uart_tx_consumer: heapless::spsc::Consumer<'static, u8, UART_TX_QUEUE_SIZE>,
@@ -121,7 +123,6 @@ mod app {
         uart_config: UartConfigAndClock,
         uart_rx_producer: heapless::spsc::Producer<'static, u8, UART_RX_QUEUE_SIZE>,
         usb_bus: UsbDevice<'static, UsbBus>,
-        usb_dap: CmsisDap<'static, UsbBus, IoSet, 64>,
         usb_led: Pin<GpioUsbLed, Output<PushPull>>,
         idle_led: Pin<GpioIdleLed, Output<PushPull>>,
         debug_out: Pin<GpioDebugOut, Output<PushPull>>,
@@ -293,6 +294,7 @@ mod app {
                 uart_reader,
                 uart_writer,
                 usb_serial,
+                usb_dap,
                 uart_rx_consumer,
                 uart_tx_producer,
                 uart_tx_consumer,
@@ -301,7 +303,6 @@ mod app {
                 uart_config,
                 uart_rx_producer,
                 usb_bus,
-                usb_dap,
                 usb_led,
                 idle_led,
                 debug_out,
@@ -312,47 +313,80 @@ mod app {
         )
     }
 
-    #[idle(shared = [uart_writer, usb_serial, uart_rx_consumer, uart_tx_producer, uart_tx_consumer], local = [idle_led])]
+    /// Moves data received from the USB serial into the UART TX queue.
+    fn drain_usb_to_uart_tx(
+        usb_serial: &mut SerialPort<'static, UsbBus>,
+        uart_tx_producer: &mut heapless::spsc::Producer<'static, u8, UART_TX_QUEUE_SIZE>,
+    ) {
+        while uart_tx_producer.ready() {
+            if let Ok(data) = read_usb_serial_byte_cs(usb_serial) {
+                uart_tx_producer.enqueue(data).unwrap();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Writes queued TX data to the UART.
+    fn drain_uart_tx_queue(
+        uart_writer: &mut Option<UartWriter>,
+        uart_tx_consumer: &mut heapless::spsc::Consumer<'static, u8, UART_TX_QUEUE_SIZE>,
+    ) {
+        let uart = uart_writer.as_mut().unwrap();
+        while let Some(data) = uart_tx_consumer.peek() {
+            if uart.0.write(*data).is_ok() {
+                uart_tx_consumer.dequeue().unwrap();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Moves queued UART RX data to the USB serial.
+    /// Returns true if at least one byte was dequeued, i.e. the RX queue has
+    /// room again and a stopped UART RX interrupt may be re-enabled.
+    fn drain_uart_rx_queue(
+        usb_serial: &mut SerialPort<'static, UsbBus>,
+        uart_rx_consumer: &mut heapless::spsc::Consumer<'static, u8, UART_RX_QUEUE_SIZE>,
+    ) -> bool {
+        let mut dequeued = false;
+        while let Some(data) = uart_rx_consumer.peek() {
+            match write_usb_serial_byte_cs(usb_serial, *data) {
+                Ok(_) => {
+                    uart_rx_consumer.dequeue().unwrap();
+                    dequeued = true;
+                }
+                _ => break,
+            }
+        }
+        usb_serial.flush().ok();
+        dequeued
+    }
+
+    #[idle(shared = [uart_reader, uart_writer, usb_serial, uart_rx_consumer, uart_tx_producer, uart_tx_consumer], local = [idle_led])]
     fn idle(mut c: idle::Context) -> ! {
         loop {
-            (&mut c.shared.usb_serial, &mut c.shared.uart_tx_producer).lock(
-                |usb_serial, uart_tx_producer| {
-                    while uart_tx_producer.ready() {
-                        if let Ok(data) = read_usb_serial_byte_cs(usb_serial) {
-                            uart_tx_producer.enqueue(data).unwrap();
-                        } else {
-                            break;
-                        }
-                    }
-                },
-            );
-            (&mut c.shared.uart_writer, &mut c.shared.uart_tx_consumer).lock(
-                |uart, uart_tx_consumer| {
-                    let uart = uart.as_mut().unwrap();
-                    while let Some(data) = uart_tx_consumer.peek() {
-                        if uart.0.write(*data).is_ok() {
-                            uart_tx_consumer.dequeue().unwrap();
-                        } else {
-                            break;
-                        }
-                    }
-                },
-            );
+            (&mut c.shared.usb_serial, &mut c.shared.uart_tx_producer)
+                .lock(|usb_serial, uart_tx_producer| {
+                    drain_usb_to_uart_tx(usb_serial, uart_tx_producer)
+                });
+            (&mut c.shared.uart_writer, &mut c.shared.uart_tx_consumer)
+                .lock(|uart_writer, uart_tx_consumer| {
+                    drain_uart_tx_queue(uart_writer, uart_tx_consumer)
+                });
 
             // Process RX data.
-            (&mut c.shared.usb_serial, &mut c.shared.uart_rx_consumer).lock(
-                |usb_serial, uart_rx_consumer| {
-                    while let Some(data) = uart_rx_consumer.peek() {
-                        match write_usb_serial_byte_cs(usb_serial, *data) {
-                            Ok(_) => {
-                                let _ = uart_rx_consumer.dequeue().unwrap();
-                            }
-                            _ => break,
-                        }
-                    }
-                    usb_serial.flush().ok();
-                },
-            );
+            let rx_dequeued = (&mut c.shared.usb_serial, &mut c.shared.uart_rx_consumer)
+                .lock(|usb_serial, uart_rx_consumer| {
+                    drain_uart_rx_queue(usb_serial, uart_rx_consumer)
+                });
+            if rx_dequeued {
+                // The RX queue has room again, so restart the UART RX interrupt
+                // in case uart_irq stopped it while the queue was full.
+                c.shared
+                    .uart_reader
+                    .lock(|uart| uart.as_mut().unwrap().0.enable_rx_interrupt());
+            }
 
             c.local.idle_led.toggle().ok();
         }
@@ -360,13 +394,22 @@ mod app {
 
     #[task(
         binds = UART0_IRQ,
-        priority = 1,
+        priority = 3,   // Higher priority than USBCTRL_IRQ and dap_process so that UART RX data is not lost during long DAP transfers.
         shared = [uart_reader],
         local = [uart_rx_producer, debug_out, debug_irq_out],
     )]
     fn uart_irq(mut c: uart_irq::Context) {
         c.local.debug_irq_out.set_high().ok();
-        while c.local.uart_rx_producer.ready() {
+        loop {
+            if !c.local.uart_rx_producer.ready() {
+                // The RX queue is full. Stop the RX interrupt until the queue is
+                // drained (idle/usbctrl_irq re-enable it); otherwise this handler
+                // retriggers immediately and starves all lower priority tasks.
+                c.shared
+                    .uart_reader
+                    .lock(|uart| uart.as_mut().unwrap().0.disable_rx_interrupt());
+                break;
+            }
             if let Ok(data) = c
                 .shared
                 .uart_reader
@@ -381,65 +424,50 @@ mod app {
         c.local.debug_irq_out.set_low().ok();
     }
 
+    /// Processes CMSIS-DAP commands outside of the USB interrupt so that long
+    /// SWD/JTAG transfers (transfer retries, DAP_SWJ_Pins waits, etc.) cannot
+    /// block the UART interrupt.
+    #[task(priority = 1, capacity = 2, shared = [usb_dap])]
+    fn dap_process(mut c: dap_process::Context) {
+        c.shared.usb_dap.lock(|usb_dap| {
+            usb_dap.process().ok();
+        });
+    }
+
     #[task(
         binds = USBCTRL_IRQ,
-        priority = 2,   // USBCTRL_IRQ priority must be greater than or equal to UART0_IRQ not to hang up the UART when UART FIFO is full.
-        shared = [uart_reader, uart_writer, usb_serial, uart_rx_consumer, uart_tx_producer, uart_tx_consumer],
-        local = [usb_bus, usb_dap, uart_config, usb_led, debug_usb_irq_out],
+        priority = 2,
+        shared = [uart_reader, uart_writer, usb_serial, usb_dap, uart_rx_consumer, uart_tx_producer, uart_tx_consumer],
+        local = [usb_bus, uart_config, usb_led, debug_usb_irq_out],
     )]
     fn usbctrl_irq(mut c: usbctrl_irq::Context) {
         c.local.debug_usb_irq_out.set_high().ok();
 
-        let poll_result = c
-            .shared
-            .usb_serial
-            .lock(|usb_serial| c.local.usb_bus.poll(&mut [usb_serial, c.local.usb_dap]));
+        let poll_result = (&mut c.shared.usb_serial, &mut c.shared.usb_dap)
+            .lock(|usb_serial, usb_dap| c.local.usb_bus.poll(&mut [usb_serial, usb_dap]));
         if !poll_result {
             c.local.debug_usb_irq_out.set_low().ok();
             return; // Nothing to do at this time...
         }
-        // Process DAP commands.
-        c.local.usb_dap.process().ok();
+        // Defer DAP command processing to the low priority dap_process task.
+        dap_process::spawn().ok();
 
         // Process TX data.
-        (&mut c.shared.usb_serial, &mut c.shared.uart_tx_producer).lock(
-            |usb_serial, uart_tx_producer| {
-                while uart_tx_producer.ready() {
-                    if let Ok(data) = read_usb_serial_byte_cs(usb_serial) {
-                        uart_tx_producer.enqueue(data).unwrap();
-                    } else {
-                        break;
-                    }
-                }
-            },
-        );
-        (&mut c.shared.uart_writer, &mut c.shared.uart_tx_consumer).lock(
-            |uart, uart_tx_consumer| {
-                let uart = uart.as_mut().unwrap();
-                while let Some(data) = uart_tx_consumer.peek() {
-                    if uart.0.write(*data).is_ok() {
-                        uart_tx_consumer.dequeue().unwrap();
-                    } else {
-                        break;
-                    }
-                }
-            },
-        );
+        (&mut c.shared.usb_serial, &mut c.shared.uart_tx_producer)
+            .lock(|usb_serial, uart_tx_producer| drain_usb_to_uart_tx(usb_serial, uart_tx_producer));
+        (&mut c.shared.uart_writer, &mut c.shared.uart_tx_consumer)
+            .lock(|uart_writer, uart_tx_consumer| drain_uart_tx_queue(uart_writer, uart_tx_consumer));
 
         // Process RX data.
-        (&mut c.shared.usb_serial, &mut c.shared.uart_rx_consumer).lock(
-            |usb_serial, uart_rx_consumer| {
-                while let Some(data) = uart_rx_consumer.peek() {
-                    match write_usb_serial_byte_cs(usb_serial, *data) {
-                        Ok(_) => {
-                            let _ = uart_rx_consumer.dequeue().unwrap();
-                        }
-                        _ => break,
-                    }
-                }
-                usb_serial.flush().ok();
-            },
-        );
+        let rx_dequeued = (&mut c.shared.usb_serial, &mut c.shared.uart_rx_consumer)
+            .lock(|usb_serial, uart_rx_consumer| drain_uart_rx_queue(usb_serial, uart_rx_consumer));
+        if rx_dequeued {
+            // The RX queue has room again, so restart the UART RX interrupt
+            // in case uart_irq stopped it while the queue was full.
+            c.shared
+                .uart_reader
+                .lock(|uart| uart.as_mut().unwrap().0.enable_rx_interrupt());
+        }
 
         // Check if the UART transmitter must be re-configured.
         if let Ok(expected_config) = c
