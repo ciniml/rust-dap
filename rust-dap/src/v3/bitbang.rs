@@ -443,3 +443,343 @@ where
         Err(DapError::SwdError(ack))
     }
 }
+
+///////////////////
+////// JTAG ///////
+///////////////////
+
+use crate::cmsis_dap::build_acc;
+use crate::cmsis_dap::JtagInstruction;
+use crate::cmsis_dap::JtagSequenceInfo;
+use bitvec::slice::BitSlice;
+
+pub struct BitBangJtag<Tck, Tms, Tdi, Tdo, Trst, Srst, D>
+where
+    Tck: BidirPin,
+    Tms: BidirPin,
+    Tdi: BidirPin,
+    Tdo: BidirPin,
+    Trst: BidirPin,
+    Srst: BidirPin,
+    D: Delay,
+{
+    tck: Tck,
+    tms: Tms,
+    tdi: Tdi,
+    tdo: Tdo,
+    ntrst: Trst,
+    nsrst: Srst,
+    delay: D,
+    pins_connected: bool,
+}
+
+impl<Tck, Tms, Tdi, Tdo, Trst, Srst, D> BitBangJtag<Tck, Tms, Tdi, Tdo, Trst, Srst, D>
+where
+    Tck: BidirPin,
+    Tms: BidirPin,
+    Tdi: BidirPin,
+    Tdo: BidirPin,
+    Trst: BidirPin,
+    Srst: BidirPin,
+    D: Delay,
+{
+    /// Creates the transport. All pins must be in input mode.
+    pub fn new(tck: Tck, tms: Tms, tdi: Tdi, tdo: Tdo, ntrst: Trst, nsrst: Srst, delay: D) -> Self {
+        Self {
+            tck,
+            tms,
+            tdi,
+            tdo,
+            ntrst,
+            nsrst,
+            delay,
+            pins_connected: false,
+        }
+    }
+
+    fn clock_wait(&self, config: &DapConfig) {
+        self.delay.delay_cycles(config.jtag.clock_wait_cycles);
+    }
+
+    fn write_bit(&mut self, config: &DapConfig, tms: bool, tdi: bool) {
+        self.tms.write(tms);
+        self.tdi.write(tdi);
+        self.tck.write(false);
+        self.clock_wait(config);
+        self.tck.write(true);
+        self.clock_wait(config);
+    }
+
+    fn read_bit(&mut self, config: &DapConfig, tms: bool, tdi: bool) -> bool {
+        self.tms.write(tms);
+        self.tdi.write(tdi);
+        self.tck.write(false);
+        self.clock_wait(config);
+        let value = self.tdo.read();
+        self.tck.write(true);
+        self.clock_wait(config);
+        value
+    }
+
+    fn write_ir(&mut self, config: &DapConfig, dap_index: u8, ir: u32) {
+        // to ShiftIR from Run-Test-Idle
+        self.write_bit(config, true, false); // SelectDR
+        self.write_bit(config, true, false); // SelectIR
+        self.write_bit(config, false, false); // CaptureIR
+        self.write_bit(config, false, false); // ShiftIR
+
+        // Set every IR except the one selected by dap_index to BYPASS (all 1).
+        let device_count = config.jtag.device_count as usize;
+        let ir_length = &config.jtag.ir_length[0..device_count];
+        let bit_count_max: usize = ir_length.iter().map(|x| *x as usize).sum();
+        let mut bit_count: usize = 0;
+        let mut ir = ir;
+        for (i, length) in ir_length.iter().enumerate().rev() {
+            for _ in 0..*length {
+                let tdi = if i == (dap_index as usize) {
+                    let bit = (ir & 1) != 0;
+                    ir >>= 1;
+                    bit
+                } else {
+                    true
+                };
+                bit_count += 1;
+                // The last bit moves the state machine to Exit-IR (TMS=1).
+                let tms = bit_count == bit_count_max;
+                self.write_bit(config, tms, tdi);
+            }
+        }
+
+        // to Run from Exit-IR
+        self.write_bit(config, true, false); // Update-IR
+        self.write_bit(config, false, false); // Run
+    }
+
+    fn read_write_dr(&mut self, config: &DapConfig, dap_index: u8, dr: &mut BitSlice<u32>) {
+        // to ShiftDR from Run-Test-Idle
+        self.write_bit(config, true, false); // SelectDR
+        self.write_bit(config, false, false); // CaptureDR
+        self.write_bit(config, false, false); // ShiftDR
+
+        let device_count = config.jtag.device_count as usize;
+        let ir_length = &config.jtag.ir_length[0..device_count];
+        let head_bits: usize = ir_length
+            .iter()
+            .take(dap_index.into())
+            .map(|x| *x as usize)
+            .sum();
+        let tail_bits: usize = ir_length
+            .iter()
+            .skip(dap_index as usize + 1)
+            .map(|x| *x as usize)
+            .sum();
+        let total_bits: usize = tail_bits + dr.len() + head_bits;
+        let mut bit_count: usize = 0;
+        for _ in 0..tail_bits {
+            // BYPASS registers of the devices after dap_index.
+            bit_count += 1;
+            self.write_bit(config, false, false);
+        }
+        for mut dr_bit in dr {
+            bit_count += 1;
+            let tms = bit_count == total_bits;
+            let tdo = self.read_bit(config, tms, *dr_bit);
+            dr_bit.set(tdo);
+        }
+        for _ in 0..head_bits {
+            bit_count += 1;
+            let tms = bit_count == total_bits;
+            self.write_bit(config, tms, false);
+        }
+
+        // to Run from Exit-DR
+        self.write_bit(config, true, false); // Update-DR
+        self.write_bit(config, false, false); // Run
+    }
+}
+
+impl<Tck, Tms, Tdi, Tdo, Trst, Srst, D> DapTransport
+    for BitBangJtag<Tck, Tms, Tdi, Tdo, Trst, Srst, D>
+where
+    Tck: BidirPin,
+    Tms: BidirPin,
+    Tdi: BidirPin,
+    Tdo: BidirPin,
+    Trst: BidirPin,
+    Srst: BidirPin,
+    D: Delay,
+{
+    fn capabilities(&self) -> DapCapabilities {
+        DapCapabilities::JTAG
+    }
+
+    fn connect(&mut self, port: ConnectPort, config: &DapConfig) -> Result<ActivePort, DapError> {
+        match port {
+            ConnectPort::Default | ConnectPort::Jtag => {
+                self.tck.set_mode_output(false);
+                self.tms.set_mode_output(false);
+                self.tdi.set_mode_output(false);
+                self.tdo.set_mode_input();
+                self.ntrst.set_mode_output(true);
+                self.nsrst.set_mode_output(true);
+                self.pins_connected = true;
+
+                // Reset the TAPs with nTRST.
+                self.ntrst.write(false);
+                self.clock_wait(config);
+                self.ntrst.write(true);
+                self.clock_wait(config);
+                // Reset the JTAG state machine.
+                for _ in 0..10 {
+                    self.write_bit(config, true, false);
+                }
+                Ok(ActivePort::Jtag)
+            }
+            ConnectPort::Swd => Err(DapError::NotSupported),
+        }
+    }
+
+    fn disconnect(&mut self, config: &DapConfig) -> Result<(), DapError> {
+        if self.pins_connected {
+            // Reset the JTAG state machine before releasing the pins.
+            for _ in 0..10 {
+                self.write_bit(config, true, false);
+            }
+        }
+        self.tck.set_mode_input();
+        self.tms.set_mode_input();
+        self.tdi.set_mode_input();
+        self.tdo.set_mode_input();
+        self.ntrst.set_mode_input();
+        self.nsrst.set_mode_input();
+        self.pins_connected = false;
+        Ok(())
+    }
+
+    fn swj_sequence(
+        &mut self,
+        config: &DapConfig,
+        count: usize,
+        data: &[u8],
+    ) -> Result<(), DapError> {
+        // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__SWJ__Sequence.html
+        let mut index = 0;
+        let mut value = 0;
+        let mut bits = 0;
+        let mut count = count;
+        while count > 0 {
+            count -= 1;
+            if bits == 0 {
+                value = *data.get(index).ok_or(DapError::InvalidCommand)?;
+                index += 1;
+                bits = 8;
+            }
+            self.write_bit(config, value & 1 != 0, false);
+            value >>= 1;
+            bits -= 1;
+        }
+        Ok(())
+    }
+
+    fn swj_pins(
+        &mut self,
+        config: &DapConfig,
+        output: SwjPins,
+        select: SwjPins,
+        wait_us: u32,
+    ) -> Result<SwjPins, DapError> {
+        if select.contains(SwjPins::TCK_SWDCLK) {
+            self.tck.write(output.contains(SwjPins::TCK_SWDCLK));
+        }
+        if select.contains(SwjPins::TMS_SWDIO) {
+            self.tms.write(output.contains(SwjPins::TMS_SWDIO));
+        }
+        if select.contains(SwjPins::TDI) {
+            self.tdi.write(output.contains(SwjPins::TDI));
+        }
+        if select.contains(SwjPins::N_TRST) {
+            self.ntrst.write(output.contains(SwjPins::N_TRST));
+        }
+        if select.contains(SwjPins::N_RESET) {
+            self.nsrst.write(output.contains(SwjPins::N_RESET));
+        }
+
+        let wait_us = wait_us.min(3_000_000);
+        let cycles = (config.core_clock_hz as u64 * wait_us as u64 / 1_000_000) as u32;
+        self.delay.delay_cycles(cycles);
+
+        // TDO is the only input while connected.
+        let mut input = SwjPins::empty();
+        if self.tdo.read() {
+            input |= SwjPins::TDO;
+        }
+        Ok(input)
+    }
+
+    fn swj_clock(&mut self, config: &mut DapConfig, frequency_hz: u32) -> Result<(), DapError> {
+        if frequency_hz == 0 {
+            return Err(DapError::InvalidCommand);
+        }
+        let cycles = (config.core_clock_hz / 2) / frequency_hz;
+        config.jtag.clock_wait_cycles = cycles.saturating_sub(HALF_CLOCK_OVERHEAD_CYCLES);
+        Ok(())
+    }
+
+    fn jtag_transfer(
+        &mut self,
+        config: &DapConfig,
+        dap_index: u8,
+        request: SwdRequest,
+        data: u32,
+    ) -> Result<u32, DapError> {
+        // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__Transfer.html
+        let instruction = if request.contains(SwdRequest::APnDP) {
+            JtagInstruction::APACC as u32
+        } else {
+            JtagInstruction::DPACC as u32
+        };
+        let read = request.contains(SwdRequest::RnW);
+        let a2 = request.contains(SwdRequest::A2);
+        let a3 = request.contains(SwdRequest::A3);
+
+        self.write_ir(config, dap_index, instruction);
+        if read {
+            let mut dr = build_acc(data, a3, a2, true);
+            self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
+            let dr_data = &dr[3..35];
+            let mut result: u32 = 0;
+            for (i, dr) in dr_data.iter().enumerate().take(32) {
+                result |= if *dr { 1 << i } else { 0 };
+            }
+            Ok(result)
+        } else {
+            let mut dr = build_acc(data, a3, a2, false);
+            self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
+            Ok(0)
+        }
+    }
+
+    fn jtag_sequence(
+        &mut self,
+        config: &DapConfig,
+        info: &JtagSequenceInfo,
+        tdi_data: u64,
+    ) -> Result<Option<u64>, DapError> {
+        if info.number_of_tck_cycles > 64 {
+            return Err(DapError::InvalidCommand);
+        }
+        Ok(if info.tdo_capture {
+            let mut tdo_data = 0u64;
+            for i in 0..info.number_of_tck_cycles {
+                let tdo = self.read_bit(config, info.tms_value, (tdi_data & (1 << i)) != 0);
+                tdo_data |= if tdo { 1 } else { 0 } << i;
+            }
+            Some(tdo_data)
+        } else {
+            for i in 0..info.number_of_tck_cycles {
+                self.write_bit(config, info.tms_value, (tdi_data & (1 << i)) != 0);
+            }
+            None
+        })
+    }
+}

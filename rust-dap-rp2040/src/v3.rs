@@ -102,6 +102,17 @@ impl Delay for CortexMDelay {
 pub type SwdIoSet<Clk, Dio, Rst> =
     BitBangSwd<PicoBidirPin<Clk>, PicoBidirPin<Dio>, PicoBidirPin<Rst>, CortexMDelay>;
 
+/// Bit-banging JTAG transport over six RP2040 GPIO pins.
+pub type JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> = rust_dap::v3::bitbang::BitBangJtag<
+    PicoBidirPin<Tck>,
+    PicoBidirPin<Tms>,
+    PicoBidirPin<Tdi>,
+    PicoBidirPin<Tdo>,
+    PicoBidirPin<Trst>,
+    PicoBidirPin<Srst>,
+    CortexMDelay,
+>;
+
 /// Initialize USB-UART, v3 CMSIS-DAP and the USB device.
 ///
 /// `config` carries the DAP identity and the probe core clock;

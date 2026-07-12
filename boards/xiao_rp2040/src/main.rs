@@ -29,21 +29,22 @@ mod app {
     use hal::usb::UsbBus;
     use usb_device::bus::UsbBusAllocator;
 
-    use rust_dap::{CmsisDap, DapCapabilities};
     use usb_device::prelude::*;
     use usbd_serial::SerialPort;
 
     use embedded_hal::digital::v2::{OutputPin, ToggleableOutputPin};
     use embedded_hal::serial::{Read, Write};
 
+    use rust_dap::v3::{DapConfig, DapIdentity};
     use rust_dap_rp2040::line_coding::*;
     use rust_dap_rp2040::util::{
-        initialize_usb, read_usb_serial_byte_cs, write_usb_serial_byte_cs, UartConfigAndClock,
+        read_usb_serial_byte_cs, write_usb_serial_byte_cs, UartConfigAndClock, UsbIdentity,
     };
     #[cfg(feature = "bitbang")]
-    type SwdIoSet = rust_dap_rp2040::util::SwdIoSet<GpioSwClk, GpioSwdIo, GpioReset>;
+    type SwdIoSet = rust_dap_rp2040::v3::SwdIoSet<GpioSwClk, GpioSwdIo, GpioReset>;
     #[cfg(not(feature = "bitbang"))]
     type SwdIoSet = rust_dap_rp2040::util::SwdIoSet<GpioSwClk, GpioSwdIo, GpioReset>;
+    type UsbDap = rust_dap::v3::CmsisDap<'static, UsbBus, SwdIoSet, 64>;
 
     // GPIO mappings
     type GpioSwClk = hal::gpio::bank0::Gpio2;
@@ -79,7 +80,7 @@ mod app {
         uart_reader: Option<UartReader>,
         uart_writer: Option<UartWriter>,
         usb_serial: SerialPort<'static, UsbBus>,
-        usb_dap: CmsisDap<'static, UsbBus, SwdIoSet, 64>,
+        usb_dap: UsbDap,
         uart_rx_consumer: heapless::spsc::Consumer<'static, u8, UART_RX_QUEUE_SIZE>,
         uart_tx_producer: heapless::spsc::Producer<'static, u8, UART_TX_QUEUE_SIZE>,
         uart_tx_consumer: heapless::spsc::Consumer<'static, u8, UART_TX_QUEUE_SIZE>,
@@ -161,11 +162,11 @@ mod app {
             let swdio;
             #[cfg(feature = "bitbang")]
             {
-                use rust_dap_rp2040::{swdio_pin::PicoSwdInputPin, util::CycleDelay};
-                let swclk_pin = PicoSwdInputPin::new(pins.gpio2.into_floating_input());
-                let swdio_pin = PicoSwdInputPin::new(pins.gpio4.into_floating_input());
-                let reset_pin = PicoSwdInputPin::new(reset_pin);
-                swdio = SwdIoSet::new(swclk_pin, swdio_pin, reset_pin, CycleDelay {});
+                use rust_dap_rp2040::v3::{CortexMDelay, PicoBidirPin};
+                let swclk_pin = PicoBidirPin::new(pins.gpio2.into_floating_input());
+                let swdio_pin = PicoBidirPin::new(pins.gpio4.into_floating_input());
+                let reset_pin = PicoBidirPin::new(reset_pin);
+                swdio = SwdIoSet::new(swclk_pin, swdio_pin, reset_pin, CortexMDelay);
             }
             #[cfg(not(feature = "bitbang"))]
             {
@@ -177,7 +178,21 @@ mod app {
                 reset_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
                 swdio = SwdIoSet::new(c.device.PIO0, swclk_pin, swdio_pin, reset_pin, &mut resets);
             }
-            initialize_usb(swdio, usb_allocator, "xiao-rp2040", DapCapabilities::SWD)
+            rust_dap_rp2040::v3::initialize_usb(
+                swdio,
+                usb_allocator,
+                UsbIdentity {
+                    serial: "xiao-rp2040",
+                    ..UsbIdentity::default()
+                },
+                DapConfig::new(
+                    DapIdentity {
+                        serial_number: "xiao-rp2040",
+                        ..DapIdentity::default()
+                    },
+                    clocks.system_clock.freq().to_Hz(),
+                ),
+            )
         };
 
         let usb_led = pins.led.into_push_pull_output();
