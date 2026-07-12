@@ -670,7 +670,7 @@ impl Dispatcher {
             request_proceeded += 1;
             request = &request[1..];
 
-            let tdi_bytes = (info.number_of_tck_cycles + 7) / 8;
+            let tdi_bytes = info.number_of_tck_cycles.div_ceil(8);
             if request.len() < tdi_bytes {
                 return Err(DapError::InvalidCommand);
             }
