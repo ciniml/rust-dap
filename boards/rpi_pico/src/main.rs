@@ -32,6 +32,7 @@ mod app {
     use hal::usb::UsbBus;
     use usb_device::bus::UsbBusAllocator;
 
+    #[cfg(not(all(feature = "swd", feature = "bitbang")))]
     use rust_dap::{CmsisDap, DapCapabilities};
     use usb_device::prelude::*;
     use usbd_serial::SerialPort;
@@ -40,11 +41,16 @@ mod app {
     use embedded_hal::serial::{Read, Write};
 
     use rust_dap_rp2040::line_coding::*;
+    #[cfg(not(all(feature = "swd", feature = "bitbang")))]
+    use rust_dap_rp2040::util::initialize_usb;
     use rust_dap_rp2040::util::{
-        initialize_usb, read_usb_serial_byte_cs, write_usb_serial_byte_cs, UartConfigAndClock,
+        read_usb_serial_byte_cs, write_usb_serial_byte_cs, UartConfigAndClock,
     };
+    // The bitbang SWD build uses the v3 architecture (DapTransport/Dispatcher);
+    // the PIO and JTAG builds still use the legacy trait stack until they are
+    // ported (see doc/redesign-proposal.ja.md).
     #[cfg(all(feature = "swd", feature = "bitbang"))]
-    type SwdIoSet = rust_dap_rp2040::util::SwdIoSet<GpioSwClk, GpioSwdIo, GpioReset>;
+    type SwdIoSet = rust_dap_rp2040::v3::SwdIoSet<GpioSwClk, GpioSwdIo, GpioReset>;
     #[cfg(all(feature = "swd", not(feature = "bitbang")))]
     type SwdIoSet = rust_dap_rp2040::util::SwdIoSet<GpioSwClk, GpioSwdIo, GpioReset>;
     #[cfg(feature = "jtag")]
@@ -60,6 +66,10 @@ mod app {
     type IoSet = SwdIoSet;
     #[cfg(feature = "jtag")]
     type IoSet = JtagIoSet;
+    #[cfg(all(feature = "swd", feature = "bitbang"))]
+    type UsbDap = rust_dap::v3::CmsisDap<'static, UsbBus, IoSet, 64>;
+    #[cfg(not(all(feature = "swd", feature = "bitbang")))]
+    type UsbDap = CmsisDap<'static, UsbBus, IoSet, 64>;
 
     // GPIO mappings
     type GpioUartTx = hal::gpio::bank0::Gpio0;
@@ -112,7 +122,7 @@ mod app {
         uart_reader: Option<UartReader>,
         uart_writer: Option<UartWriter>,
         usb_serial: SerialPort<'static, UsbBus>,
-        usb_dap: CmsisDap<'static, UsbBus, IoSet, 64>,
+        usb_dap: UsbDap,
         uart_rx_consumer: heapless::spsc::Consumer<'static, u8, UART_RX_QUEUE_SIZE>,
         uart_tx_producer: heapless::spsc::Producer<'static, u8, UART_TX_QUEUE_SIZE>,
         uart_tx_consumer: heapless::spsc::Consumer<'static, u8, UART_TX_QUEUE_SIZE>,
@@ -184,33 +194,50 @@ mod app {
         ));
         c.local.USB_ALLOCATOR.replace(usb_allocator);
         let usb_allocator = c.local.USB_ALLOCATOR.as_ref().unwrap();
-        #[cfg(feature = "swd")]
+        #[cfg(all(feature = "swd", feature = "bitbang"))]
+        let (usb_serial, usb_dap, usb_bus) = {
+            use rust_dap::v3::{DapConfig, DapIdentity};
+            use rust_dap_rp2040::util::UsbIdentity;
+            use rust_dap_rp2040::v3::{CortexMDelay, PicoBidirPin};
+            // Initialize MCU reset pin.
+            // RESET pin of Cortex Debug 10-pin connector is negative logic
+            // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
+            let reset_pin = PicoBidirPin::new(pins.gpio4.into_floating_input());
+            let swclk_pin = PicoBidirPin::new(pins.gpio2.into_floating_input());
+            let swdio_pin = PicoBidirPin::new(pins.gpio3.into_floating_input());
+            let swdio = SwdIoSet::new(swclk_pin, swdio_pin, reset_pin, CortexMDelay);
+            rust_dap_rp2040::v3::initialize_usb(
+                swdio,
+                usb_allocator,
+                UsbIdentity {
+                    serial: "raspberry-pi-pico-swd",
+                    ..UsbIdentity::default()
+                },
+                DapConfig::new(
+                    DapIdentity {
+                        serial_number: "raspberry-pi-pico-swd",
+                        ..DapIdentity::default()
+                    },
+                    clocks.system_clock.freq().to_Hz(),
+                ),
+            )
+        };
+
+        #[cfg(all(feature = "swd", not(feature = "bitbang")))]
         let (usb_serial, usb_dap, usb_bus) = {
             // Initialize MCU reset pin.
             // RESET pin of Cortex Debug 10-pin connector is negative logic
             // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
             let reset_pin = pins.gpio4.into_floating_input();
 
-            let swdio;
-            #[cfg(feature = "bitbang")]
-            {
-                use rust_dap_rp2040::{swdio_pin::PicoSwdInputPin, util::CycleDelay};
-                let swclk_pin = PicoSwdInputPin::new(pins.gpio2.into_floating_input());
-                let swdio_pin = PicoSwdInputPin::new(pins.gpio3.into_floating_input());
-                let reset_pin = PicoSwdInputPin::new(reset_pin);
-                swdio = SwdIoSet::new(swclk_pin, swdio_pin, reset_pin, CycleDelay {});
-            }
-            #[cfg(not(feature = "bitbang"))]
-            {
-                let mut swclk_pin = pins.gpio2.into_mode();
-                let mut swdio_pin = pins.gpio3.into_mode();
-                let mut reset_pin = reset_pin.into_mode();
-                swclk_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-                swdio_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-                reset_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+            let mut swclk_pin = pins.gpio2.into_mode();
+            let mut swdio_pin = pins.gpio3.into_mode();
+            let mut reset_pin = reset_pin.into_mode();
+            swclk_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+            swdio_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+            reset_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 
-                swdio = SwdIoSet::new(c.device.PIO0, swclk_pin, swdio_pin, reset_pin, &mut resets);
-            }
+            let swdio = SwdIoSet::new(c.device.PIO0, swclk_pin, swdio_pin, reset_pin, &mut resets);
             initialize_usb(
                 swdio,
                 usb_allocator,

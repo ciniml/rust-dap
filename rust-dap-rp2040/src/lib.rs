@@ -38,6 +38,7 @@ pub mod line_coding;
 pub mod pio;
 pub mod swdio_pin;
 pub mod util;
+pub mod v3;
 
 use cortex_m_rt::pre_init;
 
