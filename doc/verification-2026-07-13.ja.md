@@ -50,3 +50,19 @@
 旧アーキテクチャ(PIO 構成)と v3 bitbang 構成の双方が同一ハードウェアで
 動作することを確認した。残りの移行ステップ(PIO/JTAG の v3 移植、旧トレイト削除)は
 doc/redesign-proposal.ja.md の §5 を参照。
+
+## 追記2: v3 + PIO(デフォルト構成)の実機検証 (2026-07-13)
+
+対象コミット: 2fe6c1e(PIO SwdIoSet/JtagIoSet の v3 アダプタ)。
+デフォルト構成(SWD + PIO、v3 Dispatcher 経由)を同一ハード構成で検証した。
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | USB 列挙・probe-rs 認識 | OK |
+| 2 | SWD 接続・CHIP_ID 読み出し(0x20002927) | OK |
+| 3 | RAM ベンチマーク(ベリファイ付き) | Read 203KB/s / Write 231KB/s |
+| 4 | UART ループバック 64KB @921600bps + DAP ベンチマーク同時実行 | 全バイト一致 |
+
+ベンチマーク結果は旧スタック(Read 180KB/s / Write 164KB/s)より向上した。
+v3 Dispatcher のコマンド処理経路が旧ブランケット実装チェーンより軽いことによる。
+これで rpi_pico の jtag+bitbang を除く全構成が v3 で実機動作確認済みとなった。
