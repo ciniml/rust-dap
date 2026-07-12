@@ -19,10 +19,9 @@
 
 use embedded_hal::digital::v2::ToggleableOutputPin;
 use panic_halt as _;
-use rust_dap::bitbang::{DelayFunc, SwdIoSet};
-use rust_dap::{
-    CmsisDap, DapCapabilities, USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON,
-};
+use rust_dap::v3::bitbang::BitBangSwd;
+use rust_dap::v3::{CmsisDap, DapConfig, DapIdentity, Delay};
+use rust_dap::{USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON};
 
 use bsp::{entry, hal, pac};
 use hal::clock::GenericClockController;
@@ -48,25 +47,19 @@ use hal::gpio::v2::{PA02, PA05, PA07, PA18};
 type SwdIoPin = PA05; // D9
 type SwClkPin = PA07; // D8
 type ResetPin = PA02; // D0
-type SwdIoInputPin = XiaoSwdInputPin<SwdIoPin>;
-type SwdIoOutputPin = XiaoSwdOutputPin<SwdIoPin>;
-type SwClkInputPin = XiaoSwdInputPin<SwClkPin>;
-type SwClkOutputPin = XiaoSwdOutputPin<SwClkPin>;
-type ResetInputPin = XiaoSwdInputPin<ResetPin>;
-type ResetOutputPin = XiaoSwdOutputPin<ResetPin>;
-type MySwdIoSet = SwdIoSet<
-    SwClkInputPin,
-    SwClkOutputPin,
-    SwdIoInputPin,
-    SwdIoOutputPin,
-    ResetInputPin,
-    ResetOutputPin,
+type MySwdIoSet = BitBangSwd<
+    XiaoBidirPin<SwClkPin>,
+    XiaoBidirPin<SwdIoPin>,
+    XiaoBidirPin<ResetPin>,
     CycleDelay,
 >;
 
+/// SAMD21 core clock frequency configured by GenericClockController.
+const CORE_CLOCK_HZ: u32 = 48_000_000;
+
 struct CycleDelay {}
-impl DelayFunc for CycleDelay {
-    fn cycle_delay(&self, cycles: u32) {
+impl Delay for CycleDelay {
+    fn delay_cycles(&self, cycles: u32) {
         cortex_m::asm::delay(cycles);
     }
 }
@@ -101,15 +94,25 @@ fn main() -> ! {
     let reset_pin = pins.a0.into_floating_input();
 
     let swdio = MySwdIoSet::new(
-        XiaoSwdInputPin::new(pins.a8.into_floating_input()),
-        XiaoSwdInputPin::new(pins.a9.into_floating_input()),
-        XiaoSwdInputPin::new(reset_pin),
+        XiaoBidirPin::new(pins.a8.into_floating_input()),
+        XiaoBidirPin::new(pins.a9.into_floating_input()),
+        XiaoBidirPin::new(reset_pin),
         CycleDelay {},
     );
 
     unsafe {
         USB_SERIAL = Some(SerialPort::new(bus_allocator));
-        USB_DAP = Some(CmsisDap::new(bus_allocator, swdio, DapCapabilities::SWD));
+        USB_DAP = Some(CmsisDap::new(
+            bus_allocator,
+            swdio,
+            DapConfig::new(
+                DapIdentity {
+                    serial_number: "xiao-m0",
+                    ..DapIdentity::default()
+                },
+                CORE_CLOCK_HZ,
+            ),
+        ));
         USB_BUS = Some(
             UsbDeviceBuilder::new(bus_allocator, UsbVidPid(0x6666, 0x4444))
                 .manufacturer("fugafuga.org")
