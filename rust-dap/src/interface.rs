@@ -172,7 +172,7 @@ const fn u16_hi(v: u16) -> u8 {
     (v >> 8) as u8
 }
 const fn u32_lo(v: u32) -> u16 {
-    (v & 0xfffff) as u16
+    (v & 0xffff) as u16
 }
 const fn u32_hi(v: u32) -> u16 {
     (v >> 16) as u16

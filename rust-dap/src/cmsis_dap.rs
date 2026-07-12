@@ -657,7 +657,7 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
         request: &[u8],
         response: &mut [u8],
     ) -> core::result::Result<(usize, usize), DapError> {
-        if request.is_empty() {
+        if request.len() < 2 {
             return Err(DapError::InvalidCommand);
         }
 
@@ -953,6 +953,9 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
         request: &[u8],
         response: &mut [u8],
     ) -> core::result::Result<(usize, usize), DapError> {
+        if request.len() < 6 {
+            return Err(DapError::InvalidCommand);
+        }
         let pin_output = request[0];
         let pin_select = request[1];
         let wait_us = u32::from_le_bytes(request[2..6].try_into().unwrap());
@@ -968,7 +971,7 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
         response: &mut [u8],
     ) -> core::result::Result<(usize, usize), DapError> {
         if request.len() >= 4 {
-            let clock_hz = u32::from_le_bytes(request.try_into().unwrap());
+            let clock_hz = u32::from_le_bytes(request[0..4].try_into().unwrap());
             if CmsisDapCommandInner::swj_clock(self, config, clock_hz).is_ok() {
                 response[0] = DAP_OK;
                 Ok((4, 1))
@@ -1051,12 +1054,18 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
         let mut response_body_count = 0;
 
         for _i in 0..sequence_count {
+            if request.is_empty() {
+                return Err(DapError::InvalidCommand);
+            }
             let sequence_info: JtagSequenceInfo = JtagSequenceInfo::from(request[0]);
             request_proceeded += 1;
             request = &request[1..];
 
             // bits to byte
             let tdi_data_length_byte = (sequence_info.number_of_tck_cycles + 7) / 8;
+            if request.len() < tdi_data_length_byte {
+                return Err(DapError::InvalidCommand);
+            }
             let mut tdi_data = [0; 8];
             // The value of tdi_data_length_byte may not be 8
             #[allow(clippy::manual_memcpy)]
@@ -1299,24 +1308,18 @@ where
 }
 
 fn read_swd_request<C: CursorRead>(cursor: &mut C) -> SwdRequest {
-    let buffer: [core::mem::MaybeUninit<u8>; 1] =
-        unsafe { core::mem::MaybeUninit::uninit().assume_init() };
-    let mut buffer = buffer.map(|x| unsafe { x.assume_init() });
+    let mut buffer = [0u8; 1];
     cursor.read(&mut buffer).ok();
     unsafe { SwdRequest::from_bits_unchecked(buffer[0]) }
 }
 fn read_u16<C: CursorRead>(cursor: &mut C) -> u16 {
-    let value: [core::mem::MaybeUninit<u8>; 2] =
-        unsafe { core::mem::MaybeUninit::uninit().assume_init() };
-    let mut value = value.map(|x| unsafe { x.assume_init() });
+    let mut value = [0u8; 2];
     cursor.read(&mut value).ok();
     u16::from_le_bytes(value)
 }
 
 fn read_u32<C: CursorRead>(cursor: &mut C) -> u32 {
-    let value: [core::mem::MaybeUninit<u8>; 4] =
-        unsafe { core::mem::MaybeUninit::uninit().assume_init() };
-    let mut value = value.map(|x| unsafe { x.assume_init() });
+    let mut value = [0u8; 4];
     cursor.read(&mut value).ok();
     u32::from_le_bytes(value)
 }
@@ -1621,5 +1624,102 @@ mod test {
             .max_packet_size_0(64)
             .build();
         assert!(dap.process().is_ok());
+    }
+
+    struct DummyInner;
+    impl CmsisDapCommandInner for DummyInner {
+        fn connect(&mut self, _config: &CmsisDapConfig) {}
+        fn disconnect(&mut self, _config: &CmsisDapConfig) {}
+        fn swj_sequence(&mut self, _config: &CmsisDapConfig, _count: usize, _data: &[u8]) {}
+        fn swd_sequence(
+            &mut self,
+            _config: &CmsisDapConfig,
+            _request: &[u8],
+            _response: &mut [u8],
+        ) -> core::result::Result<(usize, usize), DapError> {
+            Err(DapError::InvalidCommand)
+        }
+        fn jtag_sequence(
+            &mut self,
+            _config: &CmsisDapConfig,
+            _sequence_info: &JtagSequenceInfo,
+            _tdi_data: u64,
+        ) -> core::result::Result<Option<u64>, DapError> {
+            Ok(Some(0))
+        }
+        fn transfer_inner_with_retry(
+            &mut self,
+            _config: &CmsisDapConfig,
+            _dap_index: u8,
+            _request: SwdRequest,
+            _data: u32,
+        ) -> core::result::Result<u32, DapError> {
+            Ok(0)
+        }
+        fn swj_pins(
+            &mut self,
+            _config: &CmsisDapConfig,
+            _pin_output: u8,
+            _pin_select: u8,
+            _wait_us: u32,
+        ) -> core::result::Result<u8, DapError> {
+            Ok(0)
+        }
+        fn swj_clock(
+            &mut self,
+            _config: &mut CmsisDapConfig,
+            _frequency_hz: u32,
+        ) -> core::result::Result<(), DapError> {
+            Ok(())
+        }
+        fn jtag_idcode(
+            &self,
+            _config: &mut CmsisDapConfig,
+            _request: &[u8],
+            _response: &mut [u8],
+        ) -> core::result::Result<(usize, usize), DapError> {
+            Err(DapError::InvalidCommand)
+        }
+    }
+
+    #[test]
+    fn swj_clock_accepts_trailing_bytes() {
+        // Regression test: process() passes the whole remaining buffer to each
+        // command handler, so SWJ_Clock must tolerate trailing bytes of the
+        // next command instead of panicking in try_into().
+        let mut io = DummyInner;
+        let mut config = CmsisDapConfig::default();
+        let mut response = [0u8; 8];
+        let request = [0x60, 0x09, 0x00, 0x00, 0x05]; // 4 byte clock value + next command byte
+        let result = CmsisDapCommand::swj_clock(&mut io, &mut config, &request, &mut response);
+        assert_eq!(result, Ok((4, 1)));
+        assert_eq!(response[0], DAP_OK);
+    }
+
+    #[test]
+    fn short_requests_return_invalid_command() {
+        let mut io = DummyInner;
+        let mut config = CmsisDapConfig::default();
+        let mut response = [0u8; 8];
+        // SWJ_Pins needs 6 bytes.
+        assert_eq!(
+            CmsisDapCommand::swj_pins(&mut io, &config, &[0x00, 0x01], &mut response),
+            Err(DapError::InvalidCommand)
+        );
+        // Transfer needs at least DAP index and transfer count.
+        assert_eq!(
+            CmsisDapCommand::transfer(&mut io, &mut config, &[0x00], &mut response),
+            Err(DapError::InvalidCommand)
+        );
+        // JTAG_Sequence claiming two sequences but providing none of the second.
+        assert_eq!(
+            CmsisDapCommand::jtag_sequence(&mut io, &config, &[0x02, 0x88], &mut response),
+            Err(DapError::InvalidCommand)
+        );
+        // SWJ_Clock shorter than 4 bytes.
+        assert_eq!(
+            CmsisDapCommand::swj_clock(&mut io, &mut config, &[0x60, 0x09], &mut response),
+            Err(DapError::InvalidCommand)
+        );
     }
 }
