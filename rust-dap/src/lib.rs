@@ -16,8 +16,6 @@
 
 #![cfg_attr(not(test), no_std)]
 
-#[cfg(feature = "bitbang")]
-pub mod bitbang;
 mod cmsis_dap;
 mod cursor;
 mod interface;

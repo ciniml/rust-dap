@@ -21,6 +21,7 @@ use hal::{
     pio::PIOExt,
 };
 use rp2040_hal as hal;
+use rust_dap::v3::{ActivePort, ConnectPort, DapConfig, DapTransport};
 use rust_dap::*;
 pub mod pio0 {
     use crate::pio::hal::{self, gpio::FunctionPio0};
@@ -460,45 +461,10 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
     }
 }
 
-impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIo for JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
-    fn connect(&mut self, _config: &JtagIoConfig) {
-        // output high: trst, srst, tms, tck, tdi
-        // input: tdo
-        self.connect_inner();
-    }
 
-    fn disconnect(&mut self, _config: &JtagIoConfig) {
-        // all input
-        self.disconnect_inner();
-    }
-
-    fn swj_clock(
-        &mut self,
-        _config: &mut JtagIoConfig,
-        #[allow(unused_variables)] frequency_hz: u32,
-    ) -> core::result::Result<(), DapError> {
-        #[cfg(feature = "set_clock")]
-        self.set_clock(frequency_hz);
-        Ok(())
-    }
-
-    fn swj_sequence(&mut self, _config: &JtagIoConfig, count: usize, data: &[u8]) {
-        // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__SWJ__Sequence.html
-
-        let data = data.view_bits::<Lsb0>();
-        let (tms_data, _) = data.split_at(count);
-        for tms in tms_data {
-            self.write_tms(*tms);
-        }
-    }
-
-    fn jtag_read_sequence(
-        &mut self,
-        _config: &JtagIoConfig,
-        clock_count: usize,
-        tms_value: bool,
-        tdi_data: u64,
-    ) -> u64 {
+// JTAG scan helpers shared by the DapTransport implementation.
+impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
+    fn sequence64(&mut self, clock_count: usize, tms_value: bool, tdi_data: u64) -> u64 {
         let tdi_data_lo = tdi_data as u32;
         let tdi_data_hi = (tdi_data >> 32) as u32;
         // we can't use view_bits on 32bit cpu
@@ -510,93 +476,36 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIo for JtagIoSet<Tck, Tms, Tdi, Tdo, Tr
         data.load()
     }
 
-    fn jtag_write_sequence(
-        &mut self,
-        config: &JtagIoConfig,
-        clock_count: usize,
-        tms_value: bool,
-        tdi_data: u64,
-    ) {
-        let _ = self.jtag_read_sequence(config, clock_count, tms_value, tdi_data);
-    }
-
-    fn jtag_idcode(
-        &mut self,
-        _config: &JtagIoConfig,
-        _index: u8,
-    ) -> core::result::Result<u32, DapError> {
-        // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__jtag__idcode.html#details
-        Err(DapError::InvalidCommand)
-    }
-
-    fn jtag_transfer(
-        &mut self,
-        config: &JtagIoConfig,
-        dap_index: u8,
-        request: SwdRequest,
-        data: u32,
-    ) -> core::result::Result<u32, DapError> {
-        // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__Transfer.html
-        // JTAGを使ってDAPとの送受信をやる
-
-        let instruction = if request.contains(SwdRequest::APnDP) {
-            // APACC
-            JtagInstruction::APACC as u32
-        } else {
-            // DPACC
-            JtagInstruction::DPACC as u32
-        };
-        let read = request.contains(SwdRequest::RnW);
-        let a2 = request.contains(SwdRequest::A2);
-        let a3 = request.contains(SwdRequest::A3);
-
-        // DPACCかAPACCを発行する
-        self.write_ir(config, dap_index, instruction);
-        // DRを書き込む
-        let mut dr = build_acc(data, a3, a2, true);
-        self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
-        if read {
-            // TODO: OK_FALSE等の情報を返す必要がないか調べる
-            dr.shift_right(3);
-            let result: u32 = dr.load();
-            Ok(result)
-        } else {
-            Ok(0)
-        }
-    }
-
-    fn write_ir(&mut self, config: &JtagIoConfig, dap_index: u8, ir: u32) {
+    fn write_ir(&mut self, config: &DapConfig, dap_index: u8, ir: u32) {
         // to ShiftIR from Run-Test-Idle
         self.write_tms(true); // SelectDR
         self.write_tms(true); // SelectIR
         self.write_tms(false); // CaptureIR
         self.write_tms(false); // ShiftIR
 
-        // dap_indexの示すIRレジスタ以外はBYPASS(all 1)にする
+        // Set every IR except the one selected by dap_index to BYPASS (all 1).
         // TDI -> other devices(head) -> target device -> other devices(tail) -> TDO
-        let device_count = config.device_count as usize;
-        let total_ir_bit_length: usize = (&config.ir_length[0..device_count])
+        let device_count = config.jtag.device_count as usize;
+        let total_ir_bit_length: usize = config.jtag.ir_length[0..device_count]
             .iter()
             .map(|x| *x as usize)
             .sum();
-        let target_ir_bit_length = *config.ir_length.get(dap_index as usize).unwrap() as usize;
+        let target_ir_bit_length =
+            *config.jtag.ir_length.get(dap_index as usize).unwrap_or(&0) as usize;
 
-        let tail_ir_bit_length: usize = if 1 < device_count {
-            // not tested
-            config.ir_length[(device_count + 1)..]
-                .iter()
-                .map(|x| *x as usize)
-                .sum()
-        } else {
-            0
-        };
+        let tail_ir_bit_length: usize = config
+            .jtag
+            .ir_length
+            .get((dap_index as usize + 1)..device_count)
+            .map(|lengths| lengths.iter().map(|x| *x as usize).sum())
+            .unwrap_or(0);
 
         let mut ir = ir;
-        let ir_bits = bits![mut u32, Lsb0; 1;MAX_IR_LENGTH];
-        // target_ir_bits << tail | ir する
+        let ir_bits = bits![mut u32, Lsb0; 1; MAX_IR_LENGTH];
+        // shift target_ir_bits after the tail bypass bits
         for i in 0..target_ir_bit_length {
             ir_bits.set(tail_ir_bit_length + i, ir & 1 != 0);
-            ir = ir >> 1;
+            ir >>= 1;
         }
 
         // write ir bits
@@ -611,15 +520,15 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIo for JtagIoSet<Tck, Tms, Tdi, Tdo, Tr
         self.write_tms(false); // Run
     }
 
-    fn read_write_dr(&mut self, config: &JtagIoConfig, dap_index: u8, dr: &mut BitSlice<u32>) {
-        // to ShiftIR from Run-Test-Idle
+    fn read_write_dr(&mut self, config: &DapConfig, dap_index: u8, dr: &mut BitSlice<u32>) {
+        // to ShiftDR from Run-Test-Idle
         self.write_tms(true); // SelectDR
         self.write_tms(false); // CaptureDR
         self.write_tms(false); // ShiftDR
 
         let target_position_idx = usize::from(dap_index); // zero indexed
-        let total_bits = usize::from(config.device_count) + dr.len() - 1;
-        let dr_bits = bits![mut u32, Lsb0; 1;MAX_IR_LENGTH];
+        let total_bits = usize::from(config.jtag.device_count) + dr.len() - 1;
+        let dr_bits = bits![mut u32, Lsb0; 1; MAX_IR_LENGTH];
         // copy dr
         for (i, d) in dr.iter().enumerate() {
             dr_bits.set(target_position_idx + i, *d);
@@ -640,95 +549,54 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIo for JtagIoSet<Tck, Tms, Tdi, Tdo, Tr
     }
 }
 
-impl<Tck, Tms, Tdi, Tdo, Trst, Srst> CmsisDapCommandInner
-    for JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst>
-{
-    fn connect(&mut self, config: &CmsisDapConfig) {
-        JtagIo::connect(self, &config.jtag);
+impl<Tck, Tms, Tdi, Tdo, Trst, Srst> DapTransport for JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
+    fn capabilities(&self) -> DapCapabilities {
+        DapCapabilities::JTAG
     }
 
-    fn disconnect(&mut self, config: &CmsisDapConfig) {
-        JtagIo::disconnect(self, &config.jtag);
-    }
-
-    fn swj_sequence(&mut self, config: &CmsisDapConfig, count: usize, data: &[u8]) {
-        JtagIo::swj_sequence(self, &config.jtag, count, data);
-    }
-
-    fn swd_sequence(
-        &mut self,
-        _config: &CmsisDapConfig,
-        _request: &[u8],
-        _response: &mut [u8],
-    ) -> core::result::Result<(usize, usize), DapError> {
-        Err(DapError::InvalidCommand)
-    }
-
-    fn jtag_sequence(
-        &mut self,
-        config: &CmsisDapConfig,
-        sequence_info: &JtagSequenceInfo,
-        tdi_data: u64,
-    ) -> core::result::Result<Option<u64>, DapError> {
-        Ok(if sequence_info.tdo_capture {
-            Some(JtagIo::jtag_read_sequence(
-                self,
-                &config.jtag,
-                sequence_info.number_of_tck_cycles,
-                sequence_info.tms_value,
-                tdi_data,
-            ))
-        } else {
-            JtagIo::jtag_write_sequence(
-                self,
-                &config.jtag,
-                sequence_info.number_of_tck_cycles,
-                sequence_info.tms_value,
-                tdi_data,
-            );
-            None
-        })
-    }
-
-    fn transfer_inner_with_retry(
-        &mut self,
-        config: &CmsisDapConfig,
-        dap_index: u8,
-        request: SwdRequest,
-        data: u32,
-    ) -> core::result::Result<u32, DapError> {
-        let mut retry_count = 0;
-        loop {
-            match JtagIo::jtag_transfer(self, &config.jtag, dap_index, request, data) {
-                Ok(value) => break Ok(value),
-                Err(DapError::SwdError(err)) => {
-                    // TODO: 動作確認
-                    if err != DAP_TRANSFER_WAIT || retry_count == config.retry_count {
-                        break Err(DapError::SwdError(err));
-                    }
-                    retry_count += 1;
-                }
-                Err(err) => break Err(err),
+    fn connect(&mut self, port: ConnectPort, _config: &DapConfig) -> Result<ActivePort, DapError> {
+        match port {
+            ConnectPort::Default | ConnectPort::Jtag => {
+                // output high: trst, srst, tms, tck, tdi / input: tdo
+                self.connect_inner();
+                Ok(ActivePort::Jtag)
             }
+            ConnectPort::Swd => Err(DapError::NotSupported),
         }
+    }
+
+    fn disconnect(&mut self, _config: &DapConfig) -> Result<(), DapError> {
+        self.disconnect_inner();
+        Ok(())
+    }
+
+    fn swj_sequence(
+        &mut self,
+        _config: &DapConfig,
+        count: usize,
+        data: &[u8],
+    ) -> Result<(), DapError> {
+        // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__SWJ__Sequence.html
+        let data = data.view_bits::<Lsb0>();
+        if data.len() < count {
+            return Err(DapError::InvalidCommand);
+        }
+        let (tms_data, _) = data.split_at(count);
+        for tms in tms_data {
+            self.write_tms(*tms);
+        }
+        Ok(())
     }
 
     fn swj_pins(
         &mut self,
-        _config: &CmsisDapConfig,
-        pin_output: u8,
-        pin_select: u8,
+        _config: &DapConfig,
+        output: SwjPins,
+        select: SwjPins,
         wait_us: u32,
-    ) -> core::result::Result<u8, DapError> {
+    ) -> Result<SwjPins, DapError> {
         self.install_swj_pins_program();
 
-        // clean rx fifo
-        // while !self.get_context().rx_fifo.is_empty() {
-        //     let _ = self.get_context().rx_fifo.read();
-        // }
-
-        let pin_output = SwjPins::from_bits(pin_output).unwrap();
-        let pin_select = SwjPins::from_bits(pin_select).unwrap();
         let flags = [
             (SwjPins::TCK_SWDCLK, self.tck_pin_id),
             (SwjPins::TMS_SWDIO, self.tms_pin_id),
@@ -746,7 +614,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> CmsisDapCommandInner
 
         // output
         let pio_pin_out: u32 = flags.iter().fold(0, |out, (flag, pin_id)| {
-            out | if pin_output.contains(*flag) && pin_select.contains(*flag) {
+            out | if output.contains(*flag) && select.contains(*flag) {
                 1 << pin_id
             } else {
                 0
@@ -800,23 +668,66 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> CmsisDapCommandInner
         // restore JTAG program
         self.install_jtag_sequence_program();
 
-        Ok(input.bits())
+        Ok(input)
     }
 
     fn swj_clock(
         &mut self,
-        config: &mut CmsisDapConfig,
-        frequency_hz: u32,
-    ) -> core::result::Result<(), DapError> {
-        JtagIo::swj_clock(self, &mut config.jtag, frequency_hz)
+        _config: &mut DapConfig,
+        #[allow(unused_variables)] frequency_hz: u32,
+    ) -> Result<(), DapError> {
+        #[cfg(feature = "set_clock")]
+        self.set_clock(frequency_hz);
+        Ok(())
     }
 
-    fn jtag_idcode(
-        &self,
-        _config: &mut CmsisDapConfig,
-        _request: &[u8],
-        _response: &mut [u8],
-    ) -> core::result::Result<(usize, usize), DapError> {
-        unimplemented!();
+    fn jtag_transfer(
+        &mut self,
+        config: &DapConfig,
+        dap_index: u8,
+        request: SwdRequest,
+        data: u32,
+    ) -> Result<u32, DapError> {
+        // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__Transfer.html
+        let instruction = if request.contains(SwdRequest::APnDP) {
+            JtagInstruction::APACC as u32
+        } else {
+            JtagInstruction::DPACC as u32
+        };
+        let read = request.contains(SwdRequest::RnW);
+        let a2 = request.contains(SwdRequest::A2);
+        let a3 = request.contains(SwdRequest::A3);
+
+        // Issue DPACC or APACC.
+        self.write_ir(config, dap_index, instruction);
+        // Write DR.
+        let mut dr = build_acc(data, a3, a2, true);
+        self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
+        if read {
+            // TODO: check whether OK_FALSE etc. should be reported
+            dr.shift_right(3);
+            let result: u32 = dr.load();
+            Ok(result)
+        } else {
+            Ok(0)
+        }
+    }
+
+    fn jtag_sequence(
+        &mut self,
+        _config: &DapConfig,
+        info: &JtagSequenceInfo,
+        tdi_data: u64,
+    ) -> Result<Option<u64>, DapError> {
+        if info.number_of_tck_cycles > 64 {
+            return Err(DapError::InvalidCommand);
+        }
+        let tdo = self.sequence64(info.number_of_tck_cycles, info.tms_value, tdi_data);
+        Ok(if info.tdo_capture { Some(tdo) } else { None })
+    }
+
+    fn jtag_idcode(&mut self, _config: &DapConfig, _index: u8) -> Result<u32, DapError> {
+        // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__jtag__idcode.html
+        Err(DapError::NotSupported)
     }
 }

@@ -22,7 +22,7 @@ defmt = [
     "rust-dap/defmt",
 ]
 default = ["swd"]
-bitbang = ["rust-dap/bitbang", "rust-dap-rp2040/bitbang"]
+bitbang = ["rust-dap-rp2040/bitbang"]
 set_clock = [
     "rust-dap-rp2040/set_clock",
 ] # Enable swj_clock implementation for PIO and set appropriate SWCLK frequency. Otherwise, SWCLK is fixed to 15.625[MHz]
@@ -38,7 +38,7 @@ default-features = false
 features = ["rt", "critical-section-impl"]
 
 [dependencies]
-rust-dap = { path = "../../rust-dap", features = ["unproven"] }
+rust-dap = { path = "../../rust-dap" }
 rust-dap-rp2040 = { path = "../../rust-dap-rp2040" }
 panic-halt = "0.2"
 cortex-m = { version = "0.7" }

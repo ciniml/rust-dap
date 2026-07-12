@@ -1,6 +1,6 @@
 [package]
 name = "rust-dap-rp2040"
-version = "0.2.0"
+version = "0.3.0"
 authors = ["Kenta IDA <fuga@fugafuga.org>"]
 edition = "2021"
 license = "Apache-2.0"
@@ -8,7 +8,7 @@ license = "Apache-2.0"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [features]
-bitbang = ["rust-dap/bitbang", "rust-dap/unproven"]
+bitbang = [] # Use bit-banging transports instead of PIO
 set_clock = [
 ] # Enable swj_clock implementation for bitbang and PIO and set appropriate SWCLK frequency. Otherwise, SWCLK is fixed to 15.625[MHz]
 ram-exec = [] # Execute-in-SRAM support

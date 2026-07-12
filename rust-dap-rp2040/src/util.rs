@@ -18,48 +18,16 @@ use crate::line_coding::UartConfig;
 use core::result::Result;
 use hal::usb::UsbBus;
 use rp2040_hal as hal;
-use rust_dap::{
-    CmsisDap, DapCapabilities, USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON,
-};
-use usb_device::device::{UsbDevice, UsbDeviceBuilder, UsbVidPid};
-use usb_device::{class_prelude::UsbBusAllocator, UsbError};
+use usb_device::device::UsbVidPid;
+use usb_device::UsbError;
 use usbd_serial::SerialPort;
-
-#[cfg(feature = "bitbang")]
-use crate::swdio_pin::{PicoSwdInputPin, PicoSwdOutputPin};
-#[cfg(feature = "bitbang")]
-use rust_dap::bitbang::{DelayFunc, JtagIoSet as BitbangJtagIoSet, SwdIoSet as BitbangSwdIoSet};
-#[cfg(feature = "bitbang")]
-pub type SwdIoSet<C, D, E> = BitbangSwdIoSet<
-    PicoSwdInputPin<C>,
-    PicoSwdOutputPin<C>,
-    PicoSwdInputPin<D>,
-    PicoSwdOutputPin<D>,
-    PicoSwdInputPin<E>,
-    PicoSwdOutputPin<E>,
-    CycleDelay,
->;
-#[cfg(feature = "bitbang")]
-pub type JtagIoSet<TCK, TMS, TDI, TDO, TRST, SRST> = BitbangJtagIoSet<
-    PicoSwdInputPin<TCK>,
-    PicoSwdOutputPin<TCK>,
-    PicoSwdInputPin<TMS>,
-    PicoSwdOutputPin<TMS>,
-    PicoSwdInputPin<TDI>,
-    PicoSwdOutputPin<TDI>,
-    PicoSwdInputPin<TDO>,
-    PicoSwdOutputPin<TDO>,
-    PicoSwdInputPin<TRST>,
-    PicoSwdOutputPin<TRST>,
-    PicoSwdInputPin<SRST>,
-    PicoSwdOutputPin<SRST>,
-    CycleDelay,
->;
 
 #[cfg(not(feature = "bitbang"))]
 use crate::pio::{jtag::JtagIoSet as PioJtagIoSet, pio0, swd::SwdIoSet as PioSwdIoSet};
+/// PIO SWD transport (see `crate::v3::SwdIoSet` for the bit-banging variant).
 #[cfg(not(feature = "bitbang"))]
 pub type SwdIoSet<C, D, E> = PioSwdIoSet<pio0::Pin<C>, pio0::Pin<D>, pio0::Pin<E>>;
+/// PIO JTAG transport (see `crate::v3::JtagIoSet` for the bit-banging variant).
 #[cfg(not(feature = "bitbang"))]
 pub type JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> = PioJtagIoSet<
     pio0::Pin<Tck>,
@@ -70,30 +38,22 @@ pub type JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> = PioJtagIoSet<
     pio0::Pin<Srst>,
 >;
 
-/// DelayFunc implementation which uses cortex_m::asm::delay
-#[cfg(feature = "bitbang")]
-pub struct CycleDelay {}
-#[cfg(feature = "bitbang")]
-impl CycleDelay {
-    #[allow(unused)]
-    const CPU_FREQUENCY_HZ: u32 = 120000000; // Default CPU Frequency.
-    #[allow(unused)]
-    const AVERAGE_OPERATION_OVERHEAD_CYCLES: u32 = 60; // Average SWD/JTAG operation overhead in cycles.
+/// USB device identity used by [`crate::v3::initialize_usb`].
+pub struct UsbIdentity<'a> {
+    pub vid_pid: UsbVidPid,
+    pub manufacturer: &'a str,
+    pub product: &'a str,
+    pub serial: &'a str,
 }
-#[cfg(feature = "bitbang")]
-impl DelayFunc for CycleDelay {
-    #[cfg(feature = "set_clock")]
-    fn calculate_half_clock_cycles(frequency_hz: u32) -> Option<u32> {
-        let cycles = (Self::CPU_FREQUENCY_HZ / 2) / frequency_hz;
-        if cycles < Self::AVERAGE_OPERATION_OVERHEAD_CYCLES {
-            Some(0)
-        } else {
-            Some(cycles - Self::AVERAGE_OPERATION_OVERHEAD_CYCLES)
-        }
-    }
 
-    fn cycle_delay(&self, cycles: u32) {
-        cortex_m::asm::delay(cycles);
+impl Default for UsbIdentity<'static> {
+    fn default() -> Self {
+        Self {
+            vid_pid: UsbVidPid(0x6666, 0x4444),
+            manufacturer: "fugafuga.org",
+            product: "CMSIS-DAP",
+            serial: "rust-dap",
+        }
     }
 }
 
@@ -126,80 +86,4 @@ pub struct UartConfigAndClock {
     pub config: UartConfig,
     /// UART peripheral clock frequency
     pub clock: fugit::HertzU32,
-}
-
-type PicoUsbBusAllocator = UsbBusAllocator<UsbBus>;
-
-/// USB device identity used by [`initialize_usb_with_identity`].
-pub struct UsbIdentity<'a> {
-    pub vid_pid: UsbVidPid,
-    pub manufacturer: &'a str,
-    pub product: &'a str,
-    pub serial: &'a str,
-}
-
-impl Default for UsbIdentity<'static> {
-    fn default() -> Self {
-        Self {
-            vid_pid: UsbVidPid(0x6666, 0x4444),
-            manufacturer: "fugafuga.org",
-            product: "CMSIS-DAP",
-            serial: "rust-dap",
-        }
-    }
-}
-
-/// Initialize SWDIO, USB-UART, CMSIS-DAP and USB BUS.
-pub fn initialize_usb<'a, CmsisDapCommandInner, const MAX_PACKET_SIZE: usize>(
-    io: CmsisDapCommandInner,
-    usb_allocator: &'a PicoUsbBusAllocator,
-    serial: &'a str,
-    capabilities: DapCapabilities,
-) -> (
-    SerialPort<'a, UsbBus>,
-    CmsisDap<'a, UsbBus, CmsisDapCommandInner, MAX_PACKET_SIZE>,
-    UsbDevice<'a, UsbBus>,
-)
-where
-    CmsisDapCommandInner: rust_dap::CmsisDapCommandInner,
-{
-    initialize_usb_with_identity(
-        io,
-        usb_allocator,
-        UsbIdentity {
-            serial,
-            ..UsbIdentity::default()
-        },
-        capabilities,
-    )
-}
-
-/// Initialize SWDIO, USB-UART, CMSIS-DAP and USB BUS with a board specific
-/// USB device identity (VID/PID, manufacturer, product and serial strings).
-pub fn initialize_usb_with_identity<'a, CmsisDapCommandInner, const MAX_PACKET_SIZE: usize>(
-    io: CmsisDapCommandInner,
-    usb_allocator: &'a PicoUsbBusAllocator,
-    identity: UsbIdentity<'a>,
-    capabilities: DapCapabilities,
-) -> (
-    SerialPort<'a, UsbBus>,
-    CmsisDap<'a, UsbBus, CmsisDapCommandInner, MAX_PACKET_SIZE>,
-    UsbDevice<'a, UsbBus>,
-)
-where
-    CmsisDapCommandInner: rust_dap::CmsisDapCommandInner,
-{
-    let usb_serial = SerialPort::new(usb_allocator);
-    let usb_dap = CmsisDap::new(usb_allocator, io, capabilities);
-    let usb_bus = UsbDeviceBuilder::new(usb_allocator, identity.vid_pid)
-        .manufacturer(identity.manufacturer)
-        .product(identity.product)
-        .serial_number(identity.serial)
-        .device_class(USB_CLASS_MISCELLANEOUS)
-        .device_class(USB_SUBCLASS_COMMON)
-        .device_protocol(USB_PROTOCOL_IAD)
-        .composite_with_iads()
-        .max_packet_size_0(64)
-        .build();
-    (usb_serial, usb_dap, usb_bus)
 }
