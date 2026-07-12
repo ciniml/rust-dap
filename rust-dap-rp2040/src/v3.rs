@@ -133,3 +133,227 @@ where
         .build();
     (usb_serial, usb_dap, usb_bus)
 }
+
+/// v3 adapters for the existing PIO transports.
+///
+/// These delegate to the legacy `SwdIo`/`JtagIo` implementations so that PIO
+/// builds run on the v3 dispatcher today; the PIO internals will move to a
+/// native `DapTransport` implementation (with runtime SWD/JTAG switching on
+/// shared pins) when the legacy trait stack is removed.
+#[cfg(not(feature = "bitbang"))]
+mod pio_adapter {
+    use crate::pio::{jtag::JtagIoSet as PioJtagIoSet, swd::SwdIoSet as PioSwdIoSet};
+    use rust_dap::v3::{
+        ActivePort, ConnectPort, DapCapabilities, DapConfig, DapError, DapTransport,
+        JtagSequenceInfo, SwdRequest, SwjPins,
+    };
+    use rust_dap::{CmsisDapCommandInner, CmsisDapConfig, JtagIo, JtagIoConfig, SwdIo, SwdIoConfig};
+
+    fn legacy_swd_config(config: &DapConfig) -> SwdIoConfig {
+        SwdIoConfig {
+            clock_wait_cycles: config.swd.clock_wait_cycles,
+            idle_cycles: config.swd.idle_cycles,
+            turn_around_cycles: config.swd.turn_around_cycles,
+            always_generate_data_phase: config.swd.always_generate_data_phase,
+        }
+    }
+
+    fn legacy_jtag_config(config: &DapConfig) -> JtagIoConfig {
+        let mut ir_length = [0u8; 256];
+        ir_length[..config.jtag.ir_length.len()].copy_from_slice(&config.jtag.ir_length);
+        JtagIoConfig {
+            clock_wait_cycles: config.jtag.clock_wait_cycles,
+            device_count: config.jtag.device_count,
+            ir_length,
+            idle_cycles: config.jtag.idle_cycles,
+        }
+    }
+
+    fn legacy_config(config: &DapConfig) -> CmsisDapConfig {
+        CmsisDapConfig {
+            swdio: legacy_swd_config(config),
+            jtag: legacy_jtag_config(config),
+            retry_count: config.retry_count,
+            match_mask: config.match_mask,
+            match_retry_count: config.match_retry_count,
+            capabilities: rust_dap::DapCapabilities::empty(),
+        }
+    }
+
+    impl<C, D, E> DapTransport for PioSwdIoSet<C, D, E> {
+        fn capabilities(&self) -> DapCapabilities {
+            DapCapabilities::SWD
+        }
+
+        fn connect(
+            &mut self,
+            port: ConnectPort,
+            _config: &DapConfig,
+        ) -> Result<ActivePort, DapError> {
+            match port {
+                ConnectPort::Default | ConnectPort::Swd => {
+                    SwdIo::connect(self);
+                    Ok(ActivePort::Swd)
+                }
+                ConnectPort::Jtag => Err(DapError::NotSupported),
+            }
+        }
+
+        fn disconnect(&mut self, _config: &DapConfig) -> Result<(), DapError> {
+            SwdIo::disconnect(self);
+            Ok(())
+        }
+
+        fn swj_sequence(
+            &mut self,
+            config: &DapConfig,
+            count: usize,
+            data: &[u8],
+        ) -> Result<(), DapError> {
+            SwdIo::swj_sequence(self, &legacy_swd_config(config), count, data);
+            Ok(())
+        }
+
+        fn swj_pins(
+            &mut self,
+            config: &DapConfig,
+            output: SwjPins,
+            select: SwjPins,
+            wait_us: u32,
+        ) -> Result<SwjPins, DapError> {
+            CmsisDapCommandInner::swj_pins(
+                self,
+                &legacy_config(config),
+                output.bits(),
+                select.bits(),
+                wait_us,
+            )
+            .map(SwjPins::from_bits_truncate)
+        }
+
+        fn swj_clock(&mut self, config: &mut DapConfig, frequency_hz: u32) -> Result<(), DapError> {
+            let mut legacy = legacy_swd_config(config);
+            SwdIo::swj_clock(self, &mut legacy, frequency_hz)
+        }
+
+        fn swd_transfer(
+            &mut self,
+            config: &DapConfig,
+            request: SwdRequest,
+            data: u32,
+        ) -> Result<u32, DapError> {
+            SwdIo::swd_transfer(self, &legacy_swd_config(config), request, data)
+        }
+
+        fn swd_read_bits(
+            &mut self,
+            config: &DapConfig,
+            count: usize,
+            data: &mut [u8],
+        ) -> Result<(), DapError> {
+            SwdIo::swd_read_sequence(self, &legacy_swd_config(config), count, data);
+            Ok(())
+        }
+
+        fn swd_write_bits(
+            &mut self,
+            config: &DapConfig,
+            count: usize,
+            data: &[u8],
+        ) -> Result<(), DapError> {
+            SwdIo::swd_write_sequence(self, &legacy_swd_config(config), count, data);
+            Ok(())
+        }
+
+        fn swd_output_enable(&mut self, enable: bool) -> Result<(), DapError> {
+            if enable {
+                SwdIo::enable_output(self);
+            } else {
+                SwdIo::disable_output(self);
+            }
+            Ok(())
+        }
+    }
+
+    impl<Tck, Tms, Tdi, Tdo, Trst, Srst> DapTransport
+        for PioJtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst>
+    {
+        fn capabilities(&self) -> DapCapabilities {
+            DapCapabilities::JTAG
+        }
+
+        fn connect(
+            &mut self,
+            port: ConnectPort,
+            config: &DapConfig,
+        ) -> Result<ActivePort, DapError> {
+            match port {
+                ConnectPort::Default | ConnectPort::Jtag => {
+                    JtagIo::connect(self, &legacy_jtag_config(config));
+                    Ok(ActivePort::Jtag)
+                }
+                ConnectPort::Swd => Err(DapError::NotSupported),
+            }
+        }
+
+        fn disconnect(&mut self, config: &DapConfig) -> Result<(), DapError> {
+            JtagIo::disconnect(self, &legacy_jtag_config(config));
+            Ok(())
+        }
+
+        fn swj_sequence(
+            &mut self,
+            config: &DapConfig,
+            count: usize,
+            data: &[u8],
+        ) -> Result<(), DapError> {
+            JtagIo::swj_sequence(self, &legacy_jtag_config(config), count, data);
+            Ok(())
+        }
+
+        fn swj_pins(
+            &mut self,
+            config: &DapConfig,
+            output: SwjPins,
+            select: SwjPins,
+            wait_us: u32,
+        ) -> Result<SwjPins, DapError> {
+            CmsisDapCommandInner::swj_pins(
+                self,
+                &legacy_config(config),
+                output.bits(),
+                select.bits(),
+                wait_us,
+            )
+            .map(SwjPins::from_bits_truncate)
+        }
+
+        fn swj_clock(&mut self, config: &mut DapConfig, frequency_hz: u32) -> Result<(), DapError> {
+            let mut legacy = legacy_jtag_config(config);
+            JtagIo::swj_clock(self, &mut legacy, frequency_hz)
+        }
+
+        fn jtag_transfer(
+            &mut self,
+            config: &DapConfig,
+            dap_index: u8,
+            request: SwdRequest,
+            data: u32,
+        ) -> Result<u32, DapError> {
+            JtagIo::jtag_transfer(self, &legacy_jtag_config(config), dap_index, request, data)
+        }
+
+        fn jtag_sequence(
+            &mut self,
+            config: &DapConfig,
+            info: &JtagSequenceInfo,
+            tdi_data: u64,
+        ) -> Result<Option<u64>, DapError> {
+            CmsisDapCommandInner::jtag_sequence(self, &legacy_config(config), info, tdi_data)
+        }
+
+        fn jtag_idcode(&mut self, config: &DapConfig, index: u8) -> Result<u32, DapError> {
+            JtagIo::jtag_idcode(self, &legacy_jtag_config(config), index)
+        }
+    }
+}

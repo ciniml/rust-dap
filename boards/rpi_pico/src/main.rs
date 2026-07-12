@@ -32,7 +32,7 @@ mod app {
     use hal::usb::UsbBus;
     use usb_device::bus::UsbBusAllocator;
 
-    #[cfg(not(all(feature = "swd", feature = "bitbang")))]
+    #[cfg(all(feature = "jtag", feature = "bitbang"))]
     use rust_dap::{CmsisDap, DapCapabilities};
     use usb_device::prelude::*;
     use usbd_serial::SerialPort;
@@ -41,14 +41,14 @@ mod app {
     use embedded_hal::serial::{Read, Write};
 
     use rust_dap_rp2040::line_coding::*;
-    #[cfg(not(all(feature = "swd", feature = "bitbang")))]
+    #[cfg(all(feature = "jtag", feature = "bitbang"))]
     use rust_dap_rp2040::util::initialize_usb;
     use rust_dap_rp2040::util::{
         read_usb_serial_byte_cs, write_usb_serial_byte_cs, UartConfigAndClock,
     };
-    // The bitbang SWD build uses the v3 architecture (DapTransport/Dispatcher);
-    // the PIO and JTAG builds still use the legacy trait stack until they are
-    // ported (see doc/redesign-proposal.ja.md).
+    // All SWD builds and the PIO JTAG build use the v3 architecture
+    // (DapTransport/Dispatcher); only the bitbang JTAG build remains on the
+    // legacy trait stack (see doc/redesign-proposal.ja.md).
     #[cfg(all(feature = "swd", feature = "bitbang"))]
     type SwdIoSet = rust_dap_rp2040::v3::SwdIoSet<GpioSwClk, GpioSwdIo, GpioReset>;
     #[cfg(all(feature = "swd", not(feature = "bitbang")))]
@@ -66,9 +66,9 @@ mod app {
     type IoSet = SwdIoSet;
     #[cfg(feature = "jtag")]
     type IoSet = JtagIoSet;
-    #[cfg(all(feature = "swd", feature = "bitbang"))]
+    #[cfg(not(all(feature = "jtag", feature = "bitbang")))]
     type UsbDap = rust_dap::v3::CmsisDap<'static, UsbBus, IoSet, 64>;
-    #[cfg(not(all(feature = "swd", feature = "bitbang")))]
+    #[cfg(all(feature = "jtag", feature = "bitbang"))]
     type UsbDap = CmsisDap<'static, UsbBus, IoSet, 64>;
 
     // GPIO mappings
@@ -225,6 +225,8 @@ mod app {
 
         #[cfg(all(feature = "swd", not(feature = "bitbang")))]
         let (usb_serial, usb_dap, usb_bus) = {
+            use rust_dap::v3::{DapConfig, DapIdentity};
+            use rust_dap_rp2040::util::UsbIdentity;
             // Initialize MCU reset pin.
             // RESET pin of Cortex Debug 10-pin connector is negative logic
             // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
@@ -238,67 +240,90 @@ mod app {
             reset_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
 
             let swdio = SwdIoSet::new(c.device.PIO0, swclk_pin, swdio_pin, reset_pin, &mut resets);
-            initialize_usb(
+            rust_dap_rp2040::v3::initialize_usb(
                 swdio,
                 usb_allocator,
-                "raspberry-pi-pico-swd",
-                DapCapabilities::SWD,
+                UsbIdentity {
+                    serial: "raspberry-pi-pico-swd",
+                    ..UsbIdentity::default()
+                },
+                DapConfig::new(
+                    DapIdentity {
+                        serial_number: "raspberry-pi-pico-swd",
+                        ..DapIdentity::default()
+                    },
+                    clocks.system_clock.freq().to_Hz(),
+                ),
             )
         };
 
-        #[cfg(feature = "jtag")]
+        #[cfg(all(feature = "jtag", feature = "bitbang"))]
         let (usb_serial, usb_dap, usb_bus) = {
-            let jtagio;
-            #[cfg(feature = "bitbang")]
-            {
-                use rust_dap_rp2040::{swdio_pin::PicoSwdInputPin, util::CycleDelay};
-                let tck_pin = PicoSwdInputPin::new(pins.gpio2.into_floating_input());
-                let tms_pin = PicoSwdInputPin::new(pins.gpio3.into_floating_input());
-                let tdo_pin = PicoSwdInputPin::new(pins.gpio5.into_floating_input());
-                let tdi_pin = PicoSwdInputPin::new(pins.gpio6.into_floating_input());
-                let trst_pin = PicoSwdInputPin::new(pins.gpio7.into_floating_input());
-                let srst_pin = PicoSwdInputPin::new(pins.gpio4.into_floating_input());
-                jtagio = JtagIoSet::new(
-                    tck_pin,
-                    tms_pin,
-                    tdi_pin,
-                    tdo_pin,
-                    trst_pin,
-                    srst_pin,
-                    CycleDelay {},
-                )
-            };
-            #[cfg(not(feature = "bitbang"))]
-            {
-                // PIO
-                let mut tck_pin = pins.gpio2.into_mode();
-                let mut tms_pin = pins.gpio3.into_mode();
-                let mut tdo_pin = pins.gpio5.into_mode();
-                let mut tdi_pin = pins.gpio6.into_mode();
-                let mut trst_pin = pins.gpio7.into_mode();
-                let mut srst_pin = pins.gpio4.into_mode();
-                tck_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-                tms_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-                tdo_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-                tdi_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-                trst_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-                srst_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
-                jtagio = JtagIoSet::new(
-                    c.device.PIO0,
-                    tck_pin,
-                    tms_pin,
-                    tdi_pin,
-                    tdo_pin,
-                    Some(trst_pin),
-                    Some(srst_pin),
-                    &mut resets,
-                )
-            };
+            use rust_dap_rp2040::{swdio_pin::PicoSwdInputPin, util::CycleDelay};
+            let tck_pin = PicoSwdInputPin::new(pins.gpio2.into_floating_input());
+            let tms_pin = PicoSwdInputPin::new(pins.gpio3.into_floating_input());
+            let tdo_pin = PicoSwdInputPin::new(pins.gpio5.into_floating_input());
+            let tdi_pin = PicoSwdInputPin::new(pins.gpio6.into_floating_input());
+            let trst_pin = PicoSwdInputPin::new(pins.gpio7.into_floating_input());
+            let srst_pin = PicoSwdInputPin::new(pins.gpio4.into_floating_input());
+            let jtagio = JtagIoSet::new(
+                tck_pin,
+                tms_pin,
+                tdi_pin,
+                tdo_pin,
+                trst_pin,
+                srst_pin,
+                CycleDelay {},
+            );
             initialize_usb(
                 jtagio,
                 usb_allocator,
                 "raspberry-pi-pico-jtag",
                 DapCapabilities::JTAG,
+            )
+        };
+
+        #[cfg(all(feature = "jtag", not(feature = "bitbang")))]
+        let (usb_serial, usb_dap, usb_bus) = {
+            use rust_dap::v3::{DapConfig, DapIdentity};
+            use rust_dap_rp2040::util::UsbIdentity;
+            // PIO
+            let mut tck_pin = pins.gpio2.into_mode();
+            let mut tms_pin = pins.gpio3.into_mode();
+            let mut tdo_pin = pins.gpio5.into_mode();
+            let mut tdi_pin = pins.gpio6.into_mode();
+            let mut trst_pin = pins.gpio7.into_mode();
+            let mut srst_pin = pins.gpio4.into_mode();
+            tck_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+            tms_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+            tdo_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+            tdi_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+            trst_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+            srst_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
+            let jtagio = JtagIoSet::new(
+                c.device.PIO0,
+                tck_pin,
+                tms_pin,
+                tdi_pin,
+                tdo_pin,
+                Some(trst_pin),
+                Some(srst_pin),
+                &mut resets,
+            );
+            rust_dap_rp2040::v3::initialize_usb(
+                jtagio,
+                usb_allocator,
+                UsbIdentity {
+                    serial: "raspberry-pi-pico-jtag",
+                    ..UsbIdentity::default()
+                },
+                DapConfig::new(
+                    DapIdentity {
+                        serial_number: "raspberry-pi-pico-jtag",
+                        ..DapIdentity::default()
+                    },
+                    clocks.system_clock.freq().to_Hz(),
+                ),
             )
         };
 
