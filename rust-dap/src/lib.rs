@@ -21,6 +21,7 @@ pub mod bitbang;
 mod cmsis_dap;
 mod cursor;
 mod interface;
+pub mod v3;
 
 pub use crate::cmsis_dap::*;
 pub use crate::interface::*;

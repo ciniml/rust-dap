@@ -31,9 +31,9 @@ use num_enum::{IntoPrimitive, TryFromPrimitive, TryFromPrimitiveError};
 use usb_device::class_prelude::*;
 use usb_device::Result;
 
-#[derive(IntoPrimitive, TryFromPrimitive)]
+#[derive(IntoPrimitive, TryFromPrimitive, Clone, Copy, Debug)]
 #[repr(u8)]
-enum DapCommandId {
+pub enum DapCommandId {
     Info = 0x00,
     HostStatus = 0x01,
     Connect = 0x02,
@@ -57,7 +57,7 @@ enum DapCommandId {
 
 #[derive(IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
-enum DapInfoId {
+pub(crate) enum DapInfoId {
     Vendor = 1,
     Product = 2,
     SerialNumber = 3,
@@ -238,6 +238,8 @@ pub enum DapError {
     SwdError(u8),
     InternalError,
     ExceedRetryCount,
+    /// The requested operation is not supported by this transport.
+    NotSupported,
 }
 
 impl From<TryFromPrimitiveError<DapCommandId>> for DapError {
@@ -1318,23 +1320,23 @@ where
     }
 }
 
-fn read_swd_request<C: CursorRead>(cursor: &mut C) -> SwdRequest {
+pub(crate) fn read_swd_request<C: CursorRead>(cursor: &mut C) -> SwdRequest {
     let mut buffer = [0u8; 1];
     cursor.read(&mut buffer).ok();
     unsafe { SwdRequest::from_bits_unchecked(buffer[0]) }
 }
-fn read_u16<C: CursorRead>(cursor: &mut C) -> u16 {
+pub(crate) fn read_u16<C: CursorRead>(cursor: &mut C) -> u16 {
     let mut value = [0u8; 2];
     cursor.read(&mut value).ok();
     u16::from_le_bytes(value)
 }
 
-fn read_u32<C: CursorRead>(cursor: &mut C) -> u32 {
+pub(crate) fn read_u32<C: CursorRead>(cursor: &mut C) -> u32 {
     let mut value = [0u8; 4];
     cursor.read(&mut value).ok();
     u32::from_le_bytes(value)
 }
-fn write_u32<C: CursorWrite>(cursor: &mut C, value: u32) {
+pub(crate) fn write_u32<C: CursorWrite>(cursor: &mut C, value: u32) {
     let bytes = u32::to_le_bytes(value);
     cursor.write(&bytes).ok();
 }
