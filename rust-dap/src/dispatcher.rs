@@ -20,7 +20,7 @@
 //! deal with parsed values. Retry policy, posted reads and match value/mask
 //! handling are also implemented here, once, for every transport.
 
-use super::{ActivePort, ConnectPort, DapConfig, DapTransport, MAX_JTAG_DEVICES};
+use crate::transport::{ActivePort, ConnectPort, DapConfig, DapTransport, MAX_JTAG_DEVICES};
 use crate::cmsis_dap::{
     read_swd_request, read_u16, read_u32, write_u32, DapCommandId, DapError, DapInfoId,
     JtagSequenceInfo, SwdRequest, SwjPins, DAP_ERROR, DAP_OK, DAP_TRANSFER_ERROR, DAP_TRANSFER_OK,
@@ -891,7 +891,7 @@ mod test {
     fn info_reports_identity_and_packet_size() {
         let mut t = MockTransport::swd();
         let mut d = Dispatcher::new(DapConfig {
-            identity: super::super::DapIdentity {
+            identity: crate::transport::DapIdentity {
                 vendor: "TestVendor",
                 ..Default::default()
             },

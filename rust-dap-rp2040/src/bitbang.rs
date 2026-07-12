@@ -14,18 +14,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! RP2040 glue for the rust-dap v3 architecture.
+//! Bit-banging transports over RP2040 GPIO pins.
 
-use crate::util::UsbIdentity;
 use hal::gpio::{Floating, Input, Output, Pin, PinId, PushPull};
-use hal::usb::UsbBus;
 use rp2040_hal as hal;
-use rust_dap::v3::bitbang::{BidirPin, BitBangSwd};
-use rust_dap::v3::{CmsisDap, DapConfig, Delay};
-use rust_dap::{USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON};
-use usb_device::device::{UsbDevice, UsbDeviceBuilder};
-use usb_device::class_prelude::UsbBusAllocator;
-use usbd_serial::SerialPort;
+use rust_dap::bitbang::{BidirPin, BitBangSwd, BitBangJtag};
+use rust_dap::Delay;
 
 /// Bidirectional pin backed by the rp2040-hal type-state GPIO API.
 /// Holds the pin as an enum of its two mode states, so one type covers
@@ -103,7 +97,7 @@ pub type SwdIoSet<Clk, Dio, Rst> =
     BitBangSwd<PicoBidirPin<Clk>, PicoBidirPin<Dio>, PicoBidirPin<Rst>, CortexMDelay>;
 
 /// Bit-banging JTAG transport over six RP2040 GPIO pins.
-pub type JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> = rust_dap::v3::bitbang::BitBangJtag<
+pub type JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> = BitBangJtag<
     PicoBidirPin<Tck>,
     PicoBidirPin<Tms>,
     PicoBidirPin<Tdi>,
@@ -112,35 +106,3 @@ pub type JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> = rust_dap::v3::bitbang::BitB
     PicoBidirPin<Srst>,
     CortexMDelay,
 >;
-
-/// Initialize USB-UART, v3 CMSIS-DAP and the USB device.
-///
-/// `config` carries the DAP identity and the probe core clock;
-/// `usb_identity` carries the USB VID/PID and string descriptors.
-pub fn initialize_usb<'a, T, const MAX_PACKET_SIZE: usize>(
-    transport: T,
-    usb_allocator: &'a UsbBusAllocator<UsbBus>,
-    usb_identity: UsbIdentity<'a>,
-    config: DapConfig,
-) -> (
-    SerialPort<'a, UsbBus>,
-    CmsisDap<'a, UsbBus, T, MAX_PACKET_SIZE>,
-    UsbDevice<'a, UsbBus>,
-)
-where
-    T: rust_dap::v3::DapTransport,
-{
-    let usb_serial = SerialPort::new(usb_allocator);
-    let usb_dap = CmsisDap::new(usb_allocator, transport, config);
-    let usb_bus = UsbDeviceBuilder::new(usb_allocator, usb_identity.vid_pid)
-        .manufacturer(usb_identity.manufacturer)
-        .product(usb_identity.product)
-        .serial_number(usb_identity.serial)
-        .device_class(USB_CLASS_MISCELLANEOUS)
-        .device_class(USB_SUBCLASS_COMMON)
-        .device_protocol(USB_PROTOCOL_IAD)
-        .composite_with_iads()
-        .max_packet_size_0(64)
-        .build();
-    (usb_serial, usb_dap, usb_bus)
-}

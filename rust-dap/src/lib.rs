@@ -16,10 +16,16 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod bitbang;
 mod cmsis_dap;
 mod cursor;
+mod dispatcher;
 mod interface;
-pub mod v3;
+mod transport;
+mod usb;
 
 pub use crate::cmsis_dap::*;
+pub use crate::dispatcher::Dispatcher;
 pub use crate::interface::*;
+pub use crate::transport::*;
+pub use crate::usb::CmsisDap;

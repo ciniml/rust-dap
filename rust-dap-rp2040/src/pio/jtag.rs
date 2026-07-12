@@ -21,7 +21,6 @@ use hal::{
     pio::PIOExt,
 };
 use rp2040_hal as hal;
-use rust_dap::v3::{ActivePort, ConnectPort, DapConfig, DapTransport};
 use rust_dap::*;
 pub mod pio0 {
     use crate::pio::hal::{self, gpio::FunctionPio0};

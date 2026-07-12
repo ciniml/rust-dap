@@ -18,16 +18,26 @@ use crate::line_coding::UartConfig;
 use core::result::Result;
 use hal::usb::UsbBus;
 use rp2040_hal as hal;
-use usb_device::device::UsbVidPid;
+use rust_dap::{
+    CmsisDap, DapConfig, DapTransport, USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD,
+    USB_SUBCLASS_COMMON,
+};
+use usb_device::class_prelude::UsbBusAllocator;
+use usb_device::device::{UsbDevice, UsbDeviceBuilder, UsbVidPid};
 use usb_device::UsbError;
 use usbd_serial::SerialPort;
 
 #[cfg(not(feature = "bitbang"))]
 use crate::pio::{jtag::JtagIoSet as PioJtagIoSet, pio0, swd::SwdIoSet as PioSwdIoSet};
-/// PIO SWD transport (see `crate::v3::SwdIoSet` for the bit-banging variant).
+
+/// SWD transport selected by the `bitbang` feature (PIO by default).
+#[cfg(feature = "bitbang")]
+pub use crate::bitbang::SwdIoSet;
 #[cfg(not(feature = "bitbang"))]
 pub type SwdIoSet<C, D, E> = PioSwdIoSet<pio0::Pin<C>, pio0::Pin<D>, pio0::Pin<E>>;
-/// PIO JTAG transport (see `crate::v3::JtagIoSet` for the bit-banging variant).
+/// JTAG transport selected by the `bitbang` feature (PIO by default).
+#[cfg(feature = "bitbang")]
+pub use crate::bitbang::JtagIoSet;
 #[cfg(not(feature = "bitbang"))]
 pub type JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> = PioJtagIoSet<
     pio0::Pin<Tck>,
@@ -86,4 +96,36 @@ pub struct UartConfigAndClock {
     pub config: UartConfig,
     /// UART peripheral clock frequency
     pub clock: fugit::HertzU32,
+}
+
+/// Initialize USB-UART, CMSIS-DAP and the USB device.
+///
+/// `config` carries the DAP identity and the probe core clock;
+/// `usb_identity` carries the USB VID/PID and string descriptors.
+pub fn initialize_usb<'a, T, const MAX_PACKET_SIZE: usize>(
+    transport: T,
+    usb_allocator: &'a UsbBusAllocator<UsbBus>,
+    usb_identity: UsbIdentity<'a>,
+    config: DapConfig,
+) -> (
+    SerialPort<'a, UsbBus>,
+    CmsisDap<'a, UsbBus, T, MAX_PACKET_SIZE>,
+    UsbDevice<'a, UsbBus>,
+)
+where
+    T: DapTransport,
+{
+    let usb_serial = SerialPort::new(usb_allocator);
+    let usb_dap = CmsisDap::new(usb_allocator, transport, config);
+    let usb_bus = UsbDeviceBuilder::new(usb_allocator, usb_identity.vid_pid)
+        .manufacturer(usb_identity.manufacturer)
+        .product(usb_identity.product)
+        .serial_number(usb_identity.serial)
+        .device_class(USB_CLASS_MISCELLANEOUS)
+        .device_class(USB_SUBCLASS_COMMON)
+        .device_protocol(USB_PROTOCOL_IAD)
+        .composite_with_iads()
+        .max_packet_size_0(64)
+        .build();
+    (usb_serial, usb_dap, usb_bus)
 }

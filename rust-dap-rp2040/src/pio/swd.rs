@@ -16,7 +16,6 @@
 
 use cortex_m::asm;
 use pio::Program;
-use rust_dap::v3::{ActivePort, ConnectPort, DapConfig, DapTransport, SwdConfig};
 use rust_dap::*;
 // use rust_dap::{SwdIo, SwdIoConfig, SwdRequest, DapError};
 // use rust_dap::{DAP_TRANSFER_OK, DAP_TRANSFER_WAIT, DAP_TRANSFER_FAULT, /* DAP_TRANSFER_ERROR, */ DAP_TRANSFER_MISMATCH};

@@ -19,8 +19,8 @@
 
 use embedded_hal::digital::v2::ToggleableOutputPin;
 use panic_halt as _;
-use rust_dap::v3::bitbang::BitBangSwd;
-use rust_dap::v3::{CmsisDap, DapConfig, DapIdentity, Delay};
+use rust_dap::bitbang::BitBangSwd;
+use rust_dap::{CmsisDap, DapConfig, DapIdentity, Delay};
 use rust_dap::{USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON};
 
 use bsp::{entry, hal, pac};

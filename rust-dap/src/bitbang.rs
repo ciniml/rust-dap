@@ -14,7 +14,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! GPIO bit-banging SWD transport for the v3 architecture.
+//! GPIO bit-banging SWD/JTAG transports.
 //!
 //! Pins are abstracted by [`BidirPin`]: one type per pin, with direction
 //! switching as a method call instead of the embedded-hal 0.2 `IoPin`
@@ -22,9 +22,7 @@
 //! no embedded-hal dependency, so HAL crates are free to implement it on
 //! whatever pin representation they like (type-state wrapper, DynPin, ...).
 
-use super::{
-    ActivePort, ConnectPort, DapConfig, DapTransport, Delay,
-};
+use crate::transport::{ActivePort, ConnectPort, DapConfig, DapTransport, Delay};
 use crate::cmsis_dap::{
     DapCapabilities, DapError, SwdRequest, SwjPins, DAP_TRANSFER_FAULT, DAP_TRANSFER_MISMATCH,
     DAP_TRANSFER_OK, DAP_TRANSFER_WAIT,

@@ -14,10 +14,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! USB class wrapper for the v3 architecture. Handles packet framing and
-//! delegates command execution to [`Dispatcher`].
+//! USB class wrapper. Handles packet framing and delegates command
+//! execution to [`Dispatcher`].
 
-use super::{DapConfig, DapTransport, Dispatcher};
+use crate::dispatcher::Dispatcher;
+use crate::transport::{DapConfig, DapTransport};
 use crate::cmsis_dap::{DapCommandId, DapError};
 use crate::interface::CmsisDapInterface;
 use num_enum::TryFromPrimitive;

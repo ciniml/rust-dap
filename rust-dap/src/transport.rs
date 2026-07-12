@@ -14,9 +14,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Next generation CMSIS-DAP architecture (see doc/redesign-proposal.ja.md).
+//! CMSIS-DAP transport abstraction and configuration
+//! (see doc/redesign-proposal.ja.md).
 //!
-//! Design points compared to the legacy trait stack:
+//! Design points compared to the pre-0.3 trait stack:
 //! - Command parsing and protocol policy (retries, posted reads, match
 //!   value/mask) live entirely in [`Dispatcher`], which is concrete core
 //!   code, not a trait.
@@ -26,16 +27,7 @@
 //!   `DAP_Connect(port)` switches between them at runtime.
 //! - No blanket impls, so downstream crates can override any subset.
 
-pub mod bitbang;
-mod dispatcher;
-mod usb;
-
-pub use dispatcher::Dispatcher;
-pub use usb::CmsisDap;
-
-pub use crate::cmsis_dap::{
-    DapCapabilities, DapError, JtagSequenceInfo, SwdRequest, SwjPins,
-};
+use crate::cmsis_dap::{DapCapabilities, DapError, JtagSequenceInfo, SwdRequest, SwjPins};
 
 /// Maximum number of devices on a JTAG scan chain supported by [`JtagConfig`].
 pub const MAX_JTAG_DEVICES: usize = 8;

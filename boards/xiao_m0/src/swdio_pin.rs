@@ -1,4 +1,4 @@
-use rust_dap::v3::bitbang::BidirPin;
+use rust_dap::bitbang::BidirPin;
 use xiao_m0::hal::gpio::v2::pin::{Floating, Input, Output, Pin, PinId, PushPull};
 
 /// Bidirectional pin backed by the atsamd-hal type-state GPIO API.
