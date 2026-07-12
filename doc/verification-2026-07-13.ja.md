@@ -33,3 +33,20 @@
 - UART ピンはデフォルト構成で GPIO0/GPIO1(UART0)。GPIO4/5 は uart1 feature
   (未マージの WIP)の割当てであり、SWD の RESET ピン(GPIO4)と衝突するため
   デフォルト構成では使用しない。
+
+## 追記: v3 アーキテクチャの実機検証 (2026-07-13)
+
+対象コミット: ccf2e8c(v3コア)/ 1f37d9e(rpi_pico bitbang+swd の v3 移行)。
+`--features bitbang` ビルド(v3 `BitBangSwd` + `Dispatcher` + `v3::CmsisDap`)を
+同一構成のプローブ/ターゲット/GPIO0-1 ジャンパで検証した。
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | USB 列挙・probe-rs 認識(v3 Dispatcher の DAP_Info 経路) | OK |
+| 2 | SWD 接続と bootrom / CHIP_ID 読み出し(0x20002927) | OK |
+| 3 | 4KB RAM 読み出し(v3 bitbang トランスポート) | OK(1024 ワード) |
+| 4 | UART ループバック 8KB @115200(v3 CmsisDap と CDC の共存) | 全バイト一致 |
+
+旧アーキテクチャ(PIO 構成)と v3 bitbang 構成の双方が同一ハードウェアで
+動作することを確認した。残りの移行ステップ(PIO/JTAG の v3 移植、旧トレイト削除)は
+doc/redesign-proposal.ja.md の §5 を参照。
