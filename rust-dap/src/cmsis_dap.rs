@@ -171,8 +171,6 @@ pub trait SwdIo {
     fn disable_output(&mut self);
 }
 
-pub trait SwjIo {}
-
 pub trait JtagIo {
     fn connect(&mut self, config: &JtagIoConfig);
     fn disconnect(&mut self, config: &JtagIoConfig);
@@ -440,10 +438,19 @@ pub trait CmsisDapCommandInner {
     ) -> core::result::Result<(usize, usize), DapError>;
 }
 
+/// Placeholder identification strings reported by DAP_Info.
+/// TODO: make these configurable (e.g. via CmsisDapConfig) instead of
+/// compile-time constants of this crate.
+pub const DAP_INFO_VENDOR: &str = "Hoge";
+pub const DAP_INFO_PRODUCT: &str = "Fuga";
+pub const DAP_INFO_SERIAL_NUMBER: &str = "Piyo";
+pub const DAP_INFO_CMSIS_DAP_VERSION: &str = "2.00";
+
 pub trait CmsisDapCommand {
     fn dap_info(
         &self,
         capabilities: DapCapabilities,
+        max_packet_size: u16,
         request: &[u8],
         response: &mut [u8],
     ) -> core::result::Result<(usize, usize), DapError>;
@@ -609,6 +616,7 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
     fn dap_info(
         &self,
         capabilities: DapCapabilities,
+        max_packet_size: u16,
         request: &[u8],
         response: &mut [u8],
     ) -> core::result::Result<(usize, usize), DapError> {
@@ -619,10 +627,12 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
         let length: usize = {
             let buffer = &mut response[1..];
             match id {
-                DapInfoId::Vendor => write_buffer(buffer, "Hoge".as_bytes())?,
-                DapInfoId::Product => write_buffer(buffer, "Fuga".as_bytes())?,
-                DapInfoId::SerialNumber => write_buffer(buffer, "Piyo".as_bytes())?,
-                DapInfoId::CmsisDapVer => write_buffer(buffer, "2.00".as_bytes())?,
+                DapInfoId::Vendor => write_buffer(buffer, DAP_INFO_VENDOR.as_bytes())?,
+                DapInfoId::Product => write_buffer(buffer, DAP_INFO_PRODUCT.as_bytes())?,
+                DapInfoId::SerialNumber => write_buffer(buffer, DAP_INFO_SERIAL_NUMBER.as_bytes())?,
+                DapInfoId::CmsisDapVer => {
+                    write_buffer(buffer, DAP_INFO_CMSIS_DAP_VERSION.as_bytes())?
+                }
                 DapInfoId::Capabilities => {
                     let bits = capabilities.bits().to_le_bytes();
                     buffer[0] = bits[0];
@@ -640,8 +650,7 @@ impl<Inner: CmsisDapCommandInner> CmsisDapCommand for Inner {
                     1
                 }
                 DapInfoId::PacketSize => {
-                    buffer[0] = 64;
-                    buffer[1] = 0;
+                    buffer[0..2].copy_from_slice(&max_packet_size.to_le_bytes());
                     2
                 }
                 _ => 0,
@@ -1132,7 +1141,7 @@ where
             ..Default::default()
         };
         CmsisDap {
-            inner: CmsisDapInterface::new(alloc, 64),
+            inner: CmsisDapInterface::new(alloc, MAX_PACKET_SIZE as u16),
             io,
             next_in_packet: [0; MAX_PACKET_SIZE],
             next_in_packet_size: None,
@@ -1165,10 +1174,12 @@ where
                 let response_body = &mut response[1..];
 
                 let (request_processed, response_generated) = match command {
-                    DapCommandId::Info => {
-                        self.io
-                            .dap_info(self.config.capabilities, request, response_body)
-                    }
+                    DapCommandId::Info => self.io.dap_info(
+                        self.config.capabilities,
+                        MAX_PACKET_SIZE as u16,
+                        request,
+                        response_body,
+                    ),
                     DapCommandId::HostStatus => self.io.dap_host_status(request, response_body),
                     DapCommandId::Connect => {
                         self.io.dap_connect(&self.config, request, response_body)
@@ -1379,6 +1390,7 @@ mod test {
         fn dap_info(
             &self,
             _capabilities: DapCapabilities,
+            _max_packet_size: u16,
             _request: &[u8],
             _response: &mut [u8],
         ) -> core::result::Result<(usize, usize), DapError> {

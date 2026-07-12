@@ -130,6 +130,25 @@ pub struct UartConfigAndClock {
 
 type PicoUsbBusAllocator = UsbBusAllocator<UsbBus>;
 
+/// USB device identity used by [`initialize_usb_with_identity`].
+pub struct UsbIdentity<'a> {
+    pub vid_pid: UsbVidPid,
+    pub manufacturer: &'a str,
+    pub product: &'a str,
+    pub serial: &'a str,
+}
+
+impl Default for UsbIdentity<'static> {
+    fn default() -> Self {
+        Self {
+            vid_pid: UsbVidPid(0x6666, 0x4444),
+            manufacturer: "fugafuga.org",
+            product: "CMSIS-DAP",
+            serial: "rust-dap",
+        }
+    }
+}
+
 /// Initialize SWDIO, USB-UART, CMSIS-DAP and USB BUS.
 pub fn initialize_usb<'a, CmsisDapCommandInner, const MAX_PACKET_SIZE: usize>(
     io: CmsisDapCommandInner,
@@ -144,12 +163,38 @@ pub fn initialize_usb<'a, CmsisDapCommandInner, const MAX_PACKET_SIZE: usize>(
 where
     CmsisDapCommandInner: rust_dap::CmsisDapCommandInner,
 {
+    initialize_usb_with_identity(
+        io,
+        usb_allocator,
+        UsbIdentity {
+            serial,
+            ..UsbIdentity::default()
+        },
+        capabilities,
+    )
+}
+
+/// Initialize SWDIO, USB-UART, CMSIS-DAP and USB BUS with a board specific
+/// USB device identity (VID/PID, manufacturer, product and serial strings).
+pub fn initialize_usb_with_identity<'a, CmsisDapCommandInner, const MAX_PACKET_SIZE: usize>(
+    io: CmsisDapCommandInner,
+    usb_allocator: &'a PicoUsbBusAllocator,
+    identity: UsbIdentity<'a>,
+    capabilities: DapCapabilities,
+) -> (
+    SerialPort<'a, UsbBus>,
+    CmsisDap<'a, UsbBus, CmsisDapCommandInner, MAX_PACKET_SIZE>,
+    UsbDevice<'a, UsbBus>,
+)
+where
+    CmsisDapCommandInner: rust_dap::CmsisDapCommandInner,
+{
     let usb_serial = SerialPort::new(usb_allocator);
     let usb_dap = CmsisDap::new(usb_allocator, io, capabilities);
-    let usb_bus = UsbDeviceBuilder::new(usb_allocator, UsbVidPid(0x6666, 0x4444))
-        .manufacturer("fugafuga.org")
-        .product("CMSIS-DAP")
-        .serial_number(serial)
+    let usb_bus = UsbDeviceBuilder::new(usb_allocator, identity.vid_pid)
+        .manufacturer(identity.manufacturer)
+        .product(identity.product)
+        .serial_number(identity.serial)
         .device_class(USB_CLASS_MISCELLANEOUS)
         .device_class(USB_SUBCLASS_COMMON)
         .device_protocol(USB_PROTOCOL_IAD)

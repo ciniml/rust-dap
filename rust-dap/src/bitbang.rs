@@ -15,7 +15,6 @@
 // limitations under the License.
 
 use crate::cmsis_dap::*;
-use bitflags::bitflags;
 use bitvec::slice::BitSlice;
 use embedded_hal::digital::v2::{InputPin, IoPin, OutputPin, PinState};
 
