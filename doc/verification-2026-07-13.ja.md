@@ -66,3 +66,19 @@ doc/redesign-proposal.ja.md の §5 を参照。
 ベンチマーク結果は旧スタック(Read 180KB/s / Write 164KB/s)より向上した。
 v3 Dispatcher のコマンド処理経路が旧ブランケット実装チェーンより軽いことによる。
 これで rpi_pico の jtag+bitbang を除く全構成が v3 で実機動作確認済みとなった。
+
+## 追記3: レガシー削除後(0.3.0)の実機回帰検証 (2026-07-13)
+
+対象コミット: bd2eb2d(レガシートレイトスタック削除、PIO の DapTransport ネイティブ化)。
+デフォルト構成(SWD + PIO)のレガシーフリーファームウェアで回帰確認。
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | USB 列挙・probe-rs 認識 | OK |
+| 2 | SWD 接続・CHIP_ID 読み出し(0x20002927) | OK |
+| 3 | RAM ベンチマーク(ベリファイ付き) | Read 204KB/s / Write 225KB/s(アダプタ版と同等) |
+| 4 | UART ループバック 64KB @921600bps + DAP ベンチマーク同時実行 | 全バイト一致 |
+
+再設計提案のステップ1〜4が完了(v0.3.0)。残: §4 ボードレイヤ分離(boot2 移動、
+UartBridge 共通化、workspace 化)、共有ピンでの SWD/JTAG 実行時切替(swj 構成)、
+xiao_m0 の RTIC 化。
