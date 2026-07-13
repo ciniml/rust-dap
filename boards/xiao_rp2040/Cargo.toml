@@ -30,6 +30,7 @@ rust-dap-rp2040 = { path = "../../rust-dap-rp2040" }
 panic-halt = "0.2"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
+rp2040-boot2 = "0.2"
 cortex-m-rtic = "1.0"
 
 usb-device = { version = "0.2", features = ["control-buffer-256"]}

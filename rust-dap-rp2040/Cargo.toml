@@ -11,7 +11,11 @@ license = "Apache-2.0"
 bitbang = [] # Use bit-banging transports instead of PIO
 set_clock = [
 ] # Enable swj_clock implementation for bitbang and PIO and set appropriate SWCLK frequency. Otherwise, SWCLK is fixed to 15.625[MHz]
-ram-exec = [] # Execute-in-SRAM support
+ram-exec = [] # Execute-in-SRAM support (linker script only; pick boot2-ram-memcpy or provide your own boot2)
+# Transitional: library-provided boot2 blocks. Boards should define their own
+# BOOT2_FIRMWARE static instead (the right block depends on the flash chip).
+boot2-w25q080 = []
+boot2-ram-memcpy = []
 defmt = ["dep:defmt"]
 
 [dependencies]

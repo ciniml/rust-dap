@@ -17,6 +17,28 @@
 #![no_std]
 #![no_main]
 
+/// The linker will place this boot block at the start of our program image.
+/// We need this to help the ROM bootloader get our code up and running.
+/// W25Q080 matches the flash chip of this board; execute-in-SRAM builds use
+/// the RAM_MEMCPY loader instead.
+#[cfg(feature = "ram-exec")]
+#[link_section = ".boot2"]
+#[no_mangle]
+#[used]
+pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_RAM_MEMCPY;
+#[cfg(not(feature = "ram-exec"))]
+#[link_section = ".boot2"]
+#[no_mangle]
+#[used]
+pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
+
+/// `#[rtic::app]` bypasses `#[rp2040_hal::entry]`, so the SIO spinlocks that
+/// the hal entry point would normally release must be released here.
+#[cortex_m_rt::pre_init]
+unsafe fn pre_init() {
+    rust_dap_rp2040::clear_spinlocks();
+}
+
 #[rtic::app(device = rp_pico::hal::pac, peripherals = true, dispatchers = [PIO1_IRQ_0])]
 mod app {
     #[cfg(not(feature = "defmt"))]

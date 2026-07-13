@@ -499,6 +499,7 @@ dependencies = [
  "nb 0.1.3",
  "panic-halt",
  "rp-pico",
+ "rp2040-boot2",
  "rust-dap",
  "rust-dap-rp2040",
  "usb-device",

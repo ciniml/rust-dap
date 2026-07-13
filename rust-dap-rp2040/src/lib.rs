@@ -15,19 +15,18 @@
 // limitations under the License.
 
 #![no_std]
-#![no_main]
 
-/// The linker will place this boot block at the start of our program image. We
-/// need this to help the ROM bootloader get our code up and running.
-#[cfg(feature = "ram-exec")]
+// Transitional compatibility: the boot2 block is the board's responsibility
+// (it depends on the flash chip), so boards should provide their own
+// BOOT2_FIRMWARE static. These features keep the old library-provided
+// behavior available during migration.
+#[cfg(feature = "boot2-ram-memcpy")]
 #[link_section = ".boot2"]
 #[no_mangle]
 #[used]
 pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_RAM_MEMCPY;
 
-/// The linker will place this boot block at the start of our program image. We
-/// need this to help the ROM bootloader get our code up and running.
-#[cfg(not(feature = "ram-exec"))]
+#[cfg(feature = "boot2-w25q080")]
 #[link_section = ".boot2"]
 #[no_mangle]
 #[used]
@@ -39,12 +38,14 @@ pub mod line_coding;
 pub mod pio;
 pub mod util;
 
-use cortex_m_rt::pre_init;
-
-#[pre_init]
-unsafe fn pre_init() -> () {
-    // clear_locks : this is what expected to be done by #[rp2040_hal::entry] .
-    // but because we are gonna use #[rtic::app(...)] , we ought to do it here.
+/// Releases all SIO spinlocks. `#[rp2040_hal::entry]` does this on startup,
+/// but applications built on `#[rtic::app]` bypass that entry point, so they
+/// must call this from a `#[pre_init]` handler instead.
+///
+/// # Safety
+/// Must only be called before interrupts are enabled and before any spinlock
+/// is in use (i.e. from `#[pre_init]`).
+pub unsafe fn clear_spinlocks() {
     const SIO_BASE: u32 = 0xd0000000;
     const SPINLOCK0_PTR: *mut u32 = (SIO_BASE + 0x100) as *mut u32;
     const SPINLOCK_COUNT: usize = 32;

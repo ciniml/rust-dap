@@ -534,6 +534,7 @@ dependencies = [
  "panic-halt",
  "panic-probe",
  "rp-pico",
+ "rp2040-boot2",
  "rust-dap",
  "rust-dap-rp2040",
  "usb-device",
