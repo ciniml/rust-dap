@@ -145,3 +145,23 @@ halt/step/レジスタ)。
 役割排他(Views)であり、アプリからの任意 USB クラス追加は不可(HIDv2 = DAP v1
 相当のみ抜け道)。カーネル gdbstub は USB-CDC ではなく物理 UART 専用。詳細は
 doc/gdb-debugger-proposal.ja.md §8。
+
+## 追記7: GDB デバッガ M2(Cortex-M コア制御)の実機検証 (2026-07-14)
+
+対象コミット: 283077c(arm-debug M2)+ M2 self-test firmware。
+m1_selftest ファームに halt/step/PC 読み出しを追加し、実ターゲットで検証:
+
+```
+M1 dpidr=0x0bc12477 chipid=0x20002927 OK | M2 halt OK pc0=0x00000030 pc1=0x00000032 stepped=true halted=true OK
+```
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | コア halt(DHCSR C_HALT + S_HALT ポーリング) | OK |
+| 2 | PC 読み出し(DCRSR/DCRDR、pc0=0x00000030) | OK |
+| 3 | single-step(C_STEP + C_MASKINTS)で PC が 0x30→0x32 に前進 | OK(Thumb 1 命令 = 2 バイト) |
+| 4 | step 後も halt 維持 / resume | OK |
+
+arm-debug のホストテスト13件(M1: 8, M2: 5)が実シリコンで裏付けられ、GDB
+デバッガ M2(Cortex-M コア制御: halt/step/レジスタ)完了。次は M3(gdbstub 統合、
+USB-CDC 上で GDB `target remote` から RAM デバッグ)。
