@@ -86,7 +86,7 @@ impl DapTransport for MockSwd {
         count: usize,
         data: &[u8],
     ) -> Result<(), DapError> {
-        let bytes = ((count + 7) / 8).min(data.len());
+        let bytes = count.div_ceil(8).min(data.len());
         self.written_bits.push((count, data[..bytes].to_vec()));
         Ok(())
     }
@@ -359,4 +359,225 @@ fn wait_ack_retries_then_gives_up() {
     }
     let mut arm = ArmDebug::new(AlwaysWait, DapConfig::default());
     assert_eq!(arm.read_word(0x2000_0000), Err(ArmError::Wait));
+}
+
+////////////////////////////////////////////////////////////////////////////
+// M2: Cortex-M core-debug tests, using a memory-backed mock that models the
+// MEM-AP posted-read pipeline plus DHCSR halt / DCRSR core-register behavior.
+////////////////////////////////////////////////////////////////////////////
+
+use super::cortex_m as cm;
+use std::collections::HashMap;
+
+struct MemMock {
+    mem: HashMap<u32, u32>,
+    core_regs: [u32; 20],
+    halted: bool,
+    // MEM-AP pipeline state.
+    tar: u32,
+    pending: u32, // value a posted AP read will surface next
+    // DCRSR latch for the pending core-register transfer.
+    dcrdr: u32,
+}
+
+impl MemMock {
+    fn new() -> Self {
+        Self {
+            mem: HashMap::new(),
+            core_regs: [0; 20],
+            halted: false,
+            tar: 0,
+            pending: 0,
+            dcrdr: 0,
+        }
+    }
+
+    fn read_mem(&mut self, addr: u32) -> u32 {
+        match addr {
+            cm::DHCSR => {
+                let mut v = cm::C_DEBUGEN | cm::S_REGRDY; // regrdy always ready in the mock
+                if self.halted {
+                    v |= cm::S_HALT;
+                }
+                v
+            }
+            cm::DCRDR => self.dcrdr,
+            other => *self.mem.get(&other).unwrap_or(&0),
+        }
+    }
+
+    fn write_mem(&mut self, addr: u32, val: u32) {
+        match addr {
+            cm::DHCSR => {
+                // Only honor writes carrying the debug key.
+                if val & 0xFFFF_0000 == cm::DBGKEY {
+                    self.halted = val & cm::C_HALT != 0 || (val & cm::C_STEP != 0);
+                }
+            }
+            cm::DCRDR => self.dcrdr = val,
+            cm::DCRSR => {
+                let reg = (val & 0x7f) as usize;
+                if val & cm::DCRSR_REGWNR != 0 {
+                    // Register write: value came from DCRDR.
+                    if reg < self.core_regs.len() {
+                        self.core_regs[reg] = self.dcrdr;
+                    }
+                } else {
+                    // Register read: latch value into DCRDR.
+                    self.dcrdr = *self.core_regs.get(reg).unwrap_or(&0);
+                }
+            }
+            other => {
+                self.mem.insert(other, val);
+            }
+        }
+    }
+}
+
+impl DapTransport for MemMock {
+    fn capabilities(&self) -> DapCapabilities {
+        DapCapabilities::SWD
+    }
+    fn connect(&mut self, _p: ConnectPort, _c: &DapConfig) -> Result<ActivePort, DapError> {
+        Ok(ActivePort::Swd)
+    }
+    fn disconnect(&mut self, _c: &DapConfig) -> Result<(), DapError> {
+        Ok(())
+    }
+    fn swj_sequence(&mut self, _c: &DapConfig, _n: usize, _d: &[u8]) -> Result<(), DapError> {
+        Ok(())
+    }
+    fn swj_pins(
+        &mut self,
+        _c: &DapConfig,
+        _o: SwjPins,
+        _s: SwjPins,
+        _w: u32,
+    ) -> Result<SwjPins, DapError> {
+        Ok(SwjPins::empty())
+    }
+    fn swj_clock(&mut self, _c: &mut DapConfig, _hz: u32) -> Result<(), DapError> {
+        Ok(())
+    }
+    fn swd_write_bits(&mut self, _c: &DapConfig, _n: usize, _d: &[u8]) -> Result<(), DapError> {
+        Ok(())
+    }
+    fn swd_output_enable(&mut self, _e: bool) -> Result<(), DapError> {
+        Ok(())
+    }
+    fn swd_transfer(
+        &mut self,
+        _c: &DapConfig,
+        request: SwdRequest,
+        data: u32,
+    ) -> Result<u32, DapError> {
+        let ap = request.contains(SwdRequest::APnDP);
+        let rnw = request.contains(SwdRequest::RnW);
+        let addr = ((request.contains(SwdRequest::A3) as u8) << 3)
+            | ((request.contains(SwdRequest::A2) as u8) << 2);
+        if ap {
+            match (rnw, addr) {
+                (false, AP_CSW) => Ok(0),
+                (false, AP_TAR) => {
+                    self.tar = data;
+                    Ok(0)
+                }
+                (false, AP_DRW) => {
+                    self.write_mem(self.tar, data);
+                    self.tar = self.tar.wrapping_add(4);
+                    Ok(0)
+                }
+                (true, AP_DRW) => {
+                    // Posted read: return the previously-pending value, latch
+                    // the current location as the new pending value.
+                    let out = self.pending;
+                    self.pending = self.read_mem(self.tar);
+                    self.tar = self.tar.wrapping_add(4);
+                    Ok(out)
+                }
+                _ => Ok(0),
+            }
+        } else {
+            match (rnw, addr) {
+                (false, _) => Ok(0),             // DP writes (SELECT etc.)
+                (true, 0xC) => Ok(self.pending), // RDBUFF surfaces the pending read
+                (true, _) => Ok(0),
+            }
+        }
+    }
+    fn jtag_transfer(
+        &mut self,
+        _c: &DapConfig,
+        _i: u8,
+        _r: SwdRequest,
+        _d: u32,
+    ) -> Result<u32, DapError> {
+        Err(DapError::NotSupported)
+    }
+    fn jtag_sequence(
+        &mut self,
+        _c: &DapConfig,
+        _i: &JtagSequenceInfo,
+        _t: u64,
+    ) -> Result<Option<u64>, DapError> {
+        Err(DapError::NotSupported)
+    }
+}
+
+#[test]
+fn memmock_read_write_roundtrip() {
+    // Sanity: the memory-backed mock models the posted-read pipeline correctly.
+    let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());
+    arm.write_word(0x2000_0000, 0xcafe_babe).unwrap();
+    arm.write_word(0x2000_0004, 0x1234_5678).unwrap();
+    assert_eq!(arm.read_word(0x2000_0000).unwrap(), 0xcafe_babe);
+    assert_eq!(arm.read_word(0x2000_0004).unwrap(), 0x1234_5678);
+    let mut buf = [0u32; 2];
+    arm.read_words(0x2000_0000, &mut buf).unwrap();
+    assert_eq!(buf, [0xcafe_babe, 0x1234_5678]);
+}
+
+#[test]
+fn halt_resume_and_status() {
+    let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());
+    assert!(!arm.is_halted().unwrap());
+    arm.halt().unwrap();
+    assert!(arm.is_halted().unwrap());
+    arm.resume().unwrap();
+    assert!(!arm.is_halted().unwrap());
+}
+
+#[test]
+fn step_leaves_core_halted() {
+    let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());
+    arm.halt().unwrap();
+    arm.step().unwrap();
+    assert!(arm.is_halted().unwrap());
+}
+
+#[test]
+fn core_register_read_write() {
+    let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());
+    arm.halt().unwrap();
+    // Preload PC and xPSR in the mock via write_core_reg, then read back.
+    arm.write_core_reg(cm::PC, 0x1000_0100).unwrap();
+    arm.write_core_reg(cm::XPSR, 0x0100_0000).unwrap();
+    arm.write_core_reg(cm::R0, 0xdead_0000).unwrap();
+    assert_eq!(arm.read_core_reg(cm::PC).unwrap(), 0x1000_0100);
+    assert_eq!(arm.read_core_reg(cm::XPSR).unwrap(), 0x0100_0000);
+    assert_eq!(arm.read_core_reg(cm::R0).unwrap(), 0xdead_0000);
+}
+
+#[test]
+fn dhcsr_write_requires_dbgkey() {
+    // A DHCSR write without the debug key must be ignored (mock models this):
+    // read_core_reg / halt drive DHCSR only with the key, so halting works;
+    // here we assert the mock itself rejects a keyless halt attempt via a
+    // direct write_word, proving our real code's key discipline matters.
+    let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());
+    arm.write_word(cm::DHCSR, cm::C_DEBUGEN | cm::C_HALT)
+        .unwrap(); // no key
+    assert!(!arm.is_halted().unwrap());
+    arm.halt().unwrap(); // real code supplies DBGKEY
+    assert!(arm.is_halted().unwrap());
 }

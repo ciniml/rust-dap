@@ -41,6 +41,8 @@ pub enum ArmError {
     NotSupported,
     /// Debug power-up was requested but never acknowledged.
     PowerUpTimeout,
+    /// A core-debug operation (halt/step/register access) did not complete.
+    CoreTimeout,
     /// The connected target's DPIDR/IDCODE did not look valid.
     NoTarget,
     /// Internal invariant violated.
@@ -335,6 +337,110 @@ impl<T: DapTransport> ArmDebug<T> {
         self.transport
             .capabilities()
             .contains(rust_dap::DapCapabilities::SWD)
+    }
+}
+
+/// ARMv6-M / ARMv7-M core-debug register addresses and bits (milestone M2).
+/// These are ordinary system-memory addresses reached through the MEM-AP, so
+/// the core-debug methods build directly on [`ArmDebug::read_word`] /
+/// [`ArmDebug::write_word`].
+pub mod cortex_m {
+    /// Debug Halting Control and Status Register.
+    pub const DHCSR: u32 = 0xE000_EDF0;
+    /// Debug Core Register Selector.
+    pub const DCRSR: u32 = 0xE000_EDF4;
+    /// Debug Core Register Data.
+    pub const DCRDR: u32 = 0xE000_EDF8;
+    /// Debug Exception and Monitor Control.
+    pub const DEMCR: u32 = 0xE000_EDFC;
+    /// Application Interrupt and Reset Control (SYSRESETREQ).
+    pub const AIRCR: u32 = 0xE000_ED0C;
+
+    /// Key that must be written to the top half of DHCSR for the write to take.
+    pub const DBGKEY: u32 = 0xA05F_0000;
+    pub const C_DEBUGEN: u32 = 1 << 0;
+    pub const C_HALT: u32 = 1 << 1;
+    pub const C_STEP: u32 = 1 << 2;
+    pub const C_MASKINTS: u32 = 1 << 3;
+    /// DHCSR read-side status: core-register transfer ready.
+    pub const S_REGRDY: u32 = 1 << 16;
+    /// DHCSR read-side status: core is halted.
+    pub const S_HALT: u32 = 1 << 17;
+    /// DHCSR read-side status: core is sleeping.
+    pub const S_SLEEP: u32 = 1 << 18;
+    /// DHCSR read-side status: core is locked up.
+    pub const S_LOCKUP: u32 = 1 << 19;
+
+    /// DCRSR write direction: 1 = write the register, 0 = read it.
+    pub const DCRSR_REGWNR: u32 = 1 << 16;
+
+    // Core register selector values (a subset; r0-r15 are 0..=15).
+    pub const R0: u8 = 0;
+    pub const SP: u8 = 13;
+    pub const LR: u8 = 14;
+    /// Debug return address == PC.
+    pub const PC: u8 = 15;
+    pub const XPSR: u8 = 16;
+    pub const MSP: u8 = 17;
+    pub const PSP: u8 = 18;
+}
+
+impl<T: DapTransport> ArmDebug<T> {
+    /// Enable halting debug (`C_DEBUGEN`) without changing the run state.
+    pub fn debug_enable(&mut self) -> Result<(), ArmError> {
+        self.write_word(cortex_m::DHCSR, cortex_m::DBGKEY | cortex_m::C_DEBUGEN)
+    }
+
+    /// Halt the core and wait until it reports halted.
+    pub fn halt(&mut self) -> Result<(), ArmError> {
+        self.write_word(
+            cortex_m::DHCSR,
+            cortex_m::DBGKEY | cortex_m::C_DEBUGEN | cortex_m::C_HALT,
+        )?;
+        self.wait_status(cortex_m::S_HALT)
+    }
+
+    /// Resume execution (clear halt, keep debug enabled).
+    pub fn resume(&mut self) -> Result<(), ArmError> {
+        self.write_word(cortex_m::DHCSR, cortex_m::DBGKEY | cortex_m::C_DEBUGEN)
+    }
+
+    /// Single-step one instruction with interrupts masked, then wait for halt.
+    pub fn step(&mut self) -> Result<(), ArmError> {
+        self.write_word(
+            cortex_m::DHCSR,
+            cortex_m::DBGKEY | cortex_m::C_DEBUGEN | cortex_m::C_MASKINTS | cortex_m::C_STEP,
+        )?;
+        self.wait_status(cortex_m::S_HALT)
+    }
+
+    /// Whether the core currently reports halted.
+    pub fn is_halted(&mut self) -> Result<bool, ArmError> {
+        Ok(self.read_word(cortex_m::DHCSR)? & cortex_m::S_HALT != 0)
+    }
+
+    fn wait_status(&mut self, mask: u32) -> Result<(), ArmError> {
+        for _ in 0..4096 {
+            if self.read_word(cortex_m::DHCSR)? & mask == mask {
+                return Ok(());
+            }
+        }
+        Err(ArmError::CoreTimeout)
+    }
+
+    /// Read a core register (see the `cortex_m` selector constants). The core
+    /// must be halted.
+    pub fn read_core_reg(&mut self, reg: u8) -> Result<u32, ArmError> {
+        self.write_word(cortex_m::DCRSR, reg as u32)?;
+        self.wait_status(cortex_m::S_REGRDY)?;
+        self.read_word(cortex_m::DCRDR)
+    }
+
+    /// Write a core register. The core must be halted.
+    pub fn write_core_reg(&mut self, reg: u8, value: u32) -> Result<(), ArmError> {
+        self.write_word(cortex_m::DCRDR, value)?;
+        self.write_word(cortex_m::DCRSR, reg as u32 | cortex_m::DCRSR_REGWNR)?;
+        self.wait_status(cortex_m::S_REGRDY)
     }
 }
 
