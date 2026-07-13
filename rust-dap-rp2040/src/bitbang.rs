@@ -18,7 +18,7 @@
 
 use hal::gpio::{Floating, Input, Output, Pin, PinId, PushPull};
 use rp2040_hal as hal;
-use rust_dap::bitbang::{BidirPin, BitBangSwd, BitBangJtag};
+use rust_dap::bitbang::{BidirPin, BitBangJtag, BitBangSwd};
 use rust_dap::Delay;
 
 /// Bidirectional pin backed by the rp2040-hal type-state GPIO API.

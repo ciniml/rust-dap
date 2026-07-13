@@ -7,12 +7,6 @@ license = "Apache-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[profile.release]
-debug = 2
-codegen-units = 1
-opt-level = 3
-lto = true
-
 [features]
 defmt = [
     "dep:defmt",

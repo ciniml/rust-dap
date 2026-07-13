@@ -22,11 +22,11 @@
 //! no embedded-hal dependency, so HAL crates are free to implement it on
 //! whatever pin representation they like (type-state wrapper, DynPin, ...).
 
-use crate::transport::{ActivePort, ConnectPort, DapConfig, DapTransport, Delay};
 use crate::cmsis_dap::{
     DapCapabilities, DapError, SwdRequest, SwjPins, DAP_TRANSFER_FAULT, DAP_TRANSFER_MISMATCH,
     DAP_TRANSFER_OK, DAP_TRANSFER_WAIT,
 };
+use crate::transport::{ActivePort, ConnectPort, DapConfig, DapTransport, Delay};
 
 /// A GPIO pin that can be switched between input and output at runtime.
 ///
@@ -151,11 +151,7 @@ where
         DapCapabilities::SWD
     }
 
-    fn connect(
-        &mut self,
-        port: ConnectPort,
-        _config: &DapConfig,
-    ) -> Result<ActivePort, DapError> {
+    fn connect(&mut self, port: ConnectPort, _config: &DapConfig) -> Result<ActivePort, DapError> {
         match port {
             ConnectPort::Default | ConnectPort::Swd => {
                 self.swclk.set_mode_output(false);

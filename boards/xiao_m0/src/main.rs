@@ -47,12 +47,8 @@ use hal::gpio::v2::{PA02, PA05, PA07, PA18};
 type SwdIoPin = PA05; // D9
 type SwClkPin = PA07; // D8
 type ResetPin = PA02; // D0
-type MySwdIoSet = BitBangSwd<
-    XiaoBidirPin<SwClkPin>,
-    XiaoBidirPin<SwdIoPin>,
-    XiaoBidirPin<ResetPin>,
-    CycleDelay,
->;
+type MySwdIoSet =
+    BitBangSwd<XiaoBidirPin<SwClkPin>, XiaoBidirPin<SwdIoPin>, XiaoBidirPin<ResetPin>, CycleDelay>;
 
 /// SAMD21 core clock frequency configured by GenericClockController.
 const CORE_CLOCK_HZ: u32 = 48_000_000;

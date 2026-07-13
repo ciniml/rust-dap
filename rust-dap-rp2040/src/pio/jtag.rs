@@ -460,7 +460,6 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
     }
 }
 
-
 // JTAG scan helpers shared by the DapTransport implementation.
 impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
     fn sequence64(&mut self, clock_count: usize, tms_value: bool, tdi_data: u64) -> u64 {
@@ -704,7 +703,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> DapTransport for JtagIoSet<Tck, Tms, Tdi, T
         self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
         if read {
             // TODO: check whether OK_FALSE etc. should be reported
-            dr.shift_right(3);
+            dr.shift_end(3);
             let result: u32 = dr.load();
             Ok(result)
         } else {

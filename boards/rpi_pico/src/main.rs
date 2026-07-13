@@ -199,8 +199,8 @@ mod app {
         #[cfg(all(feature = "swd", feature = "bitbang"))]
         let (usb_serial, usb_dap, usb_bus) = {
             use rust_dap::{DapConfig, DapIdentity};
-            use rust_dap_rp2040::util::UsbIdentity;
             use rust_dap_rp2040::bitbang::{CortexMDelay, PicoBidirPin};
+            use rust_dap_rp2040::util::UsbIdentity;
             // Initialize MCU reset pin.
             // RESET pin of Cortex Debug 10-pin connector is negative logic
             // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
@@ -262,8 +262,8 @@ mod app {
         #[cfg(all(feature = "jtag", feature = "bitbang"))]
         let (usb_serial, usb_dap, usb_bus) = {
             use rust_dap::{DapConfig, DapIdentity};
-            use rust_dap_rp2040::util::UsbIdentity;
             use rust_dap_rp2040::bitbang::{CortexMDelay, PicoBidirPin};
+            use rust_dap_rp2040::util::UsbIdentity;
             let tck_pin = PicoBidirPin::new(pins.gpio2.into_floating_input());
             let tms_pin = PicoBidirPin::new(pins.gpio3.into_floating_input());
             let tdo_pin = PicoBidirPin::new(pins.gpio5.into_floating_input());
@@ -381,20 +381,23 @@ mod app {
     #[idle(shared = [uart_reader, uart_writer, usb_serial, uart_rx_consumer, uart_tx_producer, uart_tx_consumer], local = [idle_led])]
     fn idle(mut c: idle::Context) -> ! {
         loop {
-            (&mut c.shared.usb_serial, &mut c.shared.uart_tx_producer)
-                .lock(|usb_serial, uart_tx_producer| {
+            (&mut c.shared.usb_serial, &mut c.shared.uart_tx_producer).lock(
+                |usb_serial, uart_tx_producer| {
                     bridge::drain_usb_to_uart_tx(usb_serial, uart_tx_producer)
-                });
-            (&mut c.shared.uart_writer, &mut c.shared.uart_tx_consumer)
-                .lock(|uart_writer, uart_tx_consumer| {
+                },
+            );
+            (&mut c.shared.uart_writer, &mut c.shared.uart_tx_consumer).lock(
+                |uart_writer, uart_tx_consumer| {
                     bridge::drain_uart_tx_queue(uart_writer, uart_tx_consumer)
-                });
+                },
+            );
 
             // Process RX data.
-            let rx_dequeued = (&mut c.shared.usb_serial, &mut c.shared.uart_rx_consumer)
-                .lock(|usb_serial, uart_rx_consumer| {
+            let rx_dequeued = (&mut c.shared.usb_serial, &mut c.shared.uart_rx_consumer).lock(
+                |usb_serial, uart_rx_consumer| {
                     bridge::drain_uart_rx_queue(usb_serial, uart_rx_consumer)
-                });
+                },
+            );
             if rx_dequeued {
                 // The RX queue has room again, so restart the UART RX interrupt
                 // in case uart_irq stopped it while the queue was full.
@@ -454,14 +457,23 @@ mod app {
         dap_process::spawn().ok();
 
         // Process TX data.
-        (&mut c.shared.usb_serial, &mut c.shared.uart_tx_producer)
-            .lock(|usb_serial, uart_tx_producer| bridge::drain_usb_to_uart_tx(usb_serial, uart_tx_producer));
-        (&mut c.shared.uart_writer, &mut c.shared.uart_tx_consumer)
-            .lock(|uart_writer, uart_tx_consumer| bridge::drain_uart_tx_queue(uart_writer, uart_tx_consumer));
+        (&mut c.shared.usb_serial, &mut c.shared.uart_tx_producer).lock(
+            |usb_serial, uart_tx_producer| {
+                bridge::drain_usb_to_uart_tx(usb_serial, uart_tx_producer)
+            },
+        );
+        (&mut c.shared.uart_writer, &mut c.shared.uart_tx_consumer).lock(
+            |uart_writer, uart_tx_consumer| {
+                bridge::drain_uart_tx_queue(uart_writer, uart_tx_consumer)
+            },
+        );
 
         // Process RX data.
-        let rx_dequeued = (&mut c.shared.usb_serial, &mut c.shared.uart_rx_consumer)
-            .lock(|usb_serial, uart_rx_consumer| bridge::drain_uart_rx_queue(usb_serial, uart_rx_consumer));
+        let rx_dequeued = (&mut c.shared.usb_serial, &mut c.shared.uart_rx_consumer).lock(
+            |usb_serial, uart_rx_consumer| {
+                bridge::drain_uart_rx_queue(usb_serial, uart_rx_consumer)
+            },
+        );
         if rx_dequeued {
             // The RX queue has room again, so restart the UART RX interrupt
             // in case uart_irq stopped it while the queue was full.

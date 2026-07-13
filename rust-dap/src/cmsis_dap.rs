@@ -131,7 +131,7 @@ pub enum JtagInstruction {
 
 pub fn build_acc(data: u32, a3: bool, a2: bool, read: bool) -> BitArray<[u32; 2], Lsb0> {
     let mut dr: BitArr!(for 35, in u32, Lsb0) = BitArray::new([data, 0]);
-    dr.shift_left(3);
+    dr.shift_start(3);
     *dr.get_mut(0).unwrap() = read;
     *dr.get_mut(1).unwrap() = a2;
     *dr.get_mut(2).unwrap() = a3;

@@ -17,10 +17,10 @@
 //! USB class wrapper. Handles packet framing and delegates command
 //! execution to [`Dispatcher`].
 
-use crate::dispatcher::Dispatcher;
-use crate::transport::{DapConfig, DapTransport};
 use crate::cmsis_dap::{DapCommandId, DapError};
+use crate::dispatcher::Dispatcher;
 use crate::interface::CmsisDapInterface;
+use crate::transport::{DapConfig, DapTransport};
 use num_enum::TryFromPrimitive;
 use usb_device::class_prelude::*;
 use usb_device::Result;

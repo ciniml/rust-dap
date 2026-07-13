@@ -7,12 +7,6 @@ license = "Apache-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[profile.release]
-debug = 2
-codegen-units = 1
-opt-level = 3
-lto = true
-
 [features]
 bitbang = ["rust-dap-rp2040/bitbang"]
 set_clock = ["rust-dap-rp2040/set_clock"]   # Enable swj_clock implementation for PIO and set appropriate SWCLK frequency. Otherwise, SWCLK is fixed to 15.625[MHz]

@@ -450,7 +450,6 @@ pub trait SupplementSwdIo {
 }
 */
 
-
 // Sequence helpers shared by the DapTransport implementation.
 impl<C, D, E> SwdIoSet<C, D, E> {
     fn read_sequence(&mut self, count: usize, data: &mut [u8]) {

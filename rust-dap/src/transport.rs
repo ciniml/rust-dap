@@ -163,8 +163,7 @@ pub trait DapTransport {
 
     /// DAP_Connect: reconfigure the pins for `port` and return the port
     /// actually selected.
-    fn connect(&mut self, port: ConnectPort, config: &DapConfig)
-        -> Result<ActivePort, DapError>;
+    fn connect(&mut self, port: ConnectPort, config: &DapConfig) -> Result<ActivePort, DapError>;
 
     /// DAP_Disconnect: release the pins (high impedance).
     fn disconnect(&mut self, config: &DapConfig) -> Result<(), DapError>;
@@ -172,18 +171,26 @@ pub trait DapTransport {
     // ---- SWJ (common, required) ----
 
     /// Output `count` bits of `data` on SWDIO/TMS with SWCLK/TCK clocking.
-    fn swj_sequence(&mut self, config: &DapConfig, count: usize, data: &[u8])
-        -> Result<(), DapError>;
+    fn swj_sequence(
+        &mut self,
+        config: &DapConfig,
+        count: usize,
+        data: &[u8],
+    ) -> Result<(), DapError>;
 
     /// Drive/read the SWJ pins. `select` chooses which pins to drive with
     /// `output`; afterwards waits `wait_us` and returns the pin input state.
-    fn swj_pins(&mut self, config: &DapConfig, output: SwjPins, select: SwjPins, wait_us: u32)
-        -> Result<SwjPins, DapError>;
+    fn swj_pins(
+        &mut self,
+        config: &DapConfig,
+        output: SwjPins,
+        select: SwjPins,
+        wait_us: u32,
+    ) -> Result<SwjPins, DapError>;
 
     /// DAP_SWJ_Clock: update the transport clock. Implementations update
     /// `config.swd`/`config.jtag` timing fields as appropriate.
-    fn swj_clock(&mut self, config: &mut DapConfig, frequency_hz: u32)
-        -> Result<(), DapError>;
+    fn swj_clock(&mut self, config: &mut DapConfig, frequency_hz: u32) -> Result<(), DapError>;
 
     // ---- SWD ----
 

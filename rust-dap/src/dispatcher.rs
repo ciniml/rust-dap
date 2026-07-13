@@ -20,13 +20,13 @@
 //! deal with parsed values. Retry policy, posted reads and match value/mask
 //! handling are also implemented here, once, for every transport.
 
-use crate::transport::{ActivePort, ConnectPort, DapConfig, DapTransport, MAX_JTAG_DEVICES};
 use crate::cmsis_dap::{
     read_swd_request, read_u16, read_u32, write_u32, DapCommandId, DapError, DapInfoId,
     JtagSequenceInfo, SwdRequest, SwjPins, DAP_ERROR, DAP_OK, DAP_TRANSFER_ERROR, DAP_TRANSFER_OK,
     DAP_TRANSFER_WAIT, SWD_SEQUENCE_CLOCK, SWD_SEQUENCE_DIN,
 };
 use crate::cursor::BufferCursor;
+use crate::transport::{ActivePort, ConnectPort, DapConfig, DapTransport, MAX_JTAG_DEVICES};
 use core::convert::TryInto;
 use num_enum::TryFromPrimitive;
 
@@ -863,14 +863,19 @@ mod test {
             tdi_data: u64,
         ) -> Result<Option<u64>, DapError> {
             let capture = info.tdo_capture;
-            self.jtag_sequences.push(
-                (JtagSequenceInfo {
+            self.jtag_sequences.push((
+                JtagSequenceInfo {
                     number_of_tck_cycles: info.number_of_tck_cycles,
                     tms_value: info.tms_value,
                     tdo_capture: info.tdo_capture,
-                }, tdi_data),
-            );
-            Ok(if capture { Some(0xdead_beef_cafe_f00d) } else { None })
+                },
+                tdi_data,
+            ));
+            Ok(if capture {
+                Some(0xdead_beef_cafe_f00d)
+            } else {
+                None
+            })
         }
     }
 
@@ -956,7 +961,7 @@ mod test {
         let mut d = connected_dispatcher(&mut t);
         // DP read (RnW), then DP write with value 0x11223344.
         let request = [
-            0u8, 2, // dap_index, count
+            0u8, 2,    // dap_index, count
             0x02, // DP read
             0x00, 0x44, 0x33, 0x22, 0x11, // DP write
         ];
@@ -967,7 +972,10 @@ mod test {
         assert_eq!(consumed, request.len());
         assert_eq!(resp[0], 2); // 2 transfers
         assert_eq!(resp[1], DAP_TRANSFER_OK);
-        assert_eq!(u32::from_le_bytes(resp[2..6].try_into().unwrap()), 0xcafebabe);
+        assert_eq!(
+            u32::from_le_bytes(resp[2..6].try_into().unwrap()),
+            0xcafebabe
+        );
         // write + trailing RDBUFF check
         assert_eq!(produced, 2 + 4);
         assert_eq!(t.transfer_log.len(), 3);
@@ -989,8 +997,14 @@ mod test {
         assert_eq!(resp[0], 2);
         assert_eq!(resp[1], DAP_TRANSFER_OK);
         assert_eq!(produced, 2 + 8);
-        assert_eq!(u32::from_le_bytes(resp[2..6].try_into().unwrap()), 0xaaaa0001);
-        assert_eq!(u32::from_le_bytes(resp[6..10].try_into().unwrap()), 0xaaaa0002);
+        assert_eq!(
+            u32::from_le_bytes(resp[2..6].try_into().unwrap()),
+            0xaaaa0001
+        );
+        assert_eq!(
+            u32::from_le_bytes(resp[6..10].try_into().unwrap()),
+            0xaaaa0002
+        );
         assert_eq!(t.transfer_log.len(), 3);
     }
 
@@ -1032,7 +1046,7 @@ mod test {
         let mut d = connected_dispatcher(&mut t);
         // Write 2 words to DP.
         let request = [
-            0u8, 2, 0, // dap_index, count=2 (LE)
+            0u8, 2, 0,    // dap_index, count=2 (LE)
             0x00, // DP write
             0x44, 0x33, 0x22, 0x11, 0x88, 0x77, 0x66, 0x55,
         ];
@@ -1084,7 +1098,7 @@ mod test {
             .unwrap();
         assert_eq!(consumed, 4);
         assert_eq!(d.config().swd.clock_wait_cycles, 1_000_000); // marker
-        // SWJ_Pins echo.
+                                                                 // SWJ_Pins echo.
         let (consumed, _) = d
             .execute(
                 &mut t,
@@ -1124,7 +1138,13 @@ mod test {
         let mut resp = [0u8; 64];
         // Configure 2 devices with IR lengths 4 and 5; consumed must be 3.
         let (consumed, _) = d
-            .execute(&mut t, 64, DapCommandId::JTAGConfigure, &[2, 4, 5], &mut resp)
+            .execute(
+                &mut t,
+                64,
+                DapCommandId::JTAGConfigure,
+                &[2, 4, 5],
+                &mut resp,
+            )
             .unwrap();
         assert_eq!(consumed, 3);
         assert_eq!(d.config().jtag.device_count, 2);
@@ -1132,7 +1152,13 @@ mod test {
         // Too many devices is rejected.
         let too_many = [MAX_JTAG_DEVICES as u8 + 1; 10];
         assert!(d
-            .execute(&mut t, 64, DapCommandId::JTAGConfigure, &too_many, &mut resp)
+            .execute(
+                &mut t,
+                64,
+                DapCommandId::JTAGConfigure,
+                &too_many,
+                &mut resp
+            )
             .is_err());
         // JTAG sequence with TDO capture: 8 cycles.
         let request = [1u8, 0x88, 0x5a];
