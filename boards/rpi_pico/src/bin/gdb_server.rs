@@ -368,9 +368,10 @@ fn main() -> ! {
                     .unwrap_or_else(|_| loop_forever())
             }
             GdbStubStateMachine::Disconnected(inner) => {
-                // GDB detached; keep the core halted so the next session
-                // attaches to a stopped core (register/memory access over the
-                // core-debug registers requires the core to be halted).
+                // GDB detached. Re-establish the SWD link and halt from scratch
+                // so the next `target remote` starts from a clean DP/target
+                // state (a bare halt() left the following session hanging).
+                let _ = target.arm.connect_multidrop(rp2040::CORE0_TARGETSEL);
                 let _ = target.arm.halt();
                 inner.return_to_idle()
             }
