@@ -154,9 +154,25 @@ impl<T: DapTransport> ArmDebug<T> {
                     }
                     retry += 1;
                 }
-                Err(e) => return Err(e.into()),
+                Err(e) => {
+                    // A FAULT sets a sticky error bit that makes every later AP
+                    // access fault too, poisoning the whole session. Clear it
+                    // so a bad access (e.g. a GDB read of unmapped memory)
+                    // fails cleanly and the next operation works.
+                    self.clear_sticky_errors();
+                    return Err(e.into());
+                }
             }
         }
+    }
+
+    /// Write DP ABORT to clear sticky error flags, bypassing the normal retry
+    /// path (ABORT is always accessible even while errors are latched).
+    fn clear_sticky_errors(&mut self) {
+        let abort = SwdRequest::empty(); // DP write, addr 0 (ABORT)
+        let _ = self
+            .transport
+            .swd_transfer(&self.config, abort, ABORT_CLEAR_ALL);
     }
 
     fn dp_read(&mut self, addr: u8) -> Result<u32, ArmError> {
