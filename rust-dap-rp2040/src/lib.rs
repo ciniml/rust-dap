@@ -33,6 +33,7 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_RAM_MEMCPY;
 pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 
 pub mod bitbang;
+pub mod bridge;
 pub mod line_coding;
 #[cfg(not(feature = "bitbang"))]
 pub mod pio;
