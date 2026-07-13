@@ -368,8 +368,10 @@ fn main() -> ! {
                     .unwrap_or_else(|_| loop_forever())
             }
             GdbStubStateMachine::Disconnected(inner) => {
-                // GDB detached; resume the target and wait for a new session.
-                let _ = target.arm.resume();
+                // GDB detached; keep the core halted so the next session
+                // attaches to a stopped core (register/memory access over the
+                // core-debug registers requires the core to be halted).
+                let _ = target.arm.halt();
                 inner.return_to_idle()
             }
         };
