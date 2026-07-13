@@ -332,6 +332,53 @@ impl<T: DapTransport> ArmDebug<T> {
         Ok(())
     }
 
+    /// Read an arbitrary byte range from target memory (word reads under the
+    /// hood; handles unaligned start/length).
+    pub fn read_mem(&mut self, mut addr: u32, buf: &mut [u8]) -> Result<(), ArmError> {
+        let mut i = 0;
+        while i < buf.len() {
+            let word = self.read_word(addr & !3)?.to_le_bytes();
+            let start = (addr & 3) as usize;
+            for b in word.iter().skip(start) {
+                if i >= buf.len() {
+                    break;
+                }
+                buf[i] = *b;
+                i += 1;
+                addr += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Write an arbitrary byte range to target memory. Aligned full words are
+    /// written directly; partial words use read-modify-write.
+    pub fn write_mem(&mut self, mut addr: u32, buf: &[u8]) -> Result<(), ArmError> {
+        let mut i = 0;
+        while i < buf.len() {
+            let aligned = addr & !3;
+            let start = (addr & 3) as usize;
+            if start == 0 && buf.len() - i >= 4 {
+                let w = u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
+                self.write_word(aligned, w)?;
+                i += 4;
+                addr += 4;
+            } else {
+                let mut word = self.read_word(aligned)?.to_le_bytes();
+                for b in word.iter_mut().skip(start) {
+                    if i >= buf.len() {
+                        break;
+                    }
+                    *b = buf[i];
+                    i += 1;
+                    addr += 1;
+                }
+                self.write_word(aligned, u32::from_le_bytes(word))?;
+            }
+        }
+        Ok(())
+    }
+
     /// True once a port has been selected by [`connect_multidrop`].
     pub fn is_swd(&self) -> bool {
         self.transport

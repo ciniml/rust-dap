@@ -581,3 +581,27 @@ fn dhcsr_write_requires_dbgkey() {
     arm.halt().unwrap(); // real code supplies DBGKEY
     assert!(arm.is_halted().unwrap());
 }
+
+#[test]
+fn read_mem_and_write_mem_byte_granular() {
+    let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());
+    // Seed two words, then read an unaligned 6-byte span crossing them.
+    arm.write_word(0x2000_0000, 0x04030201).unwrap();
+    arm.write_word(0x2000_0004, 0x08070605).unwrap();
+    let mut buf = [0u8; 6];
+    arm.read_mem(0x2000_0001, &mut buf).unwrap();
+    assert_eq!(buf, [0x02, 0x03, 0x04, 0x05, 0x06, 0x07]);
+
+    // Unaligned partial write (read-modify-write) must not disturb neighbors.
+    // Bytes at offsets 2,3 of word0 become 0xaa,0xbb; 0xcc lands in word1[0].
+    arm.write_mem(0x2000_0002, &[0xaa, 0xbb, 0xcc]).unwrap();
+    assert_eq!(arm.read_word(0x2000_0000).unwrap(), 0xbbaa0201);
+    assert_eq!(arm.read_word(0x2000_0004).unwrap(), 0x080706cc);
+    let mut check = [0u8; 4];
+    arm.read_mem(0x2000_0002, &mut check[..3]).unwrap();
+    assert_eq!(&check[..3], &[0xaa, 0xbb, 0xcc]);
+    // Aligned full-word write fast path.
+    arm.write_mem(0x2000_0008, &[0x11, 0x22, 0x33, 0x44])
+        .unwrap();
+    assert_eq!(arm.read_word(0x2000_0008).unwrap(), 0x44332211);
+}
