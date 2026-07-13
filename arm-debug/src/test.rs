@@ -1,0 +1,362 @@
+// Copyright 2026 Kenta Ida
+//
+// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+
+//! Host tests: drive `ArmDebug` against a mock `DapTransport` that records the
+//! exact SWD transactions and plays back scripted read results, so the ADIv5
+//! DP/AP protocol (posted reads, SELECT bank caching, CSW-once, power-up
+//! polling, MEM-AP addressing) is verified without hardware.
+
+use super::*;
+use rust_dap::{
+    ActivePort, ConnectPort, DapCapabilities, DapConfig, DapError, DapTransport, JtagSequenceInfo,
+    SwdRequest, SwjPins,
+};
+use std::vec::Vec;
+
+/// One recorded SWD transfer.
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct Xfer {
+    ap: bool,
+    rnw: bool,
+    addr: u8,
+    data: u32,
+}
+
+struct MockSwd {
+    log: Vec<Xfer>,
+    /// Scripted return values for reads, consumed front-to-back.
+    read_results: Vec<u32>,
+    read_index: usize,
+    /// Bytes captured from swd_write_bits (for the TARGETSEL test).
+    written_bits: Vec<(usize, Vec<u8>)>,
+    connected_swd: bool,
+}
+
+impl MockSwd {
+    fn new(read_results: &[u32]) -> Self {
+        Self {
+            log: Vec::new(),
+            read_results: read_results.to_vec(),
+            read_index: 0,
+            written_bits: Vec::new(),
+            connected_swd: false,
+        }
+    }
+    fn next_read(&mut self) -> u32 {
+        let v = *self.read_results.get(self.read_index).unwrap_or(&0);
+        self.read_index += 1;
+        v
+    }
+}
+
+impl DapTransport for MockSwd {
+    fn capabilities(&self) -> DapCapabilities {
+        DapCapabilities::SWD
+    }
+    fn connect(&mut self, port: ConnectPort, _c: &DapConfig) -> Result<ActivePort, DapError> {
+        assert!(matches!(port, ConnectPort::Swd | ConnectPort::Default));
+        self.connected_swd = true;
+        Ok(ActivePort::Swd)
+    }
+    fn disconnect(&mut self, _c: &DapConfig) -> Result<(), DapError> {
+        Ok(())
+    }
+    fn swj_sequence(&mut self, _c: &DapConfig, _n: usize, _d: &[u8]) -> Result<(), DapError> {
+        Ok(())
+    }
+    fn swj_pins(
+        &mut self,
+        _c: &DapConfig,
+        _o: SwjPins,
+        _s: SwjPins,
+        _w: u32,
+    ) -> Result<SwjPins, DapError> {
+        Ok(SwjPins::empty())
+    }
+    fn swj_clock(&mut self, _c: &mut DapConfig, _hz: u32) -> Result<(), DapError> {
+        Ok(())
+    }
+    fn swd_write_bits(
+        &mut self,
+        _c: &DapConfig,
+        count: usize,
+        data: &[u8],
+    ) -> Result<(), DapError> {
+        let bytes = ((count + 7) / 8).min(data.len());
+        self.written_bits.push((count, data[..bytes].to_vec()));
+        Ok(())
+    }
+    fn swd_output_enable(&mut self, _enable: bool) -> Result<(), DapError> {
+        Ok(())
+    }
+    fn swd_transfer(
+        &mut self,
+        _c: &DapConfig,
+        request: SwdRequest,
+        data: u32,
+    ) -> Result<u32, DapError> {
+        let ap = request.contains(SwdRequest::APnDP);
+        let rnw = request.contains(SwdRequest::RnW);
+        let addr = ((request.contains(SwdRequest::A3) as u8) << 3)
+            | ((request.contains(SwdRequest::A2) as u8) << 2);
+        self.log.push(Xfer {
+            ap,
+            rnw,
+            addr,
+            data,
+        });
+        Ok(if rnw { self.next_read() } else { 0 })
+    }
+    fn jtag_transfer(
+        &mut self,
+        _c: &DapConfig,
+        _i: u8,
+        _r: SwdRequest,
+        _d: u32,
+    ) -> Result<u32, DapError> {
+        Err(DapError::NotSupported)
+    }
+    fn jtag_sequence(
+        &mut self,
+        _c: &DapConfig,
+        _i: &JtagSequenceInfo,
+        _t: u64,
+    ) -> Result<Option<u64>, DapError> {
+        Err(DapError::NotSupported)
+    }
+}
+
+fn dp_r(addr: u8, data: u32) -> Xfer {
+    Xfer {
+        ap: false,
+        rnw: true,
+        addr,
+        data,
+    }
+}
+fn dp_w(addr: u8, data: u32) -> Xfer {
+    Xfer {
+        ap: false,
+        rnw: false,
+        addr,
+        data,
+    }
+}
+fn ap_r(addr: u8) -> Xfer {
+    Xfer {
+        ap: true,
+        rnw: true,
+        addr,
+        data: 0,
+    }
+}
+fn ap_w(addr: u8, data: u32) -> Xfer {
+    Xfer {
+        ap: true,
+        rnw: false,
+        addr,
+        data,
+    }
+}
+
+#[test]
+fn read_word_issues_correct_adiv5_sequence() {
+    // CSW write, TAR write, posted DRW read (stale), RDBUFF read (real value).
+    let mock = MockSwd::new(&[
+        0xdead_beef, /* stale DRW */
+        0x2000_2927, /* RDBUFF */
+    ]);
+    let mut arm = ArmDebug::new(mock, DapConfig::default());
+    let value = arm.read_word(0x4000_0000).unwrap();
+    assert_eq!(value, 0x2000_2927);
+
+    let log = &arm.transport().log;
+    assert_eq!(
+        log,
+        &[
+            dp_w(DP_SELECT, 0),        // select AP bank 0 (from initial 0xffffffff)
+            ap_w(AP_CSW, CSW_DEFAULT), // CSW programmed once
+            ap_w(AP_TAR, 0x4000_0000), // target address
+            ap_r(AP_DRW),              // posted read
+            dp_r(DP_RDBUFF, 0),        // real value fetched here
+        ]
+    );
+}
+
+#[test]
+fn csw_and_select_are_cached() {
+    // Two reads in a row: CSW and SELECT must not be re-programmed.
+    let mock = MockSwd::new(&[0, 0x11, 0, 0x22]);
+    let mut arm = ArmDebug::new(mock, DapConfig::default());
+    assert_eq!(arm.read_word(0x2000_0000).unwrap(), 0x11);
+    assert_eq!(arm.read_word(0x2000_0004).unwrap(), 0x22);
+
+    let log = &arm.transport().log;
+    // Only one SELECT and one CSW across both reads.
+    assert_eq!(log.iter().filter(|x| *x == &dp_w(DP_SELECT, 0)).count(), 1);
+    assert_eq!(
+        log.iter()
+            .filter(|x| *x == &ap_w(AP_CSW, CSW_DEFAULT))
+            .count(),
+        1
+    );
+    // Two TAR writes with the two addresses.
+    assert!(log.contains(&ap_w(AP_TAR, 0x2000_0000)));
+    assert!(log.contains(&ap_w(AP_TAR, 0x2000_0004)));
+}
+
+#[test]
+fn write_word_flushes_via_rdbuff() {
+    let mock = MockSwd::new(&[0 /* RDBUFF flush */]);
+    let mut arm = ArmDebug::new(mock, DapConfig::default());
+    arm.write_word(0x2000_0100, 0x1234_5678).unwrap();
+    let log = &arm.transport().log;
+    assert_eq!(
+        log,
+        &[
+            dp_w(DP_SELECT, 0),
+            ap_w(AP_CSW, CSW_DEFAULT),
+            ap_w(AP_TAR, 0x2000_0100),
+            ap_w(AP_DRW, 0x1234_5678),
+            dp_r(DP_RDBUFF, 0), // flush
+        ]
+    );
+}
+
+#[test]
+fn read_words_uses_tar_autoincrement() {
+    // 3 words: TAR once, then post + (n-1) DRW reads returning stale/prev, and
+    // RDBUFF for the last. Reads return: w0 arrives on 2nd DRW, w1 on 3rd DRW,
+    // w2 on RDBUFF.
+    let mock = MockSwd::new(&[0xaaaa, 0x1111, 0x2222, 0x3333]);
+    let mut arm = ArmDebug::new(mock, DapConfig::default());
+    let mut buf = [0u32; 3];
+    arm.read_words(0x2000_0000, &mut buf).unwrap();
+    assert_eq!(buf, [0x1111, 0x2222, 0x3333]);
+
+    let log = &arm.transport().log;
+    // Exactly one TAR write; DRW reads = 1 (post) + 2 (loop) = 3; one RDBUFF.
+    assert_eq!(
+        log.iter()
+            .filter(|x| *x == &ap_w(AP_TAR, 0x2000_0000))
+            .count(),
+        1
+    );
+    assert_eq!(
+        log.iter()
+            .filter(|x| x.ap && x.rnw && x.addr == AP_DRW)
+            .count(),
+        3
+    );
+    assert_eq!(log.iter().filter(|x| *x == &dp_r(DP_RDBUFF, 0)).count(), 1);
+}
+
+#[test]
+fn power_up_polls_ctrl_stat() {
+    // connect_multidrop: DPIDR read, ABORT, SELECT, CTRL/STAT write, then poll.
+    // Script: DPIDR, then two CTRL/STAT reads (first not acked, second acked).
+    let acked = CDBGPWRUPACK | CSYSPWRUPACK;
+    let mock = MockSwd::new(&[
+        0x0bc1_1477, /* DPIDR */
+        0,           /* stat not acked */
+        acked,
+    ]);
+    let mut arm = ArmDebug::new(mock, DapConfig::default());
+    let dpidr = arm.connect_multidrop(rp2040::CORE0_TARGETSEL).unwrap();
+    assert_eq!(dpidr, 0x0bc1_1477);
+
+    let log = &arm.transport().log;
+    assert!(log.contains(&dp_r(DP_DPIDR, 0)));
+    assert!(log.contains(&dp_w(DP_ABORT, ABORT_CLEAR_ALL)));
+    assert!(log.contains(&dp_w(DP_CTRL_STAT, CDBGPWRUPREQ | CSYSPWRUPREQ)));
+    // Two CTRL/STAT reads before ack.
+    assert_eq!(
+        log.iter().filter(|x| *x == &dp_r(DP_CTRL_STAT, 0)).count(),
+        2
+    );
+}
+
+#[test]
+fn no_target_when_dpidr_invalid() {
+    let mock = MockSwd::new(&[0xffff_ffff /* bad DPIDR */]);
+    let mut arm = ArmDebug::new(mock, DapConfig::default());
+    assert_eq!(
+        arm.connect_multidrop(rp2040::CORE0_TARGETSEL),
+        Err(ArmError::NoTarget)
+    );
+}
+
+#[test]
+fn targetsel_written_without_ack_and_correct_value() {
+    let mock = MockSwd::new(&[0x0bc1_1477, CDBGPWRUPACK | CSYSPWRUPACK]);
+    let mut arm = ArmDebug::new(mock, DapConfig::default());
+    arm.connect_multidrop(rp2040::CORE0_TARGETSEL).unwrap();
+
+    let writes = &arm.transport().written_bits;
+    // Expect: request(8) + ack-skip(5) + value(32) + parity(1).
+    let value_write = writes
+        .iter()
+        .find(|(n, _)| *n == 32)
+        .expect("32-bit value write");
+    assert_eq!(
+        u32::from_le_bytes(value_write.1[..4].try_into().unwrap()),
+        rp2040::CORE0_TARGETSEL
+    );
+    // The parity bit matches the value's popcount parity.
+    let parity_write = writes
+        .iter()
+        .rev()
+        .find(|(n, _)| *n == 1)
+        .expect("parity bit");
+    assert_eq!(
+        parity_write.1[0] & 1,
+        (rp2040::CORE0_TARGETSEL.count_ones() & 1) as u8
+    );
+    // No swd_transfer happened for TARGETSEL itself (first transfer is DPIDR read).
+    assert_eq!(arm.transport().log.first(), Some(&dp_r(DP_DPIDR, 0)));
+}
+
+#[test]
+fn wait_ack_retries_then_gives_up() {
+    struct AlwaysWait;
+    impl DapTransport for AlwaysWait {
+        fn capabilities(&self) -> DapCapabilities {
+            DapCapabilities::SWD
+        }
+        fn connect(&mut self, _p: ConnectPort, _c: &DapConfig) -> Result<ActivePort, DapError> {
+            Ok(ActivePort::Swd)
+        }
+        fn disconnect(&mut self, _c: &DapConfig) -> Result<(), DapError> {
+            Ok(())
+        }
+        fn swj_sequence(&mut self, _c: &DapConfig, _n: usize, _d: &[u8]) -> Result<(), DapError> {
+            Ok(())
+        }
+        fn swj_pins(
+            &mut self,
+            _c: &DapConfig,
+            _o: SwjPins,
+            _s: SwjPins,
+            _w: u32,
+        ) -> Result<SwjPins, DapError> {
+            Ok(SwjPins::empty())
+        }
+        fn swj_clock(&mut self, _c: &mut DapConfig, _hz: u32) -> Result<(), DapError> {
+            Ok(())
+        }
+        fn swd_transfer(
+            &mut self,
+            _c: &DapConfig,
+            _r: SwdRequest,
+            _d: u32,
+        ) -> Result<u32, DapError> {
+            Err(DapError::SwdError(DAP_TRANSFER_WAIT))
+        }
+    }
+    let mut arm = ArmDebug::new(AlwaysWait, DapConfig::default());
+    assert_eq!(arm.read_word(0x2000_0000), Err(ArmError::Wait));
+}

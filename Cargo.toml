@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "rust-dap",
+    "arm-debug",
     "rust-dap-rp2040",
     "boards/rpi_pico",
     "boards/xiao_rp2040",

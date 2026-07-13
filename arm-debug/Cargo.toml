@@ -1,0 +1,10 @@
+[package]
+name = "arm-debug"
+version = "0.1.0"
+authors = ["Kenta IDA <fuga@fugafuga.org>"]
+edition = "2021"
+license = "Apache-2.0"
+description = "no_std ARM ADIv5 (DP/MEM-AP) and Cortex-M debug layer over a rust-dap DapTransport"
+
+[dependencies]
+rust-dap = { path = "../rust-dap" }
