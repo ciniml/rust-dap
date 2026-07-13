@@ -225,3 +225,75 @@ M5 到達で実用的なフラッシュデバッガになる。
 4. **プローブとターゲットが同一 RP2040 である前提**: プローブ側の SWD クロックや
    ピン割当(現行 GPIO2=SWCLK, GPIO3=SWDIO, GPIO4=RESET)を踏襲でよいか。
 5. **スコープ**: まず M1〜M3(RAM デバッグ MVP)を確定ゴールにしてよいか。
+
+---
+
+## 8. Baochip / Dabao / Xous への移植性(調査結果 2026-07-14)
+
+将来ターゲットとして挙がった Baochip(bao1x)/ Dabao ボード / Xous について、
+一次情報(各リポジトリ・RTL・bunnie のブログ・Xous book)を調査した。要点:
+
+### 前提: これらは RISC-V であり ARM ではない
+- **Xous**: Rust 製マイクロカーネル OS。Precursor 上では Xilinx FPGA の
+  **VexRiscv(RV32IMAC + Sv32 MMU)** ソフトコア。
+- **Baochip (bao1x)**: bunnie の Precursor 後継、22nm カスタム SoC。
+  メイン CPU は **VexRiscv RV32IMAC + Sv39**(約 350MHz)、USB2.0 HS デバイス
+  内蔵、RRAM 4MiB。Dabao はその評価ボード(USB-C + 20 GPIO、**JTAG/SWD
+  コネクタなし**)。
+
+本デバッガの現行スタックは全て ARM 専用(SWD/JTAG → **ADIv5** → Cortex-M)。
+RISC-V は ADIv5 も Cortex-M デバッグも持たないため、下記2方向で評価する。
+
+### (A) プローブファーム自体をこれらの上で動かす — **有望・中程度**
+- Baochip / Dabao は bare-metal Rust ターゲット
+  (`riscv32imac-unknown-none-elf`)、USB-HS デバイス、Rust ドライバが
+  xous-core と samblenny/baochip-sdk に存在。
+- 必要作業: `bitbang.rs` の **`BidirPin` を bao1x GPIO に実装**、`Delay` 実装、
+  USB クラス配線。**コアの `cmsis_dap`/`dispatcher`/`transport`/`arm-debug` は
+  HAL 非依存でそのままコンパイル可能**。
+- 障害はアーキテクチャではなく HAL/PAC の未成熟(crates.io に `bao1x-hal` は
+  無く、ドライバは xous-core 等の in-tree)と USB クラス/PHY 周りのグルー。
+- 成果物: bao1x/Dabao をホストとする CMSIS-DAP/SWD プローブ(=RP2040/xiao 版と
+  同じ位置づけ。ARM ターゲットをデバッグする)。**RP2040 の次の移植先として妥当。**
+
+### (B) これらを *ターゲット* としてデバッグする — **不向き・大規模な新規実装**
+- CPU デバッグは VexRiscv の **独自 DebugPlugin バス**(`GenCramSoC.scala` で
+  `hardwareBreakpointCount = 4` の旧 DebugPlugin を `fromJtag()` で接続)。
+  **標準 RISC-V Debug Spec 0.13/1.0 の DM/DMI ではなく**、SpinalHDL パッチ版
+  OpenOCD しか話せない。ADIv5 は当然使えない。
+- Dabao には CPU デバッグ用 JTAG コネクタが出ていない(オンパッケージ JTAG は
+  DFT/バウンダリスキャン用)。物理的にプローブを繋ぐ先が無い。
+- **既存の代替が優秀**: Xous カーネルは既に Rust の **`gdbstub` クレート**を使った
+  RISC-V マルチスレッド GDB サーバを内蔵(`kernel/src/debug/gdb.rs`、
+  precursor と **bao1x 両方の backend** あり)。Precursor は USB-Wishbone
+  ブリッジで CPU halt も可能。rust-dap で置き換える価値は乏しい。
+
+### 再利用可能性の内訳((B)方向)
+| 本リポジトリの層 | RISC-V DM ターゲットでの再利用 |
+|---|---|
+| `bitbang.rs` の JTAG ビット/TAP エンジン(`JtagBits`) | **再利用可**(電気層の IR/DR シフト・TMS 状態機械)。唯一移植可能な部分 |
+| `bitbang.rs` SWD(`SwdBits`) | 不可(ARM 専用ワイヤプロトコル) |
+| `arm-debug`(ADIv5 DP/AP/MEM-AP) | **不可** — RISC-V Debug Module ドライバ(DTM→DMI→DM レジスタ、abstract command、program buffer)へ置換。VexRiscv 独自バスならさらに専用ドライバ |
+| Cortex-M コアデバッグ層(M2 以降) | 不可 — RISC-V レジスタファイル/CSR・`dcsr/dpc`・trigger へ置換 |
+| gdbstub/RSP 層(本計画で新規) | 発想は共通(Xous も同じ `gdbstub` クレート採用) |
+
+### 結論
+- **最有望**: rust-dap を **Baochip/Dabao 上で動かす**(方向A)。bao1x は有能な
+  USB-HS RISC-V MCU で、コードはアーキテクチャ的に移植可能。コストは HAL/USB
+  スタックの成熟度であってデバッグ設計ではない。RP2040 の次の移植先候補。
+- **不向き/冗長**: これらを RISC-V ターゲットとしてデバッグすること。エコシステムが
+  既に Rust `gdbstub` サーバと(Precursor では)USB-Wishbone CPU-halt を持つ。
+- **もし RISC-V ターゲット対応を将来やるなら**: 標準 RISC-V コア向けに
+  RISC-V Debug Module ドライバを新規実装する形にし、`JtagBits` を電気層として
+  再利用、`gdbstub` を RSP 層に据える。ARM の `arm-debug` と対になる
+  `riscv-debug` クレートを別途起こすのが構造的に自然。
+
+### 一次情報
+- bunnie's blog (Baochip-1x): https://www.bunniestudios.com/blog/2026/baochip-1x-a-mostly-open-22nm-soc-for-high-assurance-applications/
+- Coder's Guide to the Baochip 1x: https://baochip.github.io/baochip-1x/
+- Baochip-1x RTL(VexRiscv 設定): https://github.com/baochip/baochip-1x — `VexRiscv/GenCramSoC.scala`
+- Dabao ボード: https://github.com/baochip/dabao , https://www.crowdsupply.com/baochip/dabao
+- samblenny/baochip-sdk(bare-metal Rust): https://github.com/samblenny/baochip-sdk
+- xous-core(カーネル gdbstub): https://github.com/betrusted-io/xous-core — `kernel/src/debug/gdb.rs`, `README-baochip.md`
+- Xous book(デバッグ): https://betrusted.io/xous-book/ch03-04-debugging-programs.html
+- RISC-V External Debug Support 0.13: https://riscv.org/wp-content/uploads/2024/12/riscv-debug-release.pdf
