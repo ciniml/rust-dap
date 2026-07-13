@@ -97,3 +97,24 @@ xiao_m0 の RTIC 化。
 
 これで再設計提案のステップ1〜5(§4 ボードレイヤ分離を含む)が完了。
 残: 共有ピンでの SWD/JTAG 実行時切替(swj 構成)、xiao_m0 の BSP 更新+RTIC 化。
+
+## 追記5: 共有ピン SWD/JTAG 実行時切替(swj)の実機検証 (2026-07-14)
+
+対象コミット: b1273e8(BitBangSwj 結合トランスポート)。
+rpi_pico を `--no-default-features --features swj` でビルドし、SWD ターゲット
+(ブランク Pico)を接続して検証。
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | USB 列挙(`raspberry-pi-pico-swj`) | OK |
+| 2 | capabilities = SWD|JTAG の広告 | OK(probe-rs が最初に JTAG を試行) |
+| 3 | DAP_Connect→SWD 切替で CHIP_ID 読み出し(0x20002927) | OK |
+| 4 | bootrom 読み出し | OK |
+
+probe-rs が最初に JTAG プロービングを試みてから SWD にフォールバックした事実が、
+1 つのファームが両プロトコルを広告できていること(=旧ブランケット実装では型
+レベルで不可能だった構成)の証拠。JTAG スキャンチェーンのエラーは SWD ターゲット
+に対する当然の結果で、SWD 切替後は正常。JTAG パス自体は JTAG ターゲット未接続の
+ため実機未検証(ロジック/ビルド検証のみ)。
+
+これで再設計提案の全項目(ステップ1〜5 + 共有ピン実行時切替)が実装・検証済み。
