@@ -118,3 +118,30 @@ probe-rs が最初に JTAG プロービングを試みてから SWD にフォー
 ため実機未検証(ロジック/ビルド検証のみ)。
 
 これで再設計提案の全項目(ステップ1〜5 + 共有ピン実行時切替)が実装・検証済み。
+
+## 追記6: GDB デバッガ M1(arm-debug ADIv5)の実機検証 (2026-07-14)
+
+対象コミット: 86ae941(arm-debug クレート)/ 0b464d2, b649ehclc 系(M1 self-test firmware)。
+プローブ RP2040 に m1_selftest ファームを書き込み、bitbang SWD + arm-debug の
+自前 ADIv5 スタックでターゲット RP2040 を読んだ。CDC 出力(DTR アサートで取得):
+
+```
+M1 dpidr=0x0bc12477 chipid=0x20002927 OK
+```
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | USB-CDC 列挙(raspberry-pi-pico-m1) | OK |
+| 2 | SWD 接続(line reset→dormant→SWD→マルチドロップ TARGETSEL→電源投入) | OK |
+| 3 | DPIDR 読み出し = 0x0bc12477(正当な ARM Debug Port ID) | OK |
+| 4 | MEM-AP 経由 CHIP_ID 読み出し = 0x20002927(probe-rs と一致) | OK |
+
+arm-debug のホストテスト8件が実シリコンで裏付けられ、GDB デバッガ M1(ADIv5
+bring-up)完了。TARGETSEL の ack 無しシーケンス、DP 電源投入ポーリング、MEM-AP
+の CSW/TAR/DRW/RDBUFF 経路が実機で正しく動作。次は M2(Cortex-M コア制御:
+halt/step/レジスタ)。
+
+補足: Xous(Baochip 公式 OS)の USB は usb-device ベースで CDC-ACM を提供するが
+役割排他(Views)であり、アプリからの任意 USB クラス追加は不可(HIDv2 = DAP v1
+相当のみ抜け道)。カーネル gdbstub は USB-CDC ではなく物理 UART 専用。詳細は
+doc/gdb-debugger-proposal.ja.md §8。
