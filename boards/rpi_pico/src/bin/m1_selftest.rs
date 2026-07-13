@@ -115,14 +115,23 @@ fn main() -> ! {
     );
     let mut arm = ArmDebug::new(swd, config);
 
-    let result = run_selftest(&mut arm);
-    let bytes = result.as_bytes();
-
+    // USB must be polled continuously to enumerate, so the (blocking,
+    // bit-banged) self-test can only run once the host has configured the
+    // device — running it before the first poll would miss enumeration.
+    let mut result: Option<heapless::String<96>> = None;
+    let mut throttle: u32 = 0;
     loop {
         usb_dev.poll(&mut [&mut serial]);
-        // Continuously emit the captured result so it appears whenever the
-        // host opens the port.
-        let _ = serial.write(bytes);
-        cortex_m::asm::delay(12_000_000);
+        if result.is_none() && usb_dev.state() == UsbDeviceState::Configured {
+            result = Some(run_selftest(&mut arm));
+        }
+        // Re-emit the captured result periodically so it appears whenever the
+        // host opens the port, without flooding every poll iteration.
+        if let Some(r) = &result {
+            throttle = throttle.wrapping_add(1);
+            if throttle % 20_000 == 0 {
+                let _ = serial.write(r.as_bytes());
+            }
+        }
     }
 }
