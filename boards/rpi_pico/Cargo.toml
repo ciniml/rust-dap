@@ -22,7 +22,7 @@ set_clock = [
 ] # Enable swj_clock implementation for PIO and set appropriate SWCLK frequency. Otherwise, SWCLK is fixed to 15.625[MHz]
 jtag = []
 swd = []
-swj = []
+swj = ["bitbang"] # Combined SWD+JTAG with runtime DAP_Connect switching (bit-banging)
 ram-exec = ["rust-dap-rp2040/ram-exec"] # Execute-in-SRAM support
 
 [dependencies.rp-pico]

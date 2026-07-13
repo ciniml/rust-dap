@@ -18,7 +18,7 @@
 
 use hal::gpio::{Floating, Input, Output, Pin, PinId, PushPull};
 use rp2040_hal as hal;
-use rust_dap::bitbang::{BidirPin, BitBangJtag, BitBangSwd};
+use rust_dap::bitbang::{BidirPin, BitBangJtag, BitBangSwd, BitBangSwj};
 use rust_dap::Delay;
 
 /// Bidirectional pin backed by the rp2040-hal type-state GPIO API.
@@ -100,6 +100,19 @@ pub type SwdIoSet<Clk, Dio, Rst> =
 pub type JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> = BitBangJtag<
     PicoBidirPin<Tck>,
     PicoBidirPin<Tms>,
+    PicoBidirPin<Tdi>,
+    PicoBidirPin<Tdo>,
+    PicoBidirPin<Trst>,
+    PicoBidirPin<Srst>,
+    CortexMDelay,
+>;
+
+/// Combined SWD+JTAG bit-banging transport with runtime port switching.
+/// `Clk`=SWCLK/TCK, `Dio`=SWDIO/TMS, `Srst`=RESET/nSRST are shared between
+/// protocols; `Tdi`/`Tdo`/`Trst` are JTAG-only.
+pub type SwjIoSet<Clk, Dio, Tdi, Tdo, Trst, Srst> = BitBangSwj<
+    PicoBidirPin<Clk>,
+    PicoBidirPin<Dio>,
     PicoBidirPin<Tdi>,
     PicoBidirPin<Tdo>,
     PicoBidirPin<Trst>,

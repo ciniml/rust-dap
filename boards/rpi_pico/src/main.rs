@@ -74,10 +74,23 @@ mod app {
         JtagTrstPin,
         JtagResetPin,
     >;
+    // Combined SWD+JTAG transport with runtime DAP_Connect(port) switching
+    // over one shared pin set (bit-banging only).
+    #[cfg(feature = "swj")]
+    type SwjIoSet = rust_dap_rp2040::bitbang::SwjIoSet<
+        GpioSwClk,
+        GpioSwdIo,
+        JtagTdiPin,
+        JtagTdoPin,
+        JtagTrstPin,
+        GpioReset,
+    >;
     #[cfg(feature = "swd")]
     type IoSet = SwdIoSet;
     #[cfg(feature = "jtag")]
     type IoSet = JtagIoSet;
+    #[cfg(feature = "swj")]
+    type IoSet = SwjIoSet;
     type UsbDap = rust_dap::CmsisDap<'static, UsbBus, IoSet, 64>;
 
     // GPIO mappings
@@ -88,23 +101,23 @@ mod app {
     type GpioDebugOut = hal::gpio::bank0::Gpio15;
     type GpioDebugIrqOut = hal::gpio::bank0::Gpio28;
     type GpioDebugUsbIrqOut = hal::gpio::bank0::Gpio27;
-    // swd
-    #[cfg(feature = "swd")]
+    // swd / swj shared clock, data and reset pins
+    #[cfg(any(feature = "swd", feature = "swj"))]
     type GpioSwClk = hal::gpio::bank0::Gpio2;
-    #[cfg(feature = "swd")]
+    #[cfg(any(feature = "swd", feature = "swj"))]
     type GpioSwdIo = hal::gpio::bank0::Gpio3;
-    #[cfg(feature = "swd")]
+    #[cfg(any(feature = "swd", feature = "swj"))]
     type GpioReset = hal::gpio::bank0::Gpio4;
-    // jtag
+    // jtag / swj TCK/TMS reuse the swd clock/data pins; TDI/TDO/TRST are extra
     #[cfg(feature = "jtag")]
     type JtagTckPin = hal::gpio::bank0::Gpio2;
     #[cfg(feature = "jtag")]
     type JtagTmsPin = hal::gpio::bank0::Gpio3;
-    #[cfg(feature = "jtag")]
+    #[cfg(any(feature = "jtag", feature = "swj"))]
     type JtagTdoPin = hal::gpio::bank0::Gpio5;
-    #[cfg(feature = "jtag")]
+    #[cfg(any(feature = "jtag", feature = "swj"))]
     type JtagTdiPin = hal::gpio::bank0::Gpio6;
-    #[cfg(feature = "jtag")]
+    #[cfg(any(feature = "jtag", feature = "swj"))]
     type JtagTrstPin = hal::gpio::bank0::Gpio7;
     #[cfg(feature = "jtag")]
     type JtagResetPin = hal::gpio::bank0::Gpio4;
@@ -333,6 +346,46 @@ mod app {
                 DapConfig::new(
                     DapIdentity {
                         serial_number: "raspberry-pi-pico-jtag",
+                        ..DapIdentity::default()
+                    },
+                    clocks.system_clock.freq().to_Hz(),
+                ),
+            )
+        };
+
+        // Combined SWD+JTAG over one shared pin set. GDB/probe-rs choose the
+        // protocol at runtime via DAP_Connect; the pins are reconfigured on
+        // connect. Bit-banging only (a single PIO program cannot serve both).
+        #[cfg(feature = "swj")]
+        let (usb_serial, usb_dap, usb_bus) = {
+            use rust_dap::{DapConfig, DapIdentity};
+            use rust_dap_rp2040::bitbang::{CortexMDelay, PicoBidirPin};
+            use rust_dap_rp2040::util::UsbIdentity;
+            let clk_pin = PicoBidirPin::new(pins.gpio2.into_floating_input()); // SWCLK/TCK
+            let dio_pin = PicoBidirPin::new(pins.gpio3.into_floating_input()); // SWDIO/TMS
+            let tdi_pin = PicoBidirPin::new(pins.gpio6.into_floating_input());
+            let tdo_pin = PicoBidirPin::new(pins.gpio5.into_floating_input());
+            let trst_pin = PicoBidirPin::new(pins.gpio7.into_floating_input());
+            let srst_pin = PicoBidirPin::new(pins.gpio4.into_floating_input()); // RESET/nSRST
+            let swjio = SwjIoSet::new(
+                clk_pin,
+                dio_pin,
+                tdi_pin,
+                tdo_pin,
+                trst_pin,
+                srst_pin,
+                CortexMDelay,
+            );
+            rust_dap_rp2040::util::initialize_usb(
+                swjio,
+                usb_allocator,
+                UsbIdentity {
+                    serial: "raspberry-pi-pico-swj",
+                    ..UsbIdentity::default()
+                },
+                DapConfig::new(
+                    DapIdentity {
+                        serial_number: "raspberry-pi-pico-swj",
                         ..DapIdentity::default()
                     },
                     clocks.system_clock.freq().to_Hz(),
