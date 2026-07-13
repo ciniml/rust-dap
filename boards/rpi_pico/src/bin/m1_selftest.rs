@@ -161,6 +161,8 @@ fn main() -> ! {
     let mut throttle: u32 = 0;
     loop {
         usb_dev.poll(&mut [&mut serial]);
+        // 1200 bps touch → reboot into the bootloader (reflash without BOOTSEL).
+        rust_dap_rp2040::util::bootsel_on_1200bps_touch(&serial);
         if result.is_none() && usb_dev.state() == UsbDeviceState::Configured {
             result = Some(run_selftest(&mut arm));
         }

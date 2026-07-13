@@ -214,6 +214,8 @@ impl UsbConn<'_> {
     /// Poll USB and flush queued TX to the CDC endpoint.
     fn pump(&mut self) {
         self.usb_dev.poll(&mut [&mut self.serial]);
+        // 1200 bps touch → reboot into the bootloader (reflash without BOOTSEL).
+        rust_dap_rp2040::util::bootsel_on_1200bps_touch(&self.serial);
         while let Some(&b) = self.tx.front() {
             match self.serial.write(&[b]) {
                 Ok(1) => {

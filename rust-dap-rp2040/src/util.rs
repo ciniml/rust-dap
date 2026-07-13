@@ -98,6 +98,30 @@ pub struct UartConfigAndClock {
     pub clock: fugit::HertzU32,
 }
 
+/// Reboot the RP2040 into the USB mass-storage / PICOBOOT bootloader
+/// (equivalent to holding BOOTSEL at power-on). Never returns.
+///
+/// Lets a host reflash the board without pressing the physical button.
+pub fn reset_to_bootloader() -> ! {
+    // gpio_activity_pin_mask = 0, disable_interface_mask = 0 → expose both the
+    // mass-storage and PICOBOOT interfaces.
+    hal::rom_data::reset_to_usb_boot(0, 0);
+    // reset_to_usb_boot does not return, but the signature is not `!`.
+    loop {
+        cortex_m::asm::nop();
+    }
+}
+
+/// "1200 bps touch": if the host has set the USB-CDC line coding to 1200 baud,
+/// reboot into the bootloader. Call this from the USB poll loop. This is the
+/// same convention Arduino/pico-sdk use, so `stty -F /dev/ttyACMx 1200`
+/// (or opening the port at 1200 baud) drops the board into BOOTSEL.
+pub fn bootsel_on_1200bps_touch(serial: &SerialPort<UsbBus>) {
+    if serial.line_coding().data_rate() == 1200 {
+        reset_to_bootloader();
+    }
+}
+
 /// Initialize USB-UART, CMSIS-DAP and the USB device.
 ///
 /// `config` carries the DAP identity and the probe core clock;
