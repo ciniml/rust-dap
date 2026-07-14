@@ -24,7 +24,7 @@
 
 use panic_halt as _;
 
-use arm_debug::{cortex_m as cm, rp2040, ArmDebug};
+use arm_debug::{cortex_m as cm, rp2040, ArmDebug, HaltReason, WatchAccess};
 use core::convert::Infallible;
 use rp_pico::hal;
 
@@ -38,7 +38,8 @@ use gdbstub::target::ext::base::singlethread::{
 };
 use gdbstub::target::ext::base::BaseOps;
 use gdbstub::target::ext::breakpoints::{
-    Breakpoints, BreakpointsOps, SwBreakpoint, SwBreakpointOps,
+    Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, HwWatchpoint, HwWatchpointOps,
+    SwBreakpoint, SwBreakpointOps, WatchKind,
 };
 use gdbstub::target::{Target, TargetError, TargetResult};
 use gdbstub_arch::arm::reg::ArmCoreRegs;
@@ -86,7 +87,8 @@ struct RpTarget {
     /// [7] marker 0xd1a6d1a6
     /// [8] reset site of the previous boot (which reset_self call fired)
     /// [9] reset count (survives sys_reset via watchdog scratch)
-    diag: [u32; 10],
+    /// [10] sessions ended (clean disconnect or recovered stub error)
+    diag: [u32; 11],
 }
 
 const DIAG_BASE: u32 = 0xF000_0000;
@@ -145,10 +147,43 @@ impl RpTarget {
             };
             if self.diag[2] == DIAG_OK && self.diag[3] == DIAG_OK && self.diag[4] == DIAG_OK {
                 self.diag[1] = attempt;
+                // Comparators survive in target hardware across sessions;
+                // start each session without leftover HW break/watchpoints.
+                let _ = self.arm.debug_units_clear();
                 return;
             }
         }
         self.diag[1] = 0xdead;
+    }
+
+    /// Classify why the core stopped, for GDB's stop reply. DFSR (cleared by
+    /// the read) distinguishes watchpoints from breakpoints; an FPB
+    /// comparator covering the PC distinguishes hardware from software
+    /// breakpoints.
+    fn stop_reason(&mut self) -> SingleThreadStopReason<u32> {
+        if self.stepping {
+            return SingleThreadStopReason::DoneStep;
+        }
+        match self.arm.halt_reason() {
+            Ok(HaltReason::Watchpoint(addr, access)) => SingleThreadStopReason::Watch {
+                tid: (),
+                kind: match access {
+                    WatchAccess::Read => WatchKind::Read,
+                    WatchAccess::Write => WatchKind::Write,
+                    WatchAccess::ReadWrite => WatchKind::ReadWrite,
+                },
+                addr,
+            },
+            Ok(HaltReason::Breakpoint) => {
+                let pc = self.arm.read_core_reg(cm::PC).unwrap_or(0);
+                if self.arm.hw_breakpoint_at(pc).unwrap_or(false) {
+                    SingleThreadStopReason::HwBreak(())
+                } else {
+                    SingleThreadStopReason::SwBreak(())
+                }
+            }
+            _ => SingleThreadStopReason::SwBreak(()),
+        }
     }
 }
 
@@ -204,7 +239,7 @@ impl SingleThreadBase for RpTarget {
         let diag_len = (self.diag.len() * 4) as u32;
         if start >= DIAG_BASE && start.wrapping_sub(DIAG_BASE) < diag_len {
             let off = (start - DIAG_BASE) as usize;
-            let mut bytes = [0u8; 40];
+            let mut bytes = [0u8; 44];
             for (i, w) in self.diag.iter().enumerate() {
                 bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
             }
@@ -249,6 +284,63 @@ impl SingleThreadSingleStep for RpTarget {
 impl Breakpoints for RpTarget {
     fn support_sw_breakpoint(&mut self) -> Option<SwBreakpointOps<'_, Self>> {
         Some(self)
+    }
+    fn support_hw_breakpoint(&mut self) -> Option<HwBreakpointOps<'_, Self>> {
+        Some(self)
+    }
+    fn support_hw_watchpoint(&mut self) -> Option<HwWatchpointOps<'_, Self>> {
+        Some(self)
+    }
+}
+
+impl HwBreakpoint for RpTarget {
+    fn add_hw_breakpoint(
+        &mut self,
+        addr: u32,
+        _kind: ArmBreakpointKind,
+    ) -> TargetResult<bool, Self> {
+        // FPB comparator (code region 0x0..0x2000_0000; ROM/flash included).
+        self.arm.hw_breakpoint_set(addr).map_err(Self::map_err)
+    }
+
+    fn remove_hw_breakpoint(
+        &mut self,
+        addr: u32,
+        _kind: ArmBreakpointKind,
+    ) -> TargetResult<bool, Self> {
+        self.arm.hw_breakpoint_clear(addr).map_err(Self::map_err)
+    }
+}
+
+fn watch_access(kind: WatchKind) -> WatchAccess {
+    match kind {
+        WatchKind::Read => WatchAccess::Read,
+        WatchKind::Write => WatchAccess::Write,
+        WatchKind::ReadWrite => WatchAccess::ReadWrite,
+    }
+}
+
+impl HwWatchpoint for RpTarget {
+    fn add_hw_watchpoint(
+        &mut self,
+        addr: u32,
+        len: u32,
+        kind: WatchKind,
+    ) -> TargetResult<bool, Self> {
+        self.arm
+            .watchpoint_set(addr, len, watch_access(kind))
+            .map_err(Self::map_err)
+    }
+
+    fn remove_hw_watchpoint(
+        &mut self,
+        addr: u32,
+        len: u32,
+        kind: WatchKind,
+    ) -> TargetResult<bool, Self> {
+        self.arm
+            .watchpoint_clear(addr, len, watch_access(kind))
+            .map_err(Self::map_err)
     }
 }
 
@@ -426,7 +518,7 @@ fn main() -> ! {
         },
         clocks.system_clock.freq().to_Hz(),
     );
-    let mut arm = ArmDebug::new(swd, config);
+    let arm = ArmDebug::new(swd, config);
 
     // Wait for USB enumeration before touching the target (keeps enumeration
     // responsive), then connect + halt so GDB attaches to a stopped core.
@@ -450,6 +542,7 @@ fn main() -> ! {
             // Reset site + count of the previous boot (survive sys_reset).
             unsafe { WATCHDOG_SCRATCH0.read_volatile() },
             unsafe { WATCHDOG_SCRATCH1.read_volatile() },
+            0,
         ],
     };
     target.connect_and_halt();
@@ -471,37 +564,31 @@ fn main() -> ! {
             .run_state_machine(&mut target)
             .unwrap_or_else(|_| reset_self(2));
 
-        // Drive this session until GDB disconnects.
+        // Drive this session until GDB disconnects. A gdbstub error (e.g. a
+        // new GDB attaching while the previous session's state machine is
+        // still Running) ends the session the same way — the outer loop
+        // rebuilds a fresh stub — instead of rebooting the firmware.
         loop {
-            sm = match sm {
+            let next = match sm {
                 GdbStubStateMachine::Idle(mut inner) => {
                     inner.borrow_conn().0.pump();
                     match inner.borrow_conn().0.read_byte() {
-                        Some(b) => inner
-                            .incoming_data(&mut target, b)
-                            .unwrap_or_else(|_| reset_self(3)),
-                        None => GdbStubStateMachine::Idle(inner),
+                        Some(b) => inner.incoming_data(&mut target, b).ok(),
+                        None => Some(GdbStubStateMachine::Idle(inner)),
                     }
                 }
                 GdbStubStateMachine::Running(mut inner) => {
                     inner.borrow_conn().0.pump();
                     if let Some(b) = inner.borrow_conn().0.read_byte() {
                         // Typically a Ctrl-C (0x03) to interrupt.
-                        inner
-                            .incoming_data(&mut target, b)
-                            .unwrap_or_else(|_| reset_self(4))
+                        inner.incoming_data(&mut target, b).ok()
                     } else if target.arm.is_halted().unwrap_or(false) {
-                        // The core stopped on its own (breakpoint / step done).
-                        let reason = if target.stepping {
-                            SingleThreadStopReason::DoneStep
-                        } else {
-                            SingleThreadStopReason::SwBreak(())
-                        };
-                        inner
-                            .report_stop(&mut target, reason)
-                            .unwrap_or_else(|_| reset_self(5))
+                        // The core stopped on its own (breakpoint / watchpoint
+                        // / step done).
+                        let reason = target.stop_reason();
+                        inner.report_stop(&mut target, reason).ok()
                     } else {
-                        GdbStubStateMachine::Running(inner)
+                        Some(GdbStubStateMachine::Running(inner))
                     }
                 }
                 GdbStubStateMachine::CtrlCInterrupt(inner) => {
@@ -511,11 +598,16 @@ fn main() -> ! {
                             &mut target,
                             Some(SingleThreadStopReason::Signal(Signal::SIGINT)),
                         )
-                        .unwrap_or_else(|_| reset_self(6))
+                        .ok()
                 }
-                GdbStubStateMachine::Disconnected(_) => break,
+                GdbStubStateMachine::Disconnected(_) => None,
             };
+            match next {
+                Some(s) => sm = s,
+                None => break,
+            }
         }
+        target.diag[10] = target.diag[10].wrapping_add(1); // sessions ended (any cause)
         // GDB detached: the state machine (and its borrow of conn) is dropped.
         // Flush the detach response and drop stale RX, re-establish the SWD
         // link + halt so the next `target remote` sees a clean target state,
