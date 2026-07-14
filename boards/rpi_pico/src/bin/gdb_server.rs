@@ -89,10 +89,42 @@ struct RpTarget {
     /// [9] reset count (survives sys_reset via watchdog scratch)
     /// [10] sessions ended (clean disconnect or recovered stub error)
     diag: [u32; 11],
+    /// Cached bootrom flash routine addresses.
+    flash_fns: Option<RomFlashFns>,
+    /// Whether the target is in flash-command mode (XIP disabled).
+    flash_mode: bool,
+    /// Sectors erased since entering flash mode (1 bit per 4 KiB sector).
+    erased: [u32; (FLASH_SIZE / FLASH_SECTOR / 32) as usize],
 }
 
 const DIAG_BASE: u32 = 0xF000_0000;
 const DIAG_OK: u32 = 0x0a11_600d;
+
+// --- Flash writing (M5): GDB `load`/memory writes into the XIP window are
+// implemented by calling the target's bootrom flash routines.
+const FLASH_BASE: u32 = rp2040::FLASH_BASE;
+const FLASH_SIZE: u32 = 2 * 1024 * 1024; // Pico W25Q16 (2 MiB)
+const FLASH_SECTOR: u32 = 4096;
+/// Staging buffer in target RAM for flash_range_program's source data.
+const TARGET_STAGE: u32 = 0x2001_0000;
+/// Stack for remote bootrom calls (grows down).
+const TARGET_CALL_SP: u32 = 0x2000_8000;
+/// BKPT return trampoline for remote calls.
+const TARGET_TRAMPOLINE: u32 = 0x2000_7000;
+/// DHCSR poll budgets: a 4 KiB sector erase takes tens of ms.
+const POLLS_CALL: u32 = 100_000;
+const POLLS_ERASE: u32 = 400_000;
+
+/// Bootrom flash routine addresses, looked up once per boot.
+#[derive(Clone, Copy)]
+struct RomFlashFns {
+    connect: u32,
+    exit_xip: u32,
+    erase: u32,
+    program: u32,
+    flush: u32,
+    enter_xip: u32,
+}
 
 fn err_code(e: &arm_debug::ArmError) -> u32 {
     use arm_debug::ArmError::*;
@@ -129,6 +161,7 @@ impl RpTarget {
     fn connect_and_halt(&mut self) {
         self.diag[0] = self.diag[0].wrapping_add(1);
         self.diag[5] = 0;
+        self.flash_mode = false; // fresh link: assume XIP state unknown
         for attempt in 1u32..=4 {
             self.diag[2] = match self.arm.connect_multidrop(rp2040::CORE0_TARGETSEL) {
                 Ok(dpidr) => {
@@ -154,6 +187,103 @@ impl RpTarget {
             }
         }
         self.diag[1] = 0xdead;
+    }
+
+    fn rom_flash_fns(&mut self) -> Result<RomFlashFns, arm_debug::ArmError> {
+        if let Some(f) = self.flash_fns {
+            return Ok(f);
+        }
+        let mut get = |code| -> Result<u32, arm_debug::ArmError> {
+            self.arm
+                .rom_func_lookup(code)?
+                .ok_or(arm_debug::ArmError::Internal)
+        };
+        let fns = RomFlashFns {
+            connect: get(rp2040::FN_CONNECT_INTERNAL_FLASH)?,
+            exit_xip: get(rp2040::FN_FLASH_EXIT_XIP)?,
+            erase: get(rp2040::FN_FLASH_RANGE_ERASE)?,
+            program: get(rp2040::FN_FLASH_RANGE_PROGRAM)?,
+            flush: get(rp2040::FN_FLASH_FLUSH_CACHE)?,
+            enter_xip: get(rp2040::FN_FLASH_ENTER_CMD_XIP)?,
+        };
+        self.flash_fns = Some(fns);
+        Ok(fns)
+    }
+
+    fn rom_call(&mut self, fn_addr: u32, args: [u32; 4], polls: u32) -> Result<u32, arm_debug::ArmError> {
+        self.arm
+            .call_function(fn_addr, &args, TARGET_CALL_SP, TARGET_TRAMPOLINE, polls)
+    }
+
+    /// Put the target's flash into command mode (XIP off) for erase/program.
+    fn flash_enter(&mut self) -> Result<(), arm_debug::ArmError> {
+        if self.flash_mode {
+            return Ok(());
+        }
+        let f = self.rom_flash_fns()?;
+        self.rom_call(f.connect, [0; 4], POLLS_CALL)?;
+        self.rom_call(f.exit_xip, [0; 4], POLLS_CALL)?;
+        self.erased = Default::default();
+        self.flash_mode = true;
+        Ok(())
+    }
+
+    /// Leave flash-command mode: flush the XIP cache and restore XIP so the
+    /// flash window is readable/executable again. Best-effort.
+    fn flash_exit(&mut self) {
+        if !self.flash_mode {
+            return;
+        }
+        if let Ok(f) = self.rom_flash_fns() {
+            let _ = self.rom_call(f.flush, [0; 4], POLLS_CALL);
+            let _ = self.rom_call(f.enter_xip, [0; 4], POLLS_CALL);
+        }
+        self.flash_mode = false;
+    }
+
+    /// Write `data` to flash at XIP address `addr`: erase not-yet-erased
+    /// sectors, then program 256-byte pages padded with 0xFF (programming a
+    /// bit to 1 leaves it unchanged, so sequential chunks within one page
+    /// compose correctly).
+    fn flash_write(&mut self, addr: u32, data: &[u8]) -> Result<(), arm_debug::ArmError> {
+        let off = addr - FLASH_BASE;
+        let end = off + data.len() as u32;
+        if end > FLASH_SIZE {
+            return Err(arm_debug::ArmError::Internal);
+        }
+        self.flash_enter()?;
+        let f = self.rom_flash_fns()?;
+        for sector in off / FLASH_SECTOR..=(end - 1) / FLASH_SECTOR {
+            let (word, bit) = ((sector / 32) as usize, sector % 32);
+            if self.erased[word] & (1 << bit) == 0 {
+                // (offset, count, block_size, block_cmd) — SDK defaults.
+                self.rom_call(
+                    f.erase,
+                    [sector * FLASH_SECTOR, FLASH_SECTOR, 1 << 16, 0xD8],
+                    POLLS_ERASE,
+                )?;
+                self.erased[word] |= 1 << bit;
+            }
+        }
+        // Program the 256-byte-aligned span covering the chunk, staging
+        // through target RAM in buffer-sized pieces.
+        let mut buf = [0xFFu8; 1024];
+        let mut pos = off & !0xFF;
+        let span_end = (end + 0xFF) & !0xFF;
+        while pos < span_end {
+            let n = buf.len().min((span_end - pos) as usize);
+            buf[..n].fill(0xFF);
+            for (i, slot) in buf[..n].iter_mut().enumerate() {
+                let a = pos + i as u32;
+                if a >= off && a < end {
+                    *slot = data[(a - off) as usize];
+                }
+            }
+            self.arm.write_mem(TARGET_STAGE, &buf[..n])?;
+            self.rom_call(f.program, [pos, TARGET_STAGE, n as u32, 0], POLLS_ERASE)?;
+            pos += n as u32;
+        }
+        Ok(())
     }
 
     /// Classify why the core stopped, for GDB's stop reply. DFSR (cleared by
@@ -247,13 +377,27 @@ impl SingleThreadBase for RpTarget {
             data[..n].copy_from_slice(&bytes[off..off + n]);
             return Ok(n);
         }
+        // Reading the XIP window requires flash to be back in XIP mode.
+        if self.flash_mode && start >= FLASH_BASE && start < FLASH_BASE + FLASH_SIZE {
+            self.flash_exit();
+        }
         let r = self.arm.read_mem(start, data);
         self.diag_err(r).map_err(Self::map_err)?;
         Ok(data.len())
     }
 
     fn write_addrs(&mut self, start: u32, data: &[u8]) -> TargetResult<(), Self> {
-        self.arm.write_mem(start, data).map_err(Self::map_err)
+        if data.is_empty() {
+            return Ok(());
+        }
+        // Writes into the XIP window go through the bootrom flash routines
+        // (this is how GDB `load` programs the target).
+        if (FLASH_BASE..FLASH_BASE + FLASH_SIZE).contains(&start) {
+            let r = self.flash_write(start, data);
+            return self.diag_err(r).map_err(Self::map_err);
+        }
+        let r = self.arm.write_mem(start, data);
+        self.diag_err(r).map_err(Self::map_err)
     }
 
     fn support_resume(&mut self) -> Option<SingleThreadResumeOps<'_, Self>> {
@@ -263,6 +407,7 @@ impl SingleThreadBase for RpTarget {
 
 impl SingleThreadResume for RpTarget {
     fn resume(&mut self, _signal: Option<Signal>) -> Result<(), Self::Error> {
+        self.flash_exit(); // code may run from the XIP window
         self.stepping = false;
         let _ = self.arm.resume();
         Ok(())
@@ -275,6 +420,7 @@ impl SingleThreadResume for RpTarget {
 
 impl SingleThreadSingleStep for RpTarget {
     fn step(&mut self, _signal: Option<Signal>) -> Result<(), Self::Error> {
+        self.flash_exit();
         self.stepping = true;
         let _ = self.arm.step();
         Ok(())
@@ -544,6 +690,9 @@ fn main() -> ! {
             unsafe { WATCHDOG_SCRATCH1.read_volatile() },
             0,
         ],
+        flash_fns: None,
+        flash_mode: false,
+        erased: Default::default(),
     };
     target.connect_and_halt();
 
