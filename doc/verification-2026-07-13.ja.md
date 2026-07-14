@@ -284,3 +284,26 @@ break・continue・step が GDB から通しで動作)。
 本件で説明される(SWD リンクは一度も壊れていなかった)。arm-debug の
 SWD→dormant 強制(0xE3BC)は真因の修正ではなく ADIv5 仕様準拠の堅牢化として維持。
 診断窓(0xF000_0000)と reset site 記録は恒久機能として残す。
+
+## 追記12: GDB デバッガ M4(FPB ハードブレーク / DWT ウォッチポイント)実機検証 (2026-07-15)
+
+arm-debug に FPB v1(ARMv6-M)/ DWT / DFSR 停止理由判別を実装し(ホストテスト
+22 件)、gdb_server に Z1(hbreak)/ Z2〜Z4(watch/rwatch/awatch)を配線して実機検証:
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | `hbreak *0x190`(bootrom ROM)+ `bx` で突入 → フェッチで halt | OK(pc=0x190 ちょうどで停止、命令は未実行) |
+| 2 | `watch *(unsigned int)0x20001100`(RAM str ループ) | OK(書込直後に停止、GDB が Old/New 値表示) |
+| 3 | `rwatch`(RAM ldr ループ) | OK(読出で停止、Value 表示) |
+| 4 | 停止理由の分類(DFSR → Watch{addr,kind} / HwBreak / SwBreak / DoneStep) | OK(GDB が各ブレークを正しく対応付け) |
+| 5 | セッション跨ぎの残留コンパレータ掃除(attach 時 sweep) | OK(死んだセッションが残した FP_COMP が次の attach で全ゼロ) |
+
+補助的な発見と対処:
+
+- ロックアップ中のターゲット(pc=0xfffffffe)はブレーク不能。DEMCR.VC_CORERESET +
+  AIRCR.SYSRESETREQ(いずれも GDB からのメモリ書込)でリセットベクタ halt に復旧
+  できることを実機確認(M6 のリセット/ベクタキャッチの先行検証を兼ねる)。
+- Running 状態のスタブへ新 GDB が接続すると gdbstub がエラー(reset site 4 で捕捉)
+  → セッションエラーは再起動ではなくスタブ再構築で優雅に回復するよう変更。
+
+**M4 完了**: フラッシュ/ROM 常駐コードのブレークとデータウォッチが GDB から使用可能。
