@@ -582,6 +582,115 @@ fn dhcsr_write_requires_dbgkey() {
     assert!(arm.is_halted().unwrap());
 }
 
+////////////////////////////////////////////////////////////////////////////
+// M4: FPB hardware breakpoints, DWT watchpoints, DFSR halt reason.
+////////////////////////////////////////////////////////////////////////////
+
+/// MemMock with FPB (4 comparators) and DWT (2 comparators) advertised.
+fn arm_with_debug_units() -> ArmDebug<MemMock> {
+    let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());
+    arm.write_word(fpb::FP_CTRL, 4 << 4).unwrap(); // NUM_CODE = 4
+    arm.write_word(dwt::DWT_CTRL, 2 << 28).unwrap(); // NUMCOMP = 2
+    arm
+}
+
+#[test]
+fn hw_breakpoint_set_encodes_fpb_v1_comp() {
+    let mut arm = arm_with_debug_units();
+    // Lower halfword (addr bit1 = 0) → REPLACE = 01.
+    assert!(arm.hw_breakpoint_set(0x0000_1794).unwrap());
+    assert_eq!(
+        arm.read_word(fpb::FP_COMP0).unwrap(),
+        (0b01 << 30) | 0x0000_1794 | fpb::COMP_ENABLE
+    );
+    // Upper halfword (addr bit1 = 1) → REPLACE = 10, word-aligned COMP.
+    assert!(arm.hw_breakpoint_set(0x1000_0002).unwrap());
+    assert_eq!(
+        arm.read_word(fpb::FP_COMP0 + 4).unwrap(),
+        (0b10u32 << 30) | 0x1000_0000 | fpb::COMP_ENABLE
+    );
+    // FP_CTRL got enabled with the key.
+    assert_eq!(
+        arm.read_word(fpb::FP_CTRL).unwrap() & (fpb::CTRL_KEY | fpb::CTRL_ENABLE),
+        fpb::CTRL_KEY | fpb::CTRL_ENABLE
+    );
+    // Setting the same breakpoint twice does not burn a second comparator.
+    assert!(arm.hw_breakpoint_set(0x0000_1794).unwrap());
+    assert_eq!(arm.read_word(fpb::FP_COMP0 + 8).unwrap(), 0);
+    assert!(arm.hw_breakpoint_at(0x0000_1794).unwrap());
+}
+
+#[test]
+fn hw_breakpoint_rejects_non_code_region_and_exhaustion() {
+    let mut arm = arm_with_debug_units();
+    // FPB v1 cannot break above 0x2000_0000 (RAM) — SW breakpoints do that.
+    assert!(!arm.hw_breakpoint_set(0x2000_0000).unwrap());
+    for i in 0..4 {
+        assert!(arm.hw_breakpoint_set(0x100 + 4 * i).unwrap());
+    }
+    assert!(!arm.hw_breakpoint_set(0x1000).unwrap()); // all comparators busy
+    // Clearing frees the comparator for reuse.
+    assert!(arm.hw_breakpoint_clear(0x104).unwrap());
+    assert!(!arm.hw_breakpoint_clear(0x104).unwrap()); // already gone
+    assert!(arm.hw_breakpoint_set(0x1000).unwrap());
+}
+
+#[test]
+fn watchpoint_set_programs_dwt_and_dwtena() {
+    let mut arm = arm_with_debug_units();
+    assert!(arm
+        .watchpoint_set(0x2000_1000, 4, WatchAccess::Write)
+        .unwrap());
+    assert_eq!(arm.read_word(dwt::COMP0).unwrap(), 0x2000_1000);
+    assert_eq!(arm.read_word(dwt::MASK0).unwrap(), 2); // log2(4)
+    assert_eq!(arm.read_word(dwt::FUNCTION0).unwrap(), dwt::FUNC_WRITE);
+    assert_eq!(
+        arm.read_word(cm::DEMCR).unwrap() & cm::DEMCR_DWTENA,
+        cm::DEMCR_DWTENA
+    );
+    // Unaligned / non-power-of-two rejected.
+    assert!(!arm.watchpoint_set(0x2000_1001, 4, WatchAccess::Read).unwrap());
+    assert!(!arm.watchpoint_set(0x2000_1000, 3, WatchAccess::Read).unwrap());
+    // Second comparator, then exhaustion.
+    assert!(arm.watchpoint_set(0x2000_2000, 1, WatchAccess::Read).unwrap());
+    assert!(!arm
+        .watchpoint_set(0x2000_3000, 4, WatchAccess::ReadWrite)
+        .unwrap());
+    // Clear requires matching parameters.
+    assert!(!arm
+        .watchpoint_clear(0x2000_1000, 4, WatchAccess::Read)
+        .unwrap());
+    assert!(arm
+        .watchpoint_clear(0x2000_1000, 4, WatchAccess::Write)
+        .unwrap());
+    assert!(arm
+        .watchpoint_set(0x2000_3000, 4, WatchAccess::ReadWrite)
+        .unwrap());
+}
+
+#[test]
+fn halt_reason_decodes_and_clears_dfsr() {
+    let mut arm = arm_with_debug_units();
+    // Breakpoint.
+    arm.write_word(cm::DFSR, cm::DFSR_BKPT | cm::DFSR_HALTED).unwrap();
+    assert_eq!(arm.halt_reason().unwrap(), HaltReason::Breakpoint);
+    // Watchpoint: DWTTRAP + comparator 1 flagged as matched.
+    arm.write_word(cm::DFSR, cm::DFSR_DWTTRAP).unwrap();
+    arm.write_word(dwt::COMP0 + 0x10, 0x2000_4000).unwrap();
+    arm.write_word(dwt::FUNCTION0 + 0x10, dwt::FUNC_MATCHED | dwt::FUNC_WRITE)
+        .unwrap();
+    assert_eq!(
+        arm.halt_reason().unwrap(),
+        HaltReason::Watchpoint(0x2000_4000, WatchAccess::Write)
+    );
+    // Plain halt request.
+    arm.write_word(cm::DFSR, cm::DFSR_HALTED).unwrap();
+    assert_eq!(arm.halt_reason().unwrap(), HaltReason::HaltRequest);
+    // Nothing recorded.
+    arm.write_word(cm::DFSR, 0).unwrap();
+    assert_eq!(arm.halt_reason().unwrap(), HaltReason::Unknown);
+}
+
 #[test]
 fn read_mem_and_write_mem_byte_granular() {
     let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());

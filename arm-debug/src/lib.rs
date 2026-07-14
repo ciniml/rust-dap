@@ -449,6 +449,16 @@ pub mod cortex_m {
     /// DCRSR write direction: 1 = write the register, 0 = read it.
     pub const DCRSR_REGWNR: u32 = 1 << 16;
 
+    /// Debug Fault Status Register (halt reason; bits are write-1-to-clear).
+    pub const DFSR: u32 = 0xE000_ED30;
+    pub const DFSR_HALTED: u32 = 1 << 0;
+    pub const DFSR_BKPT: u32 = 1 << 1;
+    pub const DFSR_DWTTRAP: u32 = 1 << 2;
+    pub const DFSR_VCATCH: u32 = 1 << 3;
+
+    /// DEMCR: enable the DWT unit (called DWTENA on ARMv6-M, TRCENA on v7-M).
+    pub const DEMCR_DWTENA: u32 = 1 << 24;
+
     // Core register selector values (a subset; r0-r15 are 0..=15).
     pub const R0: u8 = 0;
     pub const SP: u8 = 13;
@@ -516,6 +526,257 @@ impl<T: DapTransport> ArmDebug<T> {
         self.write_word(cortex_m::DCRDR, value)?;
         self.write_word(cortex_m::DCRSR, reg as u32 | cortex_m::DCRSR_REGWNR)?;
         self.wait_status(cortex_m::S_REGRDY)
+    }
+}
+
+/// Flash Patch and Breakpoint unit (ARMv6-M FPB v1) register addresses.
+pub mod fpb {
+    /// FP_CTRL: NUM_CODE in bits[7:4]; bit1 = KEY (must be 1 for the write to
+    /// take), bit0 = ENABLE.
+    pub const FP_CTRL: u32 = 0xE000_2000;
+    /// First comparator; comparator n is at `FP_COMP0 + 4 * n`.
+    pub const FP_COMP0: u32 = 0xE000_2008;
+    pub const CTRL_KEY: u32 = 1 << 1;
+    pub const CTRL_ENABLE: u32 = 1 << 0;
+    pub const COMP_ENABLE: u32 = 1 << 0;
+}
+
+/// Data Watchpoint and Trace unit (ARMv6-M subset) register addresses.
+pub mod dwt {
+    /// DWT_CTRL: NUMCOMP in bits[31:28].
+    pub const DWT_CTRL: u32 = 0xE000_1000;
+    /// Comparator n registers are at `COMP0/MASK0/FUNCTION0 + 0x10 * n`.
+    pub const COMP0: u32 = 0xE000_1020;
+    pub const MASK0: u32 = 0xE000_1024;
+    pub const FUNCTION0: u32 = 0xE000_1028;
+    /// FUNCTION[24]: comparator matched since last read (reading clears it).
+    pub const FUNC_MATCHED: u32 = 1 << 24;
+    /// FUNCTION[3:0] encodings for data-address watchpoints.
+    pub const FUNC_READ: u32 = 0b0101;
+    pub const FUNC_WRITE: u32 = 0b0110;
+    pub const FUNC_READWRITE: u32 = 0b0111;
+}
+
+/// Access kind for a data watchpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WatchAccess {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+impl WatchAccess {
+    fn function(self) -> u32 {
+        match self {
+            WatchAccess::Read => dwt::FUNC_READ,
+            WatchAccess::Write => dwt::FUNC_WRITE,
+            WatchAccess::ReadWrite => dwt::FUNC_READWRITE,
+        }
+    }
+}
+
+/// Why the core halted, decoded from DFSR (milestone M4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HaltReason {
+    /// BKPT instruction or FPB comparator hit.
+    Breakpoint,
+    /// DWT watchpoint hit; carries the comparator address and access kind.
+    Watchpoint(u32, WatchAccess),
+    /// Halt request or single-step completion.
+    HaltRequest,
+    /// Vector catch.
+    VectorCatch,
+    /// Nothing recorded (e.g. already-cleared DFSR).
+    Unknown,
+}
+
+impl<T: DapTransport> ArmDebug<T> {
+    /// Number of FPB code comparators (0 if no FPB).
+    fn fpb_num_comps(&mut self) -> Result<u32, ArmError> {
+        Ok((self.read_word(fpb::FP_CTRL)? >> 4) & 0xF)
+    }
+
+    /// FP_COMP value for a breakpoint at `addr`, or None if the address is
+    /// outside the FPB v1 code region (0x0000_0000..0x2000_0000).
+    fn fpb_comp_value(addr: u32) -> Option<u32> {
+        if addr >= 0x2000_0000 {
+            return None;
+        }
+        // REPLACE selects which halfword of the word triggers.
+        let replace = if addr & 2 != 0 { 0b10u32 } else { 0b01u32 };
+        Some((replace << 30) | (addr & 0x1FFF_FFFC) | fpb::COMP_ENABLE)
+    }
+
+    /// Set a hardware breakpoint at `addr` (code region only). Returns false
+    /// if the address is not breakable or no comparator is free. Comparator
+    /// occupancy is read back from the hardware, so no host state is kept.
+    pub fn hw_breakpoint_set(&mut self, addr: u32) -> Result<bool, ArmError> {
+        let Some(value) = Self::fpb_comp_value(addr) else {
+            return Ok(false);
+        };
+        let ctrl = self.read_word(fpb::FP_CTRL)?;
+        let n = (ctrl >> 4) & 0xF;
+        if n == 0 {
+            return Ok(false);
+        }
+        // NUM_CODE is read-only; KEY reads as zero and must be set for the
+        // enable write to take.
+        self.write_word(fpb::FP_CTRL, ctrl | fpb::CTRL_KEY | fpb::CTRL_ENABLE)?;
+        let mut free = None;
+        for i in 0..n {
+            let comp = self.read_word(fpb::FP_COMP0 + 4 * i)?;
+            if comp == value {
+                return Ok(true); // already set
+            }
+            if free.is_none() && comp & fpb::COMP_ENABLE == 0 {
+                free = Some(i);
+            }
+        }
+        match free {
+            Some(i) => {
+                self.write_word(fpb::FP_COMP0 + 4 * i, value)?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Clear the hardware breakpoint at `addr`. Returns false if none is set.
+    pub fn hw_breakpoint_clear(&mut self, addr: u32) -> Result<bool, ArmError> {
+        let Some(value) = Self::fpb_comp_value(addr) else {
+            return Ok(false);
+        };
+        let n = self.fpb_num_comps()?;
+        for i in 0..n {
+            if self.read_word(fpb::FP_COMP0 + 4 * i)? == value {
+                self.write_word(fpb::FP_COMP0 + 4 * i, 0)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether an enabled FPB comparator covers `addr` (used to distinguish
+    /// hardware from software breakpoints when reporting a stop).
+    pub fn hw_breakpoint_at(&mut self, addr: u32) -> Result<bool, ArmError> {
+        let Some(value) = Self::fpb_comp_value(addr) else {
+            return Ok(false);
+        };
+        let n = self.fpb_num_comps()?;
+        for i in 0..n {
+            if self.read_word(fpb::FP_COMP0 + 4 * i)? == value {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn dwt_num_comps(&mut self) -> Result<u32, ArmError> {
+        Ok((self.read_word(dwt::DWT_CTRL)? >> 28) & 0xF)
+    }
+
+    /// Set a data watchpoint. `len` must be a power of two and `addr` aligned
+    /// to it (DWT comparators mask low address bits). Returns false if the
+    /// parameters are unsupported or no comparator is free.
+    pub fn watchpoint_set(
+        &mut self,
+        addr: u32,
+        len: u32,
+        access: WatchAccess,
+    ) -> Result<bool, ArmError> {
+        if len == 0 || !len.is_power_of_two() || addr & (len - 1) != 0 {
+            return Ok(false);
+        }
+        let n = self.dwt_num_comps()?;
+        if n == 0 {
+            return Ok(false);
+        }
+        // The DWT unit only raises debug events with DEMCR.DWTENA set.
+        let demcr = self.read_word(cortex_m::DEMCR)?;
+        self.write_word(cortex_m::DEMCR, demcr | cortex_m::DEMCR_DWTENA)?;
+        for i in 0..n {
+            let function = self.read_word(dwt::FUNCTION0 + 0x10 * i)?;
+            if function & 0xF == 0 {
+                self.write_word(dwt::COMP0 + 0x10 * i, addr)?;
+                self.write_word(dwt::MASK0 + 0x10 * i, len.trailing_zeros())?;
+                self.write_word(dwt::FUNCTION0 + 0x10 * i, access.function())?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Clear the watchpoint matching `addr`/`len`/`access`. Returns false if
+    /// none matches.
+    pub fn watchpoint_clear(
+        &mut self,
+        addr: u32,
+        len: u32,
+        access: WatchAccess,
+    ) -> Result<bool, ArmError> {
+        if len == 0 || !len.is_power_of_two() {
+            return Ok(false);
+        }
+        let n = self.dwt_num_comps()?;
+        for i in 0..n {
+            let function = self.read_word(dwt::FUNCTION0 + 0x10 * i)?;
+            if function & 0xF == access.function()
+                && self.read_word(dwt::COMP0 + 0x10 * i)? == addr
+                && self.read_word(dwt::MASK0 + 0x10 * i)? == len.trailing_zeros()
+            {
+                self.write_word(dwt::FUNCTION0 + 0x10 * i, 0)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Disable every FPB comparator and DWT watchpoint. Comparators live in
+    /// target hardware, so breakpoints left by a dead debug session survive
+    /// into the next one; call this when (re)attaching for a clean slate.
+    pub fn debug_units_clear(&mut self) -> Result<(), ArmError> {
+        let n = self.fpb_num_comps()?;
+        for i in 0..n {
+            self.write_word(fpb::FP_COMP0 + 4 * i, 0)?;
+        }
+        let n = self.dwt_num_comps()?;
+        for i in 0..n {
+            self.write_word(dwt::FUNCTION0 + 0x10 * i, 0)?;
+        }
+        Ok(())
+    }
+
+    /// Decode (and clear) why the core halted. For a watchpoint stop, the
+    /// matched comparator supplies the data address and access kind.
+    pub fn halt_reason(&mut self) -> Result<HaltReason, ArmError> {
+        let dfsr = self.read_word(cortex_m::DFSR)?;
+        self.write_word(cortex_m::DFSR, dfsr)?; // write-1-to-clear
+        if dfsr & cortex_m::DFSR_DWTTRAP != 0 {
+            let n = self.dwt_num_comps()?;
+            for i in 0..n {
+                let function = self.read_word(dwt::FUNCTION0 + 0x10 * i)?;
+                if function & dwt::FUNC_MATCHED != 0 {
+                    let addr = self.read_word(dwt::COMP0 + 0x10 * i)?;
+                    let access = match function & 0xF {
+                        dwt::FUNC_READ => WatchAccess::Read,
+                        dwt::FUNC_WRITE => WatchAccess::Write,
+                        _ => WatchAccess::ReadWrite,
+                    };
+                    return Ok(HaltReason::Watchpoint(addr, access));
+                }
+            }
+            return Ok(HaltReason::Watchpoint(0, WatchAccess::ReadWrite));
+        }
+        if dfsr & cortex_m::DFSR_BKPT != 0 {
+            return Ok(HaltReason::Breakpoint);
+        }
+        if dfsr & cortex_m::DFSR_VCATCH != 0 {
+            return Ok(HaltReason::VectorCatch);
+        }
+        if dfsr & cortex_m::DFSR_HALTED != 0 {
+            return Ok(HaltReason::HaltRequest);
+        }
+        Ok(HaltReason::Unknown)
     }
 }
 
