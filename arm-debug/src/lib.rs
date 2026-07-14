@@ -372,37 +372,81 @@ impl<T: DapTransport> ArmDebug<T> {
         Ok(())
     }
 
-    /// Read an arbitrary byte range from target memory (word reads under the
-    /// hood; handles unaligned start/length).
+    /// Write a block of consecutive 32-bit words using TAR auto-increment.
+    /// `addr` must be word-aligned and stay within a 1 KiB TAR wrap boundary
+    /// (the caller splits larger writes).
+    pub fn write_words(&mut self, addr: u32, words: &[u32]) -> Result<(), ArmError> {
+        if words.is_empty() {
+            return Ok(());
+        }
+        self.ensure_csw()?;
+        self.ap_write(AP_TAR, addr)?;
+        self.select_ap_bank(AP_DRW)?;
+        for w in words {
+            self.transfer(Port::Ap, false, AP_DRW & 0xC, *w)?;
+        }
+        // Flush the posted writes.
+        self.dp_read(DP_RDBUFF)?;
+        Ok(())
+    }
+
+    /// Largest word count starting at `addr` that stays inside the 1 KiB TAR
+    /// auto-increment wrap boundary.
+    fn tar_run(addr: u32, words: usize) -> usize {
+        (((1024 - (addr & 1023)) / 4) as usize).min(words)
+    }
+
+    /// Read an arbitrary byte range from target memory. Aligned full words
+    /// use block reads with TAR auto-increment; ragged edges use word reads.
     pub fn read_mem(&mut self, mut addr: u32, buf: &mut [u8]) -> Result<(), ArmError> {
         let mut i = 0;
         while i < buf.len() {
-            let word = self.read_word(addr & !3)?.to_le_bytes();
             let start = (addr & 3) as usize;
-            for b in word.iter().skip(start) {
-                if i >= buf.len() {
-                    break;
+            let remaining = buf.len() - i;
+            if start == 0 && remaining >= 4 {
+                // Bulk path: as many whole words as fit this TAR wrap run.
+                let n = Self::tar_run(addr, remaining / 4);
+                let mut words = [0u32; 16];
+                let n = n.min(words.len());
+                self.read_words(addr, &mut words[..n])?;
+                for w in &words[..n] {
+                    buf[i..i + 4].copy_from_slice(&w.to_le_bytes());
+                    i += 4;
+                    addr += 4;
                 }
-                buf[i] = *b;
-                i += 1;
-                addr += 1;
+            } else {
+                let word = self.read_word(addr & !3)?.to_le_bytes();
+                for b in word.iter().skip(start) {
+                    if i >= buf.len() {
+                        break;
+                    }
+                    buf[i] = *b;
+                    i += 1;
+                    addr += 1;
+                }
             }
         }
         Ok(())
     }
 
-    /// Write an arbitrary byte range to target memory. Aligned full words are
-    /// written directly; partial words use read-modify-write.
+    /// Write an arbitrary byte range to target memory. Aligned full words use
+    /// block writes with TAR auto-increment; partial words read-modify-write.
     pub fn write_mem(&mut self, mut addr: u32, buf: &[u8]) -> Result<(), ArmError> {
         let mut i = 0;
         while i < buf.len() {
             let aligned = addr & !3;
             let start = (addr & 3) as usize;
             if start == 0 && buf.len() - i >= 4 {
-                let w = u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
-                self.write_word(aligned, w)?;
-                i += 4;
-                addr += 4;
+                let n = Self::tar_run(addr, (buf.len() - i) / 4);
+                let mut words = [0u32; 16];
+                let n = n.min(words.len());
+                for (k, w) in words[..n].iter_mut().enumerate() {
+                    let j = i + 4 * k;
+                    *w = u32::from_le_bytes([buf[j], buf[j + 1], buf[j + 2], buf[j + 3]]);
+                }
+                self.write_words(addr, &words[..n])?;
+                i += 4 * n;
+                addr += 4 * n as u32;
             } else {
                 let mut word = self.read_word(aligned)?.to_le_bytes();
                 for b in word.iter_mut().skip(start) {

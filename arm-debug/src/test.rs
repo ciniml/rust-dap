@@ -745,6 +745,22 @@ fn halt_reason_decodes_and_clears_dfsr() {
 }
 
 #[test]
+fn bulk_mem_ops_roundtrip_across_tar_wrap() {
+    // 64 bytes starting just below a 1 KiB TAR wrap boundary: exercises the
+    // block read/write paths and their boundary splitting.
+    let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());
+    let data: Vec<u8> = (0u8..64).collect();
+    arm.write_mem(0x2000_03e0, &data).unwrap();
+    let mut back = [0u8; 64];
+    arm.read_mem(0x2000_03e0, &mut back).unwrap();
+    assert_eq!(&back[..], &data[..]);
+    // Unaligned tail after a bulk run.
+    let mut tail = [0u8; 7];
+    arm.read_mem(0x2000_03e1, &mut tail).unwrap();
+    assert_eq!(&tail[..], &data[1..8]);
+}
+
+#[test]
 fn read_mem_and_write_mem_byte_granular() {
     let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());
     // Seed two words, then read an unaligned 6-byte span crossing them.
