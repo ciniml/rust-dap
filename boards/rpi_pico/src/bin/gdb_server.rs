@@ -74,12 +74,81 @@ struct RpTarget {
     /// Whether the last resume was a single-step (so the next stop is
     /// reported as DoneStep rather than SwBreak).
     stepping: bool,
+    /// Internal diagnostics, readable from GDB as memory at 0xF000_0000
+    /// (`x/8wx 0xF0000000`) even when the SWD link is dead:
+    /// [0] connect_and_halt invocations
+    /// [1] attempts used by the last connect_and_halt (0xdead = all failed)
+    /// [2] last connect_multidrop result (0xa11600d = ok, else error code)
+    /// [3] last halt result
+    /// [4] last verify-read result
+    /// [5] session op errors since last connect
+    /// [6] last successful DPIDR
+    /// [7] marker 0xd1a6d1a6
+    /// [8] reset site of the previous boot (which reset_self call fired)
+    /// [9] reset count (survives sys_reset via watchdog scratch)
+    diag: [u32; 10],
+}
+
+const DIAG_BASE: u32 = 0xF000_0000;
+const DIAG_OK: u32 = 0x0a11_600d;
+
+fn err_code(e: &arm_debug::ArmError) -> u32 {
+    use arm_debug::ArmError::*;
+    match e {
+        Transfer(ack) => 0x100 | *ack as u32,
+        Wait => 1,
+        NotSupported => 2,
+        PowerUpTimeout => 3,
+        CoreTimeout => 4,
+        NoTarget => 5,
+        Internal => 6,
+    }
 }
 
 impl RpTarget {
     fn map_err<E>(_e: E) -> TargetError<Infallible> {
         // arm-debug errors surface to GDB as a generic non-fatal error.
         TargetError::NonFatal
+    }
+
+    /// Count a failed session operation (diag[5]).
+    fn diag_err<T, E>(&mut self, r: Result<T, E>) -> Result<T, E> {
+        if r.is_err() {
+            self.diag[5] = self.diag[5].wrapping_add(1);
+        }
+        r
+    }
+
+    /// Establish the SWD link and halt the core, retrying from scratch until
+    /// a DHCSR read confirms the link is actually usable. A connect issued on
+    /// a live link has been observed to fail on hardware; the failed attempt
+    /// leaves the target in a state from which a later attempt succeeds.
+    /// Records what happened into `diag`.
+    fn connect_and_halt(&mut self) {
+        self.diag[0] = self.diag[0].wrapping_add(1);
+        self.diag[5] = 0;
+        for attempt in 1u32..=4 {
+            self.diag[2] = match self.arm.connect_multidrop(rp2040::CORE0_TARGETSEL) {
+                Ok(dpidr) => {
+                    self.diag[6] = dpidr;
+                    DIAG_OK
+                }
+                Err(e) => err_code(&e),
+            };
+            self.diag[3] = match self.arm.halt() {
+                Ok(()) => DIAG_OK,
+                Err(e) => err_code(&e),
+            };
+            self.diag[4] = match self.arm.read_word(cm::DHCSR) {
+                Ok(_) => DIAG_OK,
+                Err(e) => err_code(&e),
+            };
+            if self.diag[2] == DIAG_OK && self.diag[3] == DIAG_OK && self.diag[4] == DIAG_OK {
+                self.diag[1] = attempt;
+                return;
+            }
+        }
+        self.diag[1] = 0xdead;
     }
 }
 
@@ -130,7 +199,21 @@ impl SingleThreadBase for RpTarget {
     }
 
     fn read_addrs(&mut self, start: u32, data: &mut [u8]) -> TargetResult<usize, Self> {
-        self.arm.read_mem(start, data).map_err(Self::map_err)?;
+        // Diagnostic window: serve reads of 0xF000_0000.. from `diag` instead
+        // of the target, so internals are visible even with a dead SWD link.
+        let diag_len = (self.diag.len() * 4) as u32;
+        if start >= DIAG_BASE && start.wrapping_sub(DIAG_BASE) < diag_len {
+            let off = (start - DIAG_BASE) as usize;
+            let mut bytes = [0u8; 40];
+            for (i, w) in self.diag.iter().enumerate() {
+                bytes[i * 4..i * 4 + 4].copy_from_slice(&w.to_le_bytes());
+            }
+            let n = data.len().min(bytes.len() - off);
+            data[..n].copy_from_slice(&bytes[off..off + n]);
+            return Ok(n);
+        }
+        let r = self.arm.read_mem(start, data);
+        self.diag_err(r).map_err(Self::map_err)?;
         Ok(data.len())
     }
 
@@ -272,6 +355,24 @@ impl Connection for UsbConn<'_> {
     }
 }
 
+/// Borrow of the connection for one GDB session. The gdbstub state machine
+/// carries per-session protocol state (notably no-ack mode negotiated via
+/// QStartNoAckMode), so it cannot be reused across sessions: the next GDB
+/// starts in ack mode and its leading '+' errors a stub still in no-ack mode.
+/// Handing the machine a reborrow lets main rebuild it per session while
+/// keeping ownership of the USB connection.
+struct ConnRef<'b, 'a>(&'b mut UsbConn<'a>);
+
+impl Connection for ConnRef<'_, '_> {
+    type Error = Infallible;
+    fn write(&mut self, byte: u8) -> Result<(), Self::Error> {
+        Connection::write(self.0, byte)
+    }
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        Connection::flush(self.0)
+    }
+}
+
 #[rp_pico::entry]
 fn main() -> ! {
     let pac = pac::Peripherals::take().unwrap();
@@ -332,87 +433,112 @@ fn main() -> ! {
     while !conn.configured() {
         conn.pump();
     }
-    let _ = arm.connect_multidrop(rp2040::CORE0_TARGETSEL);
-    let _ = arm.halt();
 
     let mut target = RpTarget {
         arm,
         breakpoints: heapless::Vec::new(),
         stepping: false,
+        diag: [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0xd1a6_d1a6,
+            // Reset site + count of the previous boot (survive sys_reset).
+            unsafe { WATCHDOG_SCRATCH0.read_volatile() },
+            unsafe { WATCHDOG_SCRATCH1.read_volatile() },
+        ],
     };
+    target.connect_and_halt();
 
-    // Run the gdbstub state machine, driven from the USB poll loop.
+    // One iteration per GDB session: the gdbstub state machine holds
+    // per-session protocol state (e.g. negotiated no-ack mode), so it must be
+    // rebuilt from scratch after every disconnect — reusing it makes the next
+    // session's opening ack error the stub.
     let mut packet_buffer = [0u8; 1024];
-    let gdb = match GdbStubBuilder::new(conn)
-        .with_packet_buffer(&mut packet_buffer)
-        .build()
-    {
-        Ok(g) => g,
-        Err(_) => reset_self(),
-    };
-    let mut sm = gdb
-        .run_state_machine(&mut target)
-        .unwrap_or_else(|_| reset_self());
-
     loop {
-        sm = match sm {
-            GdbStubStateMachine::Idle(mut inner) => {
-                inner.borrow_conn().pump();
-                match inner.borrow_conn().read_byte() {
-                    Some(b) => inner
-                        .incoming_data(&mut target, b)
-                        .unwrap_or_else(|_| reset_self()),
-                    None => GdbStubStateMachine::Idle(inner),
-                }
-            }
-            GdbStubStateMachine::Running(mut inner) => {
-                inner.borrow_conn().pump();
-                if let Some(b) = inner.borrow_conn().read_byte() {
-                    // Typically a Ctrl-C (0x03) to interrupt.
-                    inner
-                        .incoming_data(&mut target, b)
-                        .unwrap_or_else(|_| reset_self())
-                } else if target.arm.is_halted().unwrap_or(false) {
-                    // The core stopped on its own (breakpoint hit / step done).
-                    let reason = if target.stepping {
-                        SingleThreadStopReason::DoneStep
-                    } else {
-                        SingleThreadStopReason::SwBreak(())
-                    };
-                    inner
-                        .report_stop(&mut target, reason)
-                        .unwrap_or_else(|_| reset_self())
-                } else {
-                    GdbStubStateMachine::Running(inner)
-                }
-            }
-            GdbStubStateMachine::CtrlCInterrupt(inner) => {
-                let _ = target.arm.halt();
-                inner
-                    .interrupt_handled(
-                        &mut target,
-                        Some(SingleThreadStopReason::Signal(Signal::SIGINT)),
-                    )
-                    .unwrap_or_else(|_| reset_self())
-            }
-            GdbStubStateMachine::Disconnected(mut inner) => {
-                // GDB detached. Flush the detach response, then drop stale
-                // TX/RX so the next session's RSP stream starts clean, and
-                // re-establish the SWD link + halt from scratch so the next
-                // `target remote` sees a clean DP/target state (a bare halt()
-                // left the following session hanging).
-                inner.borrow_conn().purge();
-                let _ = target.arm.connect_multidrop(rp2040::CORE0_TARGETSEL);
-                let _ = target.arm.halt();
-                inner.return_to_idle()
-            }
+        let gdb = match GdbStubBuilder::new(ConnRef(&mut conn))
+            .with_packet_buffer(&mut packet_buffer)
+            .build()
+        {
+            Ok(g) => g,
+            Err(_) => reset_self(1),
         };
+        let mut sm = gdb
+            .run_state_machine(&mut target)
+            .unwrap_or_else(|_| reset_self(2));
+
+        // Drive this session until GDB disconnects.
+        loop {
+            sm = match sm {
+                GdbStubStateMachine::Idle(mut inner) => {
+                    inner.borrow_conn().0.pump();
+                    match inner.borrow_conn().0.read_byte() {
+                        Some(b) => inner
+                            .incoming_data(&mut target, b)
+                            .unwrap_or_else(|_| reset_self(3)),
+                        None => GdbStubStateMachine::Idle(inner),
+                    }
+                }
+                GdbStubStateMachine::Running(mut inner) => {
+                    inner.borrow_conn().0.pump();
+                    if let Some(b) = inner.borrow_conn().0.read_byte() {
+                        // Typically a Ctrl-C (0x03) to interrupt.
+                        inner
+                            .incoming_data(&mut target, b)
+                            .unwrap_or_else(|_| reset_self(4))
+                    } else if target.arm.is_halted().unwrap_or(false) {
+                        // The core stopped on its own (breakpoint / step done).
+                        let reason = if target.stepping {
+                            SingleThreadStopReason::DoneStep
+                        } else {
+                            SingleThreadStopReason::SwBreak(())
+                        };
+                        inner
+                            .report_stop(&mut target, reason)
+                            .unwrap_or_else(|_| reset_self(5))
+                    } else {
+                        GdbStubStateMachine::Running(inner)
+                    }
+                }
+                GdbStubStateMachine::CtrlCInterrupt(inner) => {
+                    let _ = target.arm.halt();
+                    inner
+                        .interrupt_handled(
+                            &mut target,
+                            Some(SingleThreadStopReason::Signal(Signal::SIGINT)),
+                        )
+                        .unwrap_or_else(|_| reset_self(6))
+                }
+                GdbStubStateMachine::Disconnected(_) => break,
+            };
+        }
+        // GDB detached: the state machine (and its borrow of conn) is dropped.
+        // Flush the detach response and drop stale RX, re-establish the SWD
+        // link + halt so the next `target remote` sees a clean target state,
+        // then purge whatever arrived meanwhile (e.g. GDB's trailing ack).
+        conn.purge();
+        target.connect_and_halt();
+        conn.purge();
     }
 }
+
+// Watchdog scratch registers survive SYSRESETREQ; used to carry the reset
+// site + count across reset_self for the diagnostic window.
+const WATCHDOG_SCRATCH0: *mut u32 = 0x4005_800c as *mut u32;
+const WATCHDOG_SCRATCH1: *mut u32 = 0x4005_8010 as *mut u32;
 
 /// Last-resort recovery: a gdbstub protocol/state error leaves the stub
 /// unusable, so reboot the whole firmware instead of going dead (the old
 /// `loop_forever` stopped USB polling, wedging the port until replug).
-fn reset_self() -> ! {
+/// `site` identifies the caller in the diagnostic window (diag[8]).
+fn reset_self(site: u32) -> ! {
+    unsafe {
+        WATCHDOG_SCRATCH0.write_volatile(0x5e1f_0000 | site);
+        WATCHDOG_SCRATCH1.write_volatile(WATCHDOG_SCRATCH1.read_volatile().wrapping_add(1));
+    }
     cortex_m::peripheral::SCB::sys_reset();
 }
