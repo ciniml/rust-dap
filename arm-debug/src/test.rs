@@ -373,6 +373,8 @@ struct MemMock {
     mem: HashMap<u32, u32>,
     core_regs: [u32; 20],
     halted: bool,
+    /// Simulate an instant BKPT: a resume (halt cleared) re-halts at once.
+    auto_rehalt: bool,
     // MEM-AP pipeline state.
     tar: u32,
     pending: u32, // value a posted AP read will surface next
@@ -386,6 +388,7 @@ impl MemMock {
             mem: HashMap::new(),
             core_regs: [0; 20],
             halted: false,
+            auto_rehalt: false,
             tar: 0,
             pending: 0,
             dcrdr: 0,
@@ -411,7 +414,9 @@ impl MemMock {
             cm::DHCSR => {
                 // Only honor writes carrying the debug key.
                 if val & 0xFFFF_0000 == cm::DBGKEY {
-                    self.halted = val & cm::C_HALT != 0 || (val & cm::C_STEP != 0);
+                    self.halted = val & cm::C_HALT != 0
+                        || (val & cm::C_STEP != 0)
+                        || (self.auto_rehalt && val & cm::C_DEBUGEN != 0);
                 }
             }
             cm::DCRDR => self.dcrdr = val,
@@ -580,6 +585,54 @@ fn dhcsr_write_requires_dbgkey() {
     assert!(!arm.is_halted().unwrap());
     arm.halt().unwrap(); // real code supplies DBGKEY
     assert!(arm.is_halted().unwrap());
+}
+
+////////////////////////////////////////////////////////////////////////////
+// M5: bootrom function-table lookup and remote function calls.
+////////////////////////////////////////////////////////////////////////////
+
+#[test]
+fn rom_func_lookup_walks_table() {
+    let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());
+    // Table pointer word: func table at 0x7a0 (low half), data table high.
+    arm.write_word(rp2040::ROM_TABLE_PTRS, 0x0800_07a0).unwrap();
+    // Entries: ("IF", 0x2345), ("RE", 0x3456), terminator.
+    arm.write_word(0x7a0, (0x2345 << 16) | u16::from_le_bytes(*b"IF") as u32)
+        .unwrap();
+    arm.write_word(0x7a4, (0x3456 << 16) | u16::from_le_bytes(*b"RE") as u32)
+        .unwrap();
+    arm.write_word(0x7a8, 0).unwrap();
+    assert_eq!(
+        arm.rom_func_lookup(rp2040::FN_CONNECT_INTERNAL_FLASH).unwrap(),
+        Some(0x2345)
+    );
+    assert_eq!(
+        arm.rom_func_lookup(rp2040::FN_FLASH_RANGE_ERASE).unwrap(),
+        Some(0x3456)
+    );
+    assert_eq!(arm.rom_func_lookup(rp2040::FN_FLASH_ENTER_CMD_XIP).unwrap(), None);
+}
+
+#[test]
+fn call_function_returns_r0_and_restores_registers() {
+    let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());
+    arm.transport().auto_rehalt = true; // resume "hits" the BKPT instantly
+    arm.halt().unwrap();
+    // Debugger-visible register state that must survive the call.
+    arm.write_core_reg(cm::R0, 0x1111).unwrap();
+    arm.write_core_reg(cm::SP, 0x2000_3000).unwrap();
+    arm.write_core_reg(cm::PC, 0x2000_0400).unwrap();
+    let r0 = arm
+        .call_function(0x0000_2345, &[7, 8, 9, 10], 0x2000_8000, 0x2000_7000, 16)
+        .unwrap();
+    assert_eq!(r0, 7); // mock function body does nothing, r0 = arg0
+    // BKPT pair planted at the trampoline.
+    assert_eq!(arm.read_word(0x2000_7000).unwrap(), 0xBE00_BE00);
+    // Core left halted with the original register state restored.
+    assert!(arm.is_halted().unwrap());
+    assert_eq!(arm.read_core_reg(cm::R0).unwrap(), 0x1111);
+    assert_eq!(arm.read_core_reg(cm::SP).unwrap(), 0x2000_3000);
+    assert_eq!(arm.read_core_reg(cm::PC).unwrap(), 0x2000_0400);
 }
 
 ////////////////////////////////////////////////////////////////////////////

@@ -100,6 +100,18 @@ pub mod rp2040 {
     pub const RESCUE_TARGETSEL: u32 = 0xf100_2927;
     /// SYSINFO.CHIP_ID — reads 0x2000_2927 on RP2040 B2 silicon.
     pub const SYSINFO_CHIP_ID: u32 = 0x4000_0000;
+    /// XIP flash window base address.
+    pub const FLASH_BASE: u32 = 0x1000_0000;
+    /// Word holding the (u16) bootrom function-table and data-table pointers.
+    pub const ROM_TABLE_PTRS: u32 = 0x0000_0014;
+
+    // Bootrom function-table codes (two ASCII chars).
+    pub const FN_CONNECT_INTERNAL_FLASH: [u8; 2] = *b"IF";
+    pub const FN_FLASH_EXIT_XIP: [u8; 2] = *b"EX";
+    pub const FN_FLASH_RANGE_ERASE: [u8; 2] = *b"RE";
+    pub const FN_FLASH_RANGE_PROGRAM: [u8; 2] = *b"RP";
+    pub const FN_FLASH_FLUSH_CACHE: [u8; 2] = *b"FC";
+    pub const FN_FLASH_ENTER_CMD_XIP: [u8; 2] = *b"CX";
 }
 
 /// ADIv5 debug interface over a SWD [`DapTransport`].
@@ -505,7 +517,11 @@ impl<T: DapTransport> ArmDebug<T> {
     }
 
     fn wait_status(&mut self, mask: u32) -> Result<(), ArmError> {
-        for _ in 0..4096 {
+        self.wait_status_n(mask, 4096)
+    }
+
+    fn wait_status_n(&mut self, mask: u32, polls: u32) -> Result<(), ArmError> {
+        for _ in 0..polls {
             if self.read_word(cortex_m::DHCSR)? & mask == mask {
                 return Ok(());
             }
@@ -526,6 +542,87 @@ impl<T: DapTransport> ArmDebug<T> {
         self.write_word(cortex_m::DCRDR, value)?;
         self.write_word(cortex_m::DCRSR, reg as u32 | cortex_m::DCRSR_REGWNR)?;
         self.wait_status(cortex_m::S_REGRDY)
+    }
+}
+
+impl<T: DapTransport> ArmDebug<T> {
+    /// Look up a function in the RP2040 bootrom table by its two-character
+    /// code. Returns None if the code is absent.
+    pub fn rom_func_lookup(&mut self, code: [u8; 2]) -> Result<Option<u32>, ArmError> {
+        let ptrs = self.read_word(rp2040::ROM_TABLE_PTRS)?;
+        let mut entry = ptrs & 0xFFFF; // u16 pointer to the function table
+        let want = u16::from_le_bytes(code);
+        loop {
+            // Each entry is (u16 code, u16 addr); the table ends at code 0.
+            let mut bytes = [0u8; 4];
+            self.read_mem(entry, &mut bytes)?;
+            let tag = u16::from_le_bytes([bytes[0], bytes[1]]);
+            if tag == 0 {
+                return Ok(None);
+            }
+            if tag == want {
+                return Ok(Some(u16::from_le_bytes([bytes[2], bytes[3]]) as u32));
+            }
+            entry += 4;
+        }
+    }
+
+    /// Call a function on the halted target: set up r0-r3/sp, point lr at a
+    /// BKPT trampoline planted in target RAM, run with interrupts masked
+    /// (C_MASKINTS) and wait for the BKPT to halt the core again. Returns r0.
+    ///
+    /// `polls` bounds the DHCSR wait (flash erase calls take tens of ms).
+    /// The registers it uses (r0-r3, sp, lr, pc, xPSR) are saved and
+    /// restored, so the debugger-visible register state survives — critical
+    /// when a flash operation runs between GDB setting the PC and resuming.
+    pub fn call_function(
+        &mut self,
+        fn_addr: u32,
+        args: &[u32; 4],
+        sp: u32,
+        trampoline: u32,
+        polls: u32,
+    ) -> Result<u32, ArmError> {
+        const CLOBBERED: [u8; 8] = [
+            cortex_m::R0,
+            1,
+            2,
+            3,
+            cortex_m::SP,
+            cortex_m::LR,
+            cortex_m::PC,
+            cortex_m::XPSR,
+        ];
+        let mut saved = [0u32; 8];
+        for (slot, reg) in saved.iter_mut().zip(CLOBBERED) {
+            *slot = self.read_core_reg(reg)?;
+        }
+
+        self.write_word(trampoline & !3, 0xBE00_BE00)?; // BKPT #0, twice
+        for (i, a) in args.iter().enumerate() {
+            self.write_core_reg(i as u8, *a)?;
+        }
+        self.write_core_reg(cortex_m::SP, sp)?;
+        self.write_core_reg(cortex_m::LR, trampoline | 1)?;
+        self.write_core_reg(cortex_m::PC, fn_addr)?;
+        self.write_core_reg(cortex_m::XPSR, 0x0100_0000)?; // T bit only
+        // C_MASKINTS may only change while halted: set it, then release halt.
+        let masked = cortex_m::DBGKEY | cortex_m::C_DEBUGEN | cortex_m::C_MASKINTS;
+        self.write_word(cortex_m::DHCSR, masked | cortex_m::C_HALT)?;
+        self.write_word(cortex_m::DHCSR, masked)?;
+        let waited = self.wait_status_n(cortex_m::S_HALT, polls);
+        // Re-halt and clear C_MASKINTS (again: only changeable while halted).
+        self.write_word(cortex_m::DHCSR, masked | cortex_m::C_HALT)?;
+        self.write_word(
+            cortex_m::DHCSR,
+            cortex_m::DBGKEY | cortex_m::C_DEBUGEN | cortex_m::C_HALT,
+        )?;
+        waited?;
+        let result = self.read_core_reg(cortex_m::R0)?;
+        for (slot, reg) in saved.iter().zip(CLOBBERED) {
+            self.write_core_reg(reg, *slot)?;
+        }
+        Ok(result)
     }
 }
 
