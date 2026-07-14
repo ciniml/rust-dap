@@ -71,6 +71,9 @@ struct SwBp {
 struct RpTarget {
     arm: ArmDebug<Swd>,
     breakpoints: heapless::Vec<SwBp, 8>,
+    /// Whether the last resume was a single-step (so the next stop is
+    /// reported as DoneStep rather than SwBreak).
+    stepping: bool,
 }
 
 impl RpTarget {
@@ -142,6 +145,7 @@ impl SingleThreadBase for RpTarget {
 
 impl SingleThreadResume for RpTarget {
     fn resume(&mut self, _signal: Option<Signal>) -> Result<(), Self::Error> {
+        self.stepping = false;
         let _ = self.arm.resume();
         Ok(())
     }
@@ -153,6 +157,7 @@ impl SingleThreadResume for RpTarget {
 
 impl SingleThreadSingleStep for RpTarget {
     fn step(&mut self, _signal: Option<Signal>) -> Result<(), Self::Error> {
+        self.stepping = true;
         let _ = self.arm.step();
         Ok(())
     }
@@ -236,6 +241,21 @@ impl UsbConn<'_> {
     fn configured(&self) -> bool {
         self.usb_dev.state() == UsbDeviceState::Configured
     }
+    /// Flush pending TX (bounded, in case the host stopped reading), then
+    /// drop whatever is left plus any unread RX, so a new GDB session starts
+    /// with a clean channel (stale detach responses desync the next
+    /// session's RSP).
+    fn purge(&mut self) {
+        for _ in 0..200_000 {
+            if self.tx.is_empty() {
+                break;
+            }
+            self.pump();
+        }
+        self.tx.clear();
+        let mut sink = [0u8; 64];
+        while matches!(self.serial.read(&mut sink), Ok(n) if n > 0) {}
+    }
 }
 
 impl Connection for UsbConn<'_> {
@@ -318,6 +338,7 @@ fn main() -> ! {
     let mut target = RpTarget {
         arm,
         breakpoints: heapless::Vec::new(),
+        stepping: false,
     };
 
     // Run the gdbstub state machine, driven from the USB poll loop.
@@ -327,11 +348,11 @@ fn main() -> ! {
         .build()
     {
         Ok(g) => g,
-        Err(_) => loop_forever(),
+        Err(_) => reset_self(),
     };
     let mut sm = gdb
         .run_state_machine(&mut target)
-        .unwrap_or_else(|_| loop_forever());
+        .unwrap_or_else(|_| reset_self());
 
     loop {
         sm = match sm {
@@ -340,7 +361,7 @@ fn main() -> ! {
                 match inner.borrow_conn().read_byte() {
                     Some(b) => inner
                         .incoming_data(&mut target, b)
-                        .unwrap_or_else(|_| loop_forever()),
+                        .unwrap_or_else(|_| reset_self()),
                     None => GdbStubStateMachine::Idle(inner),
                 }
             }
@@ -350,12 +371,17 @@ fn main() -> ! {
                     // Typically a Ctrl-C (0x03) to interrupt.
                     inner
                         .incoming_data(&mut target, b)
-                        .unwrap_or_else(|_| loop_forever())
+                        .unwrap_or_else(|_| reset_self())
                 } else if target.arm.is_halted().unwrap_or(false) {
-                    // The core stopped on its own (breakpoint / step done).
+                    // The core stopped on its own (breakpoint hit / step done).
+                    let reason = if target.stepping {
+                        SingleThreadStopReason::DoneStep
+                    } else {
+                        SingleThreadStopReason::SwBreak(())
+                    };
                     inner
-                        .report_stop(&mut target, SingleThreadStopReason::SwBreak(()))
-                        .unwrap_or_else(|_| loop_forever())
+                        .report_stop(&mut target, reason)
+                        .unwrap_or_else(|_| reset_self())
                 } else {
                     GdbStubStateMachine::Running(inner)
                 }
@@ -367,12 +393,15 @@ fn main() -> ! {
                         &mut target,
                         Some(SingleThreadStopReason::Signal(Signal::SIGINT)),
                     )
-                    .unwrap_or_else(|_| loop_forever())
+                    .unwrap_or_else(|_| reset_self())
             }
-            GdbStubStateMachine::Disconnected(inner) => {
-                // GDB detached. Re-establish the SWD link and halt from scratch
-                // so the next `target remote` starts from a clean DP/target
-                // state (a bare halt() left the following session hanging).
+            GdbStubStateMachine::Disconnected(mut inner) => {
+                // GDB detached. Flush the detach response, then drop stale
+                // TX/RX so the next session's RSP stream starts clean, and
+                // re-establish the SWD link + halt from scratch so the next
+                // `target remote` sees a clean DP/target state (a bare halt()
+                // left the following session hanging).
+                inner.borrow_conn().purge();
                 let _ = target.arm.connect_multidrop(rp2040::CORE0_TARGETSEL);
                 let _ = target.arm.halt();
                 inner.return_to_idle()
@@ -381,8 +410,9 @@ fn main() -> ! {
     }
 }
 
-fn loop_forever() -> ! {
-    loop {
-        cortex_m::asm::wfi();
-    }
+/// Last-resort recovery: a gdbstub protocol/state error leaves the stub
+/// unusable, so reboot the whole firmware instead of going dead (the old
+/// `loop_forever` stopped USB polling, wedging the port until replug).
+fn reset_self() -> ! {
+    cortex_m::peripheral::SCB::sys_reset();
 }
