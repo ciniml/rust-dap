@@ -214,6 +214,10 @@ impl<T: DapTransport> ArmDebug<T> {
     pub fn connect_multidrop(&mut self, targetsel: u32) -> Result<u32, ArmError> {
         self.transport.connect(ConnectPort::Swd, &self.config)?;
         self.swd_line_reset()?;
+        // Force a known protocol state: an already-active SWD target is sent
+        // to dormant first (no-op if already dormant). Without this, calling
+        // connect on a live link desyncs every other attempt.
+        self.swd_to_dormant()?;
         self.dormant_to_swd()?;
         self.swd_line_reset()?;
         self.write_targetsel(targetsel)?;
@@ -248,6 +252,14 @@ impl<T: DapTransport> ArmDebug<T> {
         const HIGH: [u8; 8] = [0xff; 8]; // 64 ones
         self.transport.swj_sequence(&self.config, 51, &HIGH)?;
         self.transport.swj_sequence(&self.config, 2, &[0x00])?;
+        Ok(())
+    }
+
+    /// Active SWD → dormant: line reset then the 16-bit select sequence
+    /// 0xE3BC (LSB-first). Ignored by a target already dormant.
+    fn swd_to_dormant(&mut self) -> Result<(), ArmError> {
+        self.transport
+            .swj_sequence(&self.config, 16, &0xE3BCu16.to_le_bytes())?;
         Ok(())
     }
 
