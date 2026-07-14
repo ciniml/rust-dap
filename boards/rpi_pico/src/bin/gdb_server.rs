@@ -534,6 +534,8 @@ struct UsbConn<'a> {
     usb_dev: UsbDevice<'a, hal::usb::UsbBus>,
     serial: SerialPort<'a, hal::usb::UsbBus>,
     tx: heapless::Deque<u8, 2048>,
+    /// One byte un-read by drop_stray_acks, delivered by the next read_byte.
+    pushback: Option<u8>,
 }
 
 impl UsbConn<'_> {
@@ -553,10 +555,31 @@ impl UsbConn<'_> {
     }
     /// Try to read one incoming byte.
     fn read_byte(&mut self) -> Option<u8> {
+        if let Some(b) = self.pushback.take() {
+            return Some(b);
+        }
         let mut b = [0u8; 1];
         match self.serial.read(&mut b) {
             Ok(1) => Some(b[0]),
             _ => None,
+        }
+    }
+    /// Drop leading ack bytes ('+'/'-') left over from the previous session.
+    /// Anything else — e.g. the next session's opening '$' packet, which can
+    /// arrive while the SWD link is being re-established — is pushed back for
+    /// the state machine, NOT discarded (a blind purge here loses the new
+    /// session's qSupported and hangs that GDB).
+    fn drop_stray_acks(&mut self) {
+        for _ in 0..50_000 {
+            self.pump();
+            match self.read_byte() {
+                Some(b'+') | Some(b'-') => {}
+                Some(other) => {
+                    self.pushback = Some(other);
+                    return;
+                }
+                None => {}
+            }
         }
     }
     fn configured(&self) -> bool {
@@ -650,6 +673,7 @@ fn main() -> ! {
         usb_dev,
         serial,
         tx: heapless::Deque::new(),
+        pushback: None,
     };
 
     // Bit-banging SWD transport + arm-debug.
@@ -760,10 +784,11 @@ fn main() -> ! {
         // GDB detached: the state machine (and its borrow of conn) is dropped.
         // Flush the detach response and drop stale RX, re-establish the SWD
         // link + halt so the next `target remote` sees a clean target state,
-        // then purge whatever arrived meanwhile (e.g. GDB's trailing ack).
+        // then swallow the detach ack — but keep any packet bytes: a new
+        // session may attach while the SWD link is still being re-established.
         conn.purge();
         target.connect_and_halt();
-        conn.purge();
+        conn.drop_stray_acks();
     }
 }
 
