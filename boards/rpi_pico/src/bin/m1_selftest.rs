@@ -43,7 +43,7 @@ pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 
 type Swd = SwdIoSet<hal::gpio::bank0::Gpio2, hal::gpio::bank0::Gpio3, hal::gpio::bank0::Gpio4>;
 
-fn run_selftest(arm: &mut ArmDebug<Swd>) -> heapless::String<160> {
+fn run_selftest(arm: &mut ArmDebug<Swd>) -> heapless::String<256> {
     let mut line = heapless::String::new();
     match arm.connect_multidrop(rp2040::CORE0_TARGETSEL) {
         Ok(dpidr) => match arm.read_word(rp2040::SYSINFO_CHIP_ID) {
@@ -57,6 +57,31 @@ fn run_selftest(arm: &mut ArmDebug<Swd>) -> heapless::String<160> {
                     if ok { "OK" } else { "UNEXPECTED" }
                 );
                 m2_core_control(arm, &mut line);
+                // M3 write diagnostics: memory writes go through the MEM-AP
+                // and work regardless of the core's run state, but core
+                // register access (DCRSR/DCRDR) requires the core halted —
+                // m2_core_control resumes it, so re-halt around the register
+                // check.
+                let ww = arm.write_word(0x2000_1000, 0xcafe_f00d).is_ok();
+                let rb = arm.read_word(0x2000_1000).unwrap_or(0);
+                let halt_ok = arm.halt().is_ok();
+                let wreg_ok = arm.write_core_reg(0, 0x1122_3344).is_ok();
+                let r0 = arm.read_core_reg(0).unwrap_or(0xffff_ffff);
+                let _ = arm.resume();
+                let _ = write!(
+                    line,
+                    "M3 wword_ok={} readback=0x{:08x} halt_ok={} wreg_ok={} r0=0x{:08x} {}\r\n",
+                    ww,
+                    rb,
+                    halt_ok,
+                    wreg_ok,
+                    r0,
+                    if rb == 0xcafe_f00d && r0 == 0x1122_3344 {
+                        "WRITE_OK"
+                    } else {
+                        "WRITE_BAD"
+                    }
+                );
             }
             Err(e) => {
                 let _ = write!(line, "M1 dpidr=0x{:08x} read_word ERR {:?}\r\n", dpidr, e);
@@ -70,7 +95,7 @@ fn run_selftest(arm: &mut ArmDebug<Swd>) -> heapless::String<160> {
 }
 
 /// M2 demo: halt the core, read PC, single-step, confirm PC advanced, resume.
-fn m2_core_control(arm: &mut ArmDebug<Swd>, line: &mut heapless::String<160>) {
+fn m2_core_control(arm: &mut ArmDebug<Swd>, line: &mut heapless::String<256>) {
     if let Err(e) = arm.halt() {
         let _ = write!(line, "M2 halt ERR {:?}\r\n", e);
         return;
@@ -157,7 +182,8 @@ fn main() -> ! {
     // USB must be polled continuously to enumerate, so the (blocking,
     // bit-banged) self-test can only run once the host has configured the
     // device — running it before the first poll would miss enumeration.
-    let mut result: Option<heapless::String<160>> = None;
+    let mut result: Option<heapless::String<256>> = None;
+    let mut offset: usize = 0;
     let mut throttle: u32 = 0;
     loop {
         usb_dev.poll(&mut [&mut serial]);
@@ -166,12 +192,18 @@ fn main() -> ! {
         if result.is_none() && usb_dev.state() == UsbDeviceState::Configured {
             result = Some(run_selftest(&mut arm));
         }
-        // Re-emit the captured result periodically so it appears whenever the
-        // host opens the port, without flooding every poll iteration.
+        // Re-emit the captured result, sending the whole string across poll
+        // iterations (SerialPort::write only accepts a bounded chunk, so we
+        // must advance an offset rather than resend from the start each time).
         if let Some(r) = &result {
-            throttle = throttle.wrapping_add(1);
-            if throttle % 20_000 == 0 {
-                let _ = serial.write(r.as_bytes());
+            let bytes = r.as_bytes();
+            if offset < bytes.len() {
+                offset += serial.write(&bytes[offset..]).unwrap_or(0);
+            } else {
+                throttle = throttle.wrapping_add(1);
+                if throttle % 40_000 == 0 {
+                    offset = 0; // restart the transmission periodically
+                }
             }
         }
     }

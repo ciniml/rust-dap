@@ -165,3 +165,30 @@ M1 dpidr=0x0bc12477 chipid=0x20002927 OK | M2 halt OK pc0=0x00000030 pc1=0x00000
 arm-debug のホストテスト13件(M1: 8, M2: 5)が実シリコンで裏付けられ、GDB
 デバッガ M2(Cortex-M コア制御: halt/step/レジスタ)完了。次は M3(gdbstub 統合、
 USB-CDC 上で GDB `target remote` から RAM デバッグ)。
+
+## 追記8: GDB デバッガ M3 切り分け — halt 状態でのレジスタ R/W (2026-07-14)
+
+M3 で「GDB からのレジスタ/メモリ書き込みが失敗して見える」件の切り分け完了。
+m1_selftest の M3 診断を修正し、コアレジスタアクセスを halt 状態で行うようにして
+実機検証した(従来は m2_core_control の resume 後=走行中に実行しており、それが
+失敗の原因だった):
+
+```
+M1 dpidr=0x0bc12477 chipid=0x20002927 OK | M2 halt OK pc0=0x00000030 pc1=0x00000032 stepped=true halted=true OK
+M3 wword_ok=true readback=0xcafef00d halt_ok=true wreg_ok=true r0=0x11223344 WRITE_OK
+```
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | MEM-AP write_word(0x20001000 ← 0xcafef00d)+ 読み戻し一致 | OK(コア走行中でも可) |
+| 2 | 再 halt 後の write_core_reg(r0 ← 0x11223344) | OK |
+| 3 | read_core_reg(r0)= 0x11223344 で書き込み値と一致 | OK |
+
+結論: arm-debug の書き込み経路(MEM-AP / DCRSR・DCRDR)に欠陥なし。
+コアレジスタアクセスは halt 必須(ADIv5/ARMv6-M 仕様どおり)、メモリアクセスは
+MEM-AP 独立でコア状態に依らない。gdb_server は接続時・停止報告時に halt して
+いるため、GDB からのレジスタ書き込みはこの前提を既に満たしている。
+
+残: GDB(gdb-multiarch)からの通し確認(set $reg / メモリ書込 / break / continue)。
+プローブ実機の USB が検証途中に物理的に応答不能となった(電源再投入・ハブ
+リセットでも SETUP 無応答)ため、通し確認はハード復旧後に実施。
