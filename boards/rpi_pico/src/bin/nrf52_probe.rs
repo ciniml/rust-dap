@@ -48,6 +48,43 @@ type Swd = SwdIoSet<hal::gpio::bank0::Gpio2, hal::gpio::bank0::Gpio3, hal::gpio:
 /// FICR.INFO.PART — reads e.g. 0x52832 on an nRF52832.
 const FICR_INFO_PART: u32 = 0x1000_0100;
 
+/// Exercise the Cortex-M core-debug layer (halt/read PC/step/resume). These
+/// APIs are the same ones used for RP2040 — this confirms they work
+/// unchanged on the nRF52 (ARMv7-M) core.
+fn core_check(arm: &mut ArmDebug<Swd>, line: &mut heapless::String<200>) {
+    if let Err(e) = arm.halt() {
+        let _ = write!(line, "halt ERR {:?}", e);
+        return;
+    }
+    let pc0 = arm
+        .read_core_reg(arm_debug::cortex_m::PC)
+        .unwrap_or(0xffff_ffff);
+    // Instruction at pc0: a self-branch (0xe7fe = `b .`) explains a PC that
+    // doesn't move on step (idle loop) — that still proves step executed.
+    let insn = arm.read_word(pc0 & !3).unwrap_or(0);
+    let insn = if pc0 & 2 != 0 { insn >> 16 } else { insn & 0xffff } as u16;
+    let stepped = arm.step().is_ok();
+    let pc1 = arm
+        .read_core_reg(arm_debug::cortex_m::PC)
+        .unwrap_or(0xffff_ffff);
+    let halted = arm.is_halted().unwrap_or(false);
+    let _ = arm.resume();
+    let moved_or_selfloop = pc1 != pc0 || insn == 0xe7fe;
+    let _ = write!(
+        line,
+        "core halt OK pc0=0x{:08x} insn=0x{:04x} pc1=0x{:08x} stepped={} {}",
+        pc0,
+        insn,
+        pc1,
+        stepped,
+        if halted && stepped && moved_or_selfloop {
+            "OK"
+        } else {
+            "CHECK"
+        }
+    );
+}
+
 fn probe(arm: &mut ArmDebug<Swd>) -> heapless::String<200> {
     let mut line = heapless::String::new();
     match arm.connect_swd() {
@@ -62,15 +99,17 @@ fn probe(arm: &mut ArmDebug<Swd>) -> heapless::String<200> {
                         if open { "OPEN" } else { "CLOSED" }
                     );
                     if open {
-                        // Debug access is available: identify the part.
+                        // Debug access is available: identify the part, then
+                        // exercise the (architecture-common) core-debug layer.
                         match arm.read_word(FICR_INFO_PART) {
                             Ok(part) => {
-                                let _ = write!(line, "part=0x{:05x}", part);
+                                let _ = write!(line, "part=0x{:05x} ", part);
                             }
                             Err(e) => {
-                                let _ = write!(line, "part ERR {:?}", e);
+                                let _ = write!(line, "part ERR {:?} ", e);
                             }
                         }
+                        core_check(arm, &mut line);
                     } else {
                         let _ = write!(line, "(locked; erase_all to recover)");
                     }
