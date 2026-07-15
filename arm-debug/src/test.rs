@@ -409,6 +409,24 @@ fn nrf52_approtect_reports_protected() {
 }
 
 #[test]
+fn nrf52_flash_erase_and_program() {
+    let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());
+    // Erase a page: CONFIG=EEN, ERASEPAGE=base, CONFIG=REN.
+    arm.nrf52_erase_page(0x0000_1234, 16).unwrap();
+    let log_mem = |arm: &mut ArmDebug<MemMock>, a: u32| arm.read_word(a).unwrap();
+    assert_eq!(log_mem(&mut arm, nrf52::NVMC_ERASEPAGE), 0x0000_1000); // page base
+    assert_eq!(log_mem(&mut arm, nrf52::NVMC_CONFIG), nrf52::NVMC_CONFIG_REN);
+    // Program words, then read them back through the MEM-AP.
+    let data = [0x1111_2222u32, 0x3333_4444, 0x5555_6666];
+    arm.nrf52_program(0x0000_1000, &data, 16).unwrap();
+    assert_eq!(arm.read_word(0x0000_1000).unwrap(), 0x1111_2222);
+    assert_eq!(arm.read_word(0x0000_1004).unwrap(), 0x3333_4444);
+    assert_eq!(arm.read_word(0x0000_1008).unwrap(), 0x5555_6666);
+    // Left in read-only mode.
+    assert_eq!(arm.read_word(nrf52::NVMC_CONFIG).unwrap(), nrf52::NVMC_CONFIG_REN);
+}
+
+#[test]
 fn wait_ack_retries_then_gives_up() {
     struct AlwaysWait;
     impl DapTransport for AlwaysWait {
@@ -493,6 +511,7 @@ impl MemMock {
                 v
             }
             cm::DCRDR => self.dcrdr,
+            nrf52::NVMC_READY => 1, // NVMC always ready in the mock
             other => *self.mem.get(&other).unwrap_or(&0),
         }
     }

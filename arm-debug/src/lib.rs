@@ -133,6 +133,21 @@ pub mod nrf52 {
     pub const CTRLAP_IDR_VALUE: u32 = 0x0288_0000;
     /// SW-DP IDCODE for nRF52.
     pub const DPIDR: u32 = 0x2BA0_1477;
+
+    // --- NVMC: non-volatile memory controller (register-based flashing) ---
+    /// NVMC.READY (0x4001E400): bit0 1=ready, 0=busy.
+    pub const NVMC_READY: u32 = 0x4001_E400;
+    /// NVMC.CONFIG (0x4001E504): 0=read-only, 1=write enable, 2=erase enable.
+    pub const NVMC_CONFIG: u32 = 0x4001_E504;
+    /// NVMC.ERASEPAGE (0x4001E508): write a page's base address to erase it.
+    pub const NVMC_ERASEPAGE: u32 = 0x4001_E508;
+    pub const NVMC_CONFIG_REN: u32 = 0;
+    pub const NVMC_CONFIG_WEN: u32 = 1;
+    pub const NVMC_CONFIG_EEN: u32 = 2;
+    /// Code flash page size (nRF52832/833/840 all use 4 KiB).
+    pub const FLASH_PAGE: u32 = 4096;
+    /// Code flash base.
+    pub const FLASH_BASE: u32 = 0x0000_0000;
 }
 
 /// ADIv5 debug interface over a SWD [`DapTransport`].
@@ -378,6 +393,51 @@ impl<T: DapTransport> ArmDebug<T> {
         self.ap_reg_write(nrf52::CTRLAP_RESET, 0)?;
         self.set_apsel(0);
         ok
+    }
+
+    fn nrf52_nvmc_wait(&mut self, polls: u32) -> Result<(), ArmError> {
+        for _ in 0..polls {
+            if self.read_word(nrf52::NVMC_READY)? & 1 != 0 {
+                return Ok(());
+            }
+        }
+        Err(ArmError::CoreTimeout)
+    }
+
+    /// Erase one nRF52 code-flash page (`addr` need not be page-aligned; the
+    /// page base is used). `polls` bounds the NVMC busy wait (~85 ms/page).
+    pub fn nrf52_erase_page(&mut self, addr: u32, polls: u32) -> Result<(), ArmError> {
+        let page = addr & !(nrf52::FLASH_PAGE - 1);
+        self.write_word(nrf52::NVMC_CONFIG, nrf52::NVMC_CONFIG_EEN)?;
+        self.nrf52_nvmc_wait(polls)?;
+        self.write_word(nrf52::NVMC_ERASEPAGE, page)?;
+        self.nrf52_nvmc_wait(polls)?;
+        self.write_word(nrf52::NVMC_CONFIG, nrf52::NVMC_CONFIG_REN)?;
+        Ok(())
+    }
+
+    /// Program word-aligned data to nRF52 code flash (caller erases first).
+    /// The NVMC only clears bits, so the target range must already be 0xFF.
+    /// `words` are written in order via the MEM-AP (auto-increment), NVMC in
+    /// write-enable throughout, then a final READY wait.
+    pub fn nrf52_program(&mut self, addr: u32, words: &[u32], polls: u32) -> Result<(), ArmError> {
+        if words.is_empty() {
+            return Ok(());
+        }
+        self.write_word(nrf52::NVMC_CONFIG, nrf52::NVMC_CONFIG_WEN)?;
+        self.nrf52_nvmc_wait(polls)?;
+        // Program in TAR-wrap-bounded runs (write_words handles the MEM-AP).
+        let mut a = addr;
+        let mut rest = words;
+        while !rest.is_empty() {
+            let run = Self::tar_run(a, rest.len());
+            self.write_words(a, &rest[..run])?;
+            self.nrf52_nvmc_wait(polls)?;
+            a += (run as u32) * 4;
+            rest = &rest[run..];
+        }
+        self.write_word(nrf52::NVMC_CONFIG, nrf52::NVMC_CONFIG_REN)?;
+        Ok(())
     }
 
     fn power_up(&mut self) -> Result<(), ArmError> {
