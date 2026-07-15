@@ -114,6 +114,27 @@ pub mod rp2040 {
     pub const FN_FLASH_ENTER_CMD_XIP: [u8; 2] = *b"CX";
 }
 
+/// Nordic nRF52 debug constants. The CTRL-AP (APSEL 1) stays reachable even
+/// when APPROTECT blocks the AHB-AP, so its APPROTECTSTATUS reports the
+/// protection state and ERASEALL performs the (only) unlock.
+pub mod nrf52 {
+    /// CTRL-AP is Nordic's custom AP at APSEL 1.
+    pub const CTRL_AP: u8 = 1;
+    /// CTRL-AP.RESET (offset 0x000): 1 asserts soft reset, 0 releases.
+    pub const CTRLAP_RESET: u8 = 0x00;
+    /// CTRL-AP.ERASEALL (0x004): write 1 to erase flash+UICR+RAM.
+    pub const CTRLAP_ERASEALL: u8 = 0x04;
+    /// CTRL-AP.ERASEALLSTATUS (0x008): 0=Ready, 1=Busy.
+    pub const CTRLAP_ERASEALLSTATUS: u8 = 0x08;
+    /// CTRL-AP.APPROTECTSTATUS (0x00C): bit0 1=unprotected, 0=protected.
+    pub const CTRLAP_APPROTECTSTATUS: u8 = 0x0C;
+    /// CTRL-AP.IDR (0x0FC) reads 0x0288_0000.
+    pub const CTRLAP_IDR: u8 = 0xFC;
+    pub const CTRLAP_IDR_VALUE: u32 = 0x0288_0000;
+    /// SW-DP IDCODE for nRF52.
+    pub const DPIDR: u32 = 0x2BA0_1477;
+}
+
 /// ADIv5 debug interface over a SWD [`DapTransport`].
 pub struct ArmDebug<T: DapTransport> {
     transport: T,
@@ -122,6 +143,8 @@ pub struct ArmDebug<T: DapTransport> {
     select: u32,
     /// Cached MEM-AP CSW so it is programmed only once.
     csw_valid: bool,
+    /// Currently selected AP (APSEL). 0 = MEM-AP; Nordic CTRL-AP is 1.
+    apsel: u8,
     /// Retry budget for WAIT acks.
     retries: u32,
 }
@@ -133,6 +156,7 @@ impl<T: DapTransport> ArmDebug<T> {
             config,
             select: 0xffff_ffff, // force first SELECT write
             csw_valid: false,
+            apsel: 0,
             retries: 64,
         }
     }
@@ -194,10 +218,11 @@ impl<T: DapTransport> ArmDebug<T> {
         self.transfer(Port::Dp, false, addr, data).map(|_| ())
     }
 
-    /// Program DP SELECT for a given AP bank (APSEL fixed to 0, single MEM-AP).
+    /// Program DP SELECT for a given AP (APSEL) and register bank. `ap_addr`
+    /// carries the bank in bits[7:4]; the current MEM-AP is `self.apsel`.
     fn select_ap_bank(&mut self, ap_addr: u8) -> Result<(), ArmError> {
         let bank = (ap_addr as u32 >> 4) & 0xf;
-        let select = bank << 4; // APSEL=0, APBANKSEL=bank, DPBANKSEL=0
+        let select = (self.apsel as u32) << 24 | bank << 4; // APSEL|APBANKSEL, DPBANKSEL=0
         if select != self.select {
             self.dp_write(DP_SELECT, select)?;
             self.select = select;
@@ -216,6 +241,27 @@ impl<T: DapTransport> ArmDebug<T> {
         self.select_ap_bank(addr)?;
         self.transfer(Port::Ap, true, addr & 0xC, 0)?; // posted
         self.dp_read(DP_RDBUFF)
+    }
+
+    /// Select which AP (APSEL) subsequent MEM-AP / raw AP accesses target.
+    /// Invalidates the cached CSW (a different AP has its own CSW). The
+    /// normal MEM-AP is APSEL 0; Nordic's CTRL-AP is APSEL 1.
+    pub fn set_apsel(&mut self, apsel: u8) {
+        if apsel != self.apsel {
+            self.apsel = apsel;
+            self.csw_valid = false;
+        }
+    }
+
+    /// Raw read of AP register `addr` on the currently selected APSEL (does
+    /// not touch CSW/TAR). For custom APs like Nordic CTRL-AP.
+    pub fn ap_reg_read(&mut self, addr: u8) -> Result<u32, ArmError> {
+        self.ap_read(addr)
+    }
+
+    /// Raw write of AP register `addr` on the currently selected APSEL.
+    pub fn ap_reg_write(&mut self, addr: u8, data: u32) -> Result<(), ArmError> {
+        self.ap_write(addr, data)
     }
 
     /// Connect over SWD to a multidrop target (e.g. RP2040 core 0) and power
@@ -248,6 +294,40 @@ impl<T: DapTransport> ArmDebug<T> {
         Ok(dpidr)
     }
 
+    /// Connect over SWD to a plain (non-multidrop) SW-DP — nRF52 and most
+    /// single-core Cortex-M parts. Returns the DPIDR.
+    ///
+    /// Sequence: line reset, JTAG-to-SWD select (0xE79E), line reset,
+    /// read DPIDR, clear errors, SELECT=0, power up. No dormant/TARGETSEL:
+    /// SW-DPv1 has neither.
+    pub fn connect_swd(&mut self) -> Result<u32, ArmError> {
+        self.transport.connect(ConnectPort::Swd, &self.config)?;
+        self.swd_line_reset()?;
+        self.jtag_to_swd()?;
+        self.swd_line_reset()?;
+        // A read of DPIDR must be the first transfer after reset.
+        let dpidr = self.dp_read(DP_DPIDR)?;
+        if dpidr == 0 || dpidr == 0xffff_ffff {
+            return Err(ArmError::NoTarget);
+        }
+        self.select = 0xffff_ffff;
+        self.csw_valid = false;
+        self.apsel = 0;
+        self.dp_write(DP_ABORT, ABORT_CLEAR_ALL)?;
+        self.dp_write(DP_SELECT, 0)?;
+        self.select = 0;
+        self.power_up()?;
+        Ok(dpidr)
+    }
+
+    /// JTAG-to-SWD select sequence: the 16-bit code 0xE79E (LSB-first).
+    /// Switches a SWJ-DP that came up in JTAG mode over to SWD.
+    fn jtag_to_swd(&mut self) -> Result<(), ArmError> {
+        self.transport
+            .swj_sequence(&self.config, 16, &0xE79Eu16.to_le_bytes())?;
+        Ok(())
+    }
+
     /// Switch to another multidrop target on an already-active SWD link
     /// (e.g. the other RP2040 core): line reset, TARGETSEL, DPIDR, power
     /// check. Much cheaper than [`connect_multidrop`] — no dormant dance —
@@ -267,6 +347,37 @@ impl<T: DapTransport> ArmDebug<T> {
         // Fast when this DP was already powered (first CTRL/STAT read acks).
         self.power_up()?;
         Ok(dpidr)
+    }
+
+    /// Read the nRF52 CTRL-AP APPROTECTSTATUS: `Ok(true)` = debug access
+    /// enabled (unprotected), `Ok(false)` = APPROTECT blocking the AHB-AP.
+    /// Also returns whether the CTRL-AP IDR matched (sanity check).
+    pub fn nrf52_approtect_status(&mut self) -> Result<(bool, bool), ArmError> {
+        self.set_apsel(nrf52::CTRL_AP);
+        let idr = self.ap_reg_read(nrf52::CTRLAP_IDR)?;
+        let status = self.ap_reg_read(nrf52::CTRLAP_APPROTECTSTATUS)?;
+        self.set_apsel(0);
+        Ok((status & 1 != 0, idr == nrf52::CTRLAP_IDR_VALUE))
+    }
+
+    /// nRF52 recovery: CTRL-AP ERASEALL (erases flash+UICR+RAM, the only way
+    /// past APPROTECT), poll ERASEALLSTATUS, then soft-reset via CTRL-AP.
+    /// `polls` bounds the busy wait (erase-all takes a few hundred ms).
+    pub fn nrf52_erase_all(&mut self, polls: u32) -> Result<(), ArmError> {
+        self.set_apsel(nrf52::CTRL_AP);
+        self.ap_reg_write(nrf52::CTRLAP_ERASEALL, 1)?;
+        let mut ok = Err(ArmError::CoreTimeout);
+        for _ in 0..polls {
+            if self.ap_reg_read(nrf52::CTRLAP_ERASEALLSTATUS)? & 1 == 0 {
+                ok = Ok(());
+                break;
+            }
+        }
+        // Soft reset so the newly-unprotected part comes up debuggable.
+        self.ap_reg_write(nrf52::CTRLAP_RESET, 1)?;
+        self.ap_reg_write(nrf52::CTRLAP_RESET, 0)?;
+        self.set_apsel(0);
+        ok
     }
 
     fn power_up(&mut self) -> Result<(), ArmError> {

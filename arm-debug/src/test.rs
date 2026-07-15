@@ -347,6 +347,68 @@ fn reselect_switches_target_without_dormant_dance() {
 }
 
 #[test]
+fn connect_swd_reads_dpidr_without_targetsel() {
+    // nRF52 SW-DP: no TARGETSEL raw-bit write, DPIDR read first.
+    let acked = CDBGPWRUPACK | CSYSPWRUPACK;
+    let mock = MockSwd::new(&[nrf52::DPIDR, acked]);
+    let mut arm = ArmDebug::new(mock, DapConfig::default());
+    let dpidr = arm.connect_swd().unwrap();
+    assert_eq!(dpidr, nrf52::DPIDR);
+    // First transfer is a DPIDR read; no 32-bit TARGETSEL value was written.
+    assert_eq!(arm.transport().log.first(), Some(&dp_r(DP_DPIDR, 0)));
+    assert!(arm.transport().written_bits.iter().all(|(n, _)| *n != 32));
+}
+
+#[test]
+fn apsel_selects_ctrl_ap_and_invalidates_csw() {
+    // Reading CTRL-AP.APPROTECTSTATUS must set SELECT.APSEL=1, and switching
+    // back to APSEL 0 must re-program CSW on the next MEM-AP access.
+    let mock = MockSwd::new(&[
+        0, // stale AP read (IDR posted)
+        nrf52::CTRLAP_IDR_VALUE, // RDBUFF: IDR
+        0, // stale AP read (APPROTECTSTATUS posted)
+        1, // RDBUFF: unprotected
+        0, 0x42, // later MEM-AP read: stale, then value
+    ]);
+    let mut arm = ArmDebug::new(mock, DapConfig::default());
+    let (unprotected, idr_ok) = arm.nrf52_approtect_status().unwrap();
+    assert!(unprotected);
+    assert!(idr_ok);
+    let log = &arm.transport().log;
+    // SELECT was written with APSEL=1 (bit24) at some point.
+    assert!(log.contains(&dp_w(DP_SELECT, 1 << 24)));
+    // Back on APSEL 0, a MEM-AP read re-programs CSW (was invalidated).
+    let before = arm
+        .transport()
+        .log
+        .iter()
+        .filter(|x| *x == &ap_w(AP_CSW, CSW_DEFAULT))
+        .count();
+    arm.read_word(0x2000_0000).unwrap();
+    let after = arm
+        .transport()
+        .log
+        .iter()
+        .filter(|x| *x == &ap_w(AP_CSW, CSW_DEFAULT))
+        .count();
+    assert_eq!(after, before + 1);
+}
+
+#[test]
+fn nrf52_approtect_reports_protected() {
+    let mock = MockSwd::new(&[
+        0,
+        nrf52::CTRLAP_IDR_VALUE, // IDR
+        0,
+        0, // APPROTECTSTATUS bit0 = 0 → protected
+    ]);
+    let mut arm = ArmDebug::new(mock, DapConfig::default());
+    let (unprotected, idr_ok) = arm.nrf52_approtect_status().unwrap();
+    assert!(!unprotected);
+    assert!(idr_ok);
+}
+
+#[test]
 fn wait_ack_retries_then_gives_up() {
     struct AlwaysWait;
     impl DapTransport for AlwaysWait {

@@ -47,6 +47,11 @@ name = "m1_selftest"
 path = "src/bin/m1_selftest.rs"
 required-features = ["selftest"]
 
+[[bin]]
+name = "nrf52_probe"
+path = "src/bin/nrf52_probe.rs"
+required-features = ["selftest"]
+
 [dependencies.rp-pico]
 version = "0.7"
 # Below is to take out "boot2" from the set of features.
