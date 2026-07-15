@@ -418,3 +418,27 @@ reset_self に導入。
 
 これまで「物理不良疑い」としていたポート固着はファームウェアの USB 終了処理
 不足が真因だった(ユーザ指摘が契機)。追記10/14 の該当記述はこの結論で上書き。
+
+## 追記18: gdb_server の RTIC 化 (2026-07-16)
+
+USB を USBCTRL_IRQ タスク(優先度 2)に移し、idle の gdbstub セッションループとは
+SPSC キューで接続(UART ブリッジ/RTT の土台)。ブロッキング SWD 操作中も USB が
+応答するようになった。ハマりどころ 2 件を記録:
+
+1. **IRQ 駆動では TX 後の `serial.flush()` が必須**(旧ループは毎周 poll していた
+   ため不要だった。flush しないと端数パケットが送信されず IRQ も来ずデッドロック)。
+2. **RTIC 共有リソース越しのフラグが idle から見えない現象**(IRQ 側は true を
+   書いたのに idle が stale な false を ~1800 万回読み続けた)。単純フラグは
+   AtomicBool に変更して解決。原因は RTIC/thumbv6 のロック codegen 側と推定
+   (要追跡だが本件はアトミックが適切)。
+
+診断基盤も常設化: パニックは reset site 0xfa として watchdog scratch に記録して
+自己リブート、ブート進行マーカーを SRAM 最上部 0x20041f00 に記録
+(RSP が死んでいても 1200 タッチ → `picotool save -r` で読める)。
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | E2E / attach×5 / monitor reset halt + break main | 全 OK |
+| 2 | load + compare-sections | 全一致 |
+| 3 | デュアルコア scheduler-locked stepi / watchpoint | OK |
+| 4 | 1200bps タッチ連続 ×3 | 3/3 |
