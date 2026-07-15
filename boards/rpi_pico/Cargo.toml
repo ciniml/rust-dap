@@ -25,6 +25,28 @@ swd = []
 swj = ["bitbang"] # Combined SWD+JTAG with runtime DAP_Connect switching (bit-banging)
 ram-exec = ["rust-dap-rp2040/ram-exec"] # Execute-in-SRAM support
 
+# --- Standalone GDB server (RSP over USB-CDC) ------------------------------
+# Stub core: gdbstub + the arm-debug ADIv5/Cortex-M stack. Target-chip
+# support is selected with a gdb-target-* feature (exactly one).
+gdbserver = ["dep:gdbstub", "dep:gdbstub_arch", "dep:arm-debug"]
+# RP2040 targets: SWD multidrop connect, dual-core threads, bootrom flashing.
+gdb-target-rp2040 = ["gdbserver"]
+# arm-debug hardware self-test firmware (m1_selftest).
+selftest = ["dep:arm-debug"]
+
+# gdb_server / m1_selftest are feature-gated so plain CMSIS-DAP probe builds
+# don't pull in the debugger stack. blink_demo (a demo payload for the GDB
+# debugger's target) has no extra dependencies and stays ungated.
+[[bin]]
+name = "gdb_server"
+path = "src/bin/gdb_server.rs"
+required-features = ["gdb-target-rp2040"]
+
+[[bin]]
+name = "m1_selftest"
+path = "src/bin/m1_selftest.rs"
+required-features = ["selftest"]
+
 [dependencies.rp-pico]
 version = "0.7"
 # Below is to take out "boot2" from the set of features.
@@ -33,9 +55,9 @@ features = ["rt", "critical-section-impl"]
 
 [dependencies]
 rust-dap = { path = "../../rust-dap" }
-arm-debug = { path = "../../arm-debug" }
-gdbstub = { version = "0.7", default-features = false }
-gdbstub_arch = "0.3"
+arm-debug = { path = "../../arm-debug", optional = true }
+gdbstub = { version = "0.7", default-features = false, optional = true }
+gdbstub_arch = { version = "0.3", optional = true }
 rust-dap-rp2040 = { path = "../../rust-dap-rp2040" }
 panic-halt = "0.2"
 cortex-m = { version = "0.7" }
