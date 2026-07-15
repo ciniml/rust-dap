@@ -442,3 +442,19 @@ SPSC キューで接続(UART ブリッジ/RTT の土台)。ブロッキング SW
 | 2 | load + compare-sections | 全一致 |
 | 3 | デュアルコア scheduler-locked stepi / watchpoint | OK |
 | 4 | 1200bps タッチ連続 ×3 | 3/3 |
+
+## 追記19: M-RTT1(RTT 発見 + halt 中ダンプ)実機検証 (2026-07-16)
+
+`monitor rtt scan|attach <addr>|setup <addr>|channel <n>|dump|status|stop` を実装
+(複数制御ブロック列挙 + valid/stale 判定 + 選択式、nRF Connect SDK の
+bootloader/アプリ別ブロック要件に対応)。blink_demo に rtt-target 出力を追加。
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | `monitor rtt scan` — rtt_init_print! の CB を発見(0x20000008, up=1, valid) | OK |
+| 2 | `monitor rtt attach 0x20000008` + status | OK |
+| 3 | 実行後の `monitor rtt dump` — "blink #N led=X" 行が読める | OK |
+| 4 | 差分ダンプ(RdOff 書き戻し、2 回目は続きから) | OK |
+
+次: M-RTT2 = 第 2 USB-CDC ポートへの常時ブリッジ(Running 中ポーリング)。
+RTIC 化済みなので USB 側の土台は整っている。
