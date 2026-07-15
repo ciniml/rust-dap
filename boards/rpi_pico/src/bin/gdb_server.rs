@@ -28,13 +28,13 @@ use arm_debug::{cortex_m as cm, rp2040, ArmDebug, HaltReason, WatchAccess};
 use core::convert::Infallible;
 use rp_pico::hal;
 
-use gdbstub::common::Signal;
+use gdbstub::common::{Signal, Tid};
 use gdbstub::conn::Connection;
 use gdbstub::stub::state_machine::GdbStubStateMachine;
-use gdbstub::stub::{GdbStubBuilder, SingleThreadStopReason};
-use gdbstub::target::ext::base::singlethread::{
-    SingleThreadBase, SingleThreadResume, SingleThreadResumeOps, SingleThreadSingleStep,
-    SingleThreadSingleStepOps,
+use gdbstub::stub::{GdbStubBuilder, MultiThreadStopReason};
+use gdbstub::target::ext::base::multithread::{
+    MultiThreadBase, MultiThreadResume, MultiThreadResumeOps, MultiThreadSchedulerLocking,
+    MultiThreadSchedulerLockingOps, MultiThreadSingleStep, MultiThreadSingleStepOps,
 };
 use gdbstub::target::ext::base::BaseOps;
 use gdbstub::target::ext::breakpoints::{
@@ -69,12 +69,40 @@ struct SwBp {
     orig: u16,
 }
 
+/// SWD multidrop TARGETSEL per core; GDB thread ids are `core + 1`.
+const CORE_TARGETSEL: [u32; 2] = [rp2040::CORE0_TARGETSEL, rp2040::CORE1_TARGETSEL];
+
+fn core_tid(core: usize) -> Tid {
+    Tid::new(core + 1).unwrap()
+}
+fn tid_core(tid: Tid) -> usize {
+    (tid.get() - 1).min(1)
+}
+
+/// Requested vCont action for one core. `Default` means "no explicit
+/// action": per the gdbstub contract that is *continue*, unless GDB engaged
+/// scheduler locking (no wildcard action), in which case it is "stay halted".
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CoreAction {
+    Default,
+    Continue,
+    Step,
+}
+
 struct RpTarget {
     arm: ArmDebug<Swd>,
     breakpoints: heapless::Vec<SwBp, 8>,
-    /// Whether the last resume was a single-step (so the next stop is
-    /// reported as DoneStep rather than SwBreak).
-    stepping: bool,
+    /// Which core's DP the SWD link currently addresses (None = unknown).
+    cur_core: Option<usize>,
+    /// Pending vCont actions per core.
+    actions: [CoreAction; 2],
+    /// Cores currently running (resumed and not yet re-halted).
+    running: [bool; 2],
+    /// Core whose last resume was a single-step (stop reported as DoneStep).
+    stepped: Option<usize>,
+    /// GDB engaged scheduler locking: cores without an explicit action stay
+    /// halted instead of continuing.
+    sched_lock: bool,
     /// Internal diagnostics, readable from GDB as memory at 0xF000_0000
     /// (`x/8wx 0xF0000000`) even when the SWD link is dead:
     /// [0] connect_and_halt invocations
@@ -153,19 +181,33 @@ impl RpTarget {
         r
     }
 
-    /// Establish the SWD link and halt the core, retrying from scratch until
-    /// a DHCSR read confirms the link is actually usable. A connect issued on
-    /// a live link has been observed to fail on hardware; the failed attempt
-    /// leaves the target in a state from which a later attempt succeeds.
-    /// Records what happened into `diag`.
+    /// Point the SWD link at `core`'s DP (cheap no-op when already there).
+    fn select_core(&mut self, core: usize) -> Result<(), arm_debug::ArmError> {
+        if self.cur_core == Some(core) {
+            return Ok(());
+        }
+        self.cur_core = None; // unknown while switching
+        self.arm.reselect(CORE_TARGETSEL[core])?;
+        self.cur_core = Some(core);
+        Ok(())
+    }
+
+    /// Establish the SWD link and halt both cores, retrying from scratch
+    /// until a DHCSR read confirms the link is actually usable. A connect
+    /// issued on a live link has been observed to fail on hardware; the
+    /// failed attempt leaves the target in a state from which a later
+    /// attempt succeeds. Records what happened into `diag`.
     fn connect_and_halt(&mut self) {
         self.diag[0] = self.diag[0].wrapping_add(1);
         self.diag[5] = 0;
         self.flash_mode = false; // fresh link: assume XIP state unknown
+        self.running = [false; 2];
         for attempt in 1u32..=4 {
+            self.cur_core = None;
             self.diag[2] = match self.arm.connect_multidrop(rp2040::CORE0_TARGETSEL) {
                 Ok(dpidr) => {
                     self.diag[6] = dpidr;
+                    self.cur_core = Some(0);
                     DIAG_OK
                 }
                 Err(e) => err_code(&e),
@@ -183,6 +225,12 @@ impl RpTarget {
                 // Comparators survive in target hardware across sessions;
                 // start each session without leftover HW break/watchpoints.
                 let _ = self.arm.debug_units_clear();
+                // Bring core 1 to the same state, then return to core 0.
+                if self.select_core(1).is_ok() {
+                    let _ = self.arm.halt();
+                    let _ = self.arm.debug_units_clear();
+                }
+                let _ = self.select_core(0);
                 return;
             }
         }
@@ -211,15 +259,18 @@ impl RpTarget {
     }
 
     fn rom_call(&mut self, fn_addr: u32, args: [u32; 4], polls: u32) -> Result<u32, arm_debug::ArmError> {
+        self.select_core(0)?; // bootrom calls always run on core 0
         self.arm
             .call_function(fn_addr, &args, TARGET_CALL_SP, TARGET_TRAMPOLINE, polls)
     }
 
     /// Put the target's flash into command mode (XIP off) for erase/program.
+    /// Flash routines always run on core 0.
     fn flash_enter(&mut self) -> Result<(), arm_debug::ArmError> {
         if self.flash_mode {
             return Ok(());
         }
+        self.select_core(0)?;
         let f = self.rom_flash_fns()?;
         self.rom_call(f.connect, [0; 4], POLLS_CALL)?;
         self.rom_call(f.exit_xip, [0; 4], POLLS_CALL)?;
@@ -232,6 +283,10 @@ impl RpTarget {
     /// flash window is readable/executable again. Best-effort.
     fn flash_exit(&mut self) {
         if !self.flash_mode {
+            return;
+        }
+        if self.select_core(0).is_err() {
+            self.flash_mode = false;
             return;
         }
         if let Ok(f) = self.rom_flash_fns() {
@@ -286,17 +341,18 @@ impl RpTarget {
         Ok(())
     }
 
-    /// Classify why the core stopped, for GDB's stop reply. DFSR (cleared by
+    /// Classify why `core` stopped, for GDB's stop reply. DFSR (cleared by
     /// the read) distinguishes watchpoints from breakpoints; an FPB
     /// comparator covering the PC distinguishes hardware from software
-    /// breakpoints.
-    fn stop_reason(&mut self) -> SingleThreadStopReason<u32> {
-        if self.stepping {
-            return SingleThreadStopReason::DoneStep;
+    /// breakpoints. Assumes the link already addresses `core`.
+    fn stop_reason(&mut self, core: usize) -> MultiThreadStopReason<u32> {
+        let tid = core_tid(core);
+        if self.stepped == Some(core) {
+            return MultiThreadStopReason::DoneStep;
         }
         match self.arm.halt_reason() {
-            Ok(HaltReason::Watchpoint(addr, access)) => SingleThreadStopReason::Watch {
-                tid: (),
+            Ok(HaltReason::Watchpoint(addr, access)) => MultiThreadStopReason::Watch {
+                tid,
                 kind: match access {
                     WatchAccess::Read => WatchKind::Read,
                     WatchAccess::Write => WatchKind::Write,
@@ -307,13 +363,61 @@ impl RpTarget {
             Ok(HaltReason::Breakpoint) => {
                 let pc = self.arm.read_core_reg(cm::PC).unwrap_or(0);
                 if self.arm.hw_breakpoint_at(pc).unwrap_or(false) {
-                    SingleThreadStopReason::HwBreak(())
+                    MultiThreadStopReason::HwBreak(tid)
                 } else {
-                    SingleThreadStopReason::SwBreak(())
+                    MultiThreadStopReason::SwBreak(tid)
                 }
             }
-            _ => SingleThreadStopReason::SwBreak(()),
+            _ => MultiThreadStopReason::SignalWithThread {
+                tid,
+                signal: Signal::SIGTRAP,
+            },
         }
+    }
+
+    /// Halt every core still marked running (all-stop semantics).
+    fn halt_running(&mut self, except: Option<usize>) {
+        for core in 0..2 {
+            if Some(core) != except && self.running[core] && self.select_core(core).is_ok() {
+                let _ = self.arm.halt();
+            }
+        }
+        self.running = [false; 2];
+    }
+
+    /// While running, check whether any resumed core has halted. If one has,
+    /// halt the others (all-stop) and return the stop reason to report.
+    fn poll_stopped(&mut self) -> Option<MultiThreadStopReason<u32>> {
+        // A step completed synchronously inside resume(): report it as soon
+        // as the state machine asks (the stepped core is already halted).
+        // DoneStep carries no thread id — gdbstub would attribute it to its
+        // idea of the current thread — so report an explicit SIGTRAP on the
+        // stepped core instead.
+        if let Some(core) = self.stepped.take() {
+            self.halt_running(None);
+            let _ = self.select_core(core);
+            return Some(MultiThreadStopReason::SignalWithThread {
+                tid: core_tid(core),
+                signal: Signal::SIGTRAP,
+            });
+        }
+        let mut stopped = None;
+        for core in 0..2 {
+            if !self.running[core] {
+                continue;
+            }
+            if self.select_core(core).is_err() {
+                continue;
+            }
+            if self.arm.is_halted().unwrap_or(false) {
+                stopped = Some(core);
+                break;
+            }
+        }
+        let core = stopped?;
+        self.halt_running(Some(core));
+        let _ = self.select_core(core);
+        Some(self.stop_reason(core))
     }
 }
 
@@ -322,7 +426,7 @@ impl Target for RpTarget {
     type Error = Infallible;
 
     fn base_ops(&mut self) -> BaseOps<'_, Self::Arch, Self::Error> {
-        BaseOps::SingleThread(self)
+        BaseOps::MultiThread(self)
     }
 
     fn support_breakpoints(&mut self) -> Option<BreakpointsOps<'_, Self>> {
@@ -330,8 +434,9 @@ impl Target for RpTarget {
     }
 }
 
-impl SingleThreadBase for RpTarget {
-    fn read_registers(&mut self, regs: &mut ArmCoreRegs) -> TargetResult<(), Self> {
+impl MultiThreadBase for RpTarget {
+    fn read_registers(&mut self, regs: &mut ArmCoreRegs, tid: Tid) -> TargetResult<(), Self> {
+        self.select_core(tid_core(tid)).map_err(Self::map_err)?;
         for (i, r) in regs.r.iter_mut().enumerate() {
             *r = self.arm.read_core_reg(i as u8).map_err(Self::map_err)?;
         }
@@ -342,7 +447,8 @@ impl SingleThreadBase for RpTarget {
         Ok(())
     }
 
-    fn write_registers(&mut self, regs: &ArmCoreRegs) -> TargetResult<(), Self> {
+    fn write_registers(&mut self, regs: &ArmCoreRegs, tid: Tid) -> TargetResult<(), Self> {
+        self.select_core(tid_core(tid)).map_err(Self::map_err)?;
         for (i, r) in regs.r.iter().enumerate() {
             self.arm
                 .write_core_reg(i as u8, *r)
@@ -363,7 +469,19 @@ impl SingleThreadBase for RpTarget {
         Ok(())
     }
 
-    fn read_addrs(&mut self, start: u32, data: &mut [u8]) -> TargetResult<usize, Self> {
+    #[inline(always)]
+    fn list_active_threads(
+        &mut self,
+        thread_is_active: &mut dyn FnMut(Tid),
+    ) -> Result<(), Self::Error> {
+        thread_is_active(core_tid(0));
+        thread_is_active(core_tid(1));
+        Ok(())
+    }
+
+    // Memory is shared between the cores; serve reads/writes through
+    // whichever DP the link currently addresses.
+    fn read_addrs(&mut self, start: u32, data: &mut [u8], _tid: Tid) -> TargetResult<usize, Self> {
         // Diagnostic window: serve reads of 0xF000_0000.. from `diag` instead
         // of the target, so internals are visible even with a dead SWD link.
         let diag_len = (self.diag.len() * 4) as u32;
@@ -386,7 +504,7 @@ impl SingleThreadBase for RpTarget {
         Ok(data.len())
     }
 
-    fn write_addrs(&mut self, start: u32, data: &[u8]) -> TargetResult<(), Self> {
+    fn write_addrs(&mut self, start: u32, data: &[u8], _tid: Tid) -> TargetResult<(), Self> {
         if data.is_empty() {
             return Ok(());
         }
@@ -400,29 +518,80 @@ impl SingleThreadBase for RpTarget {
         self.diag_err(r).map_err(Self::map_err)
     }
 
-    fn support_resume(&mut self) -> Option<SingleThreadResumeOps<'_, Self>> {
+    fn support_resume(&mut self) -> Option<MultiThreadResumeOps<'_, Self>> {
         Some(self)
     }
 }
 
-impl SingleThreadResume for RpTarget {
-    fn resume(&mut self, _signal: Option<Signal>) -> Result<(), Self::Error> {
-        self.flash_exit(); // code may run from the XIP window
-        self.stepping = false;
-        let _ = self.arm.resume();
+impl MultiThreadResume for RpTarget {
+    fn clear_resume_actions(&mut self) -> Result<(), Self::Error> {
+        self.actions = [CoreAction::Default; 2];
+        self.sched_lock = false;
         Ok(())
     }
 
-    fn support_single_step(&mut self) -> Option<SingleThreadSingleStepOps<'_, Self>> {
+    fn set_resume_action_continue(
+        &mut self,
+        tid: Tid,
+        _signal: Option<Signal>,
+    ) -> Result<(), Self::Error> {
+        self.actions[tid_core(tid)] = CoreAction::Continue;
+        Ok(())
+    }
+
+    fn resume(&mut self) -> Result<(), Self::Error> {
+        self.flash_exit(); // code may run from the XIP window
+        self.stepped = None;
+        // Steps complete synchronously (arm.step waits for the re-halt), so
+        // stepped cores are not marked running; the stop poll then reports
+        // DoneStep.
+        for core in 0..2 {
+            let action = match self.actions[core] {
+                CoreAction::Default if self.sched_lock => continue, // stay halted
+                CoreAction::Default => CoreAction::Continue,
+                explicit => explicit,
+            };
+            match action {
+                CoreAction::Default => unreachable!(),
+                CoreAction::Step => {
+                    if self.select_core(core).is_ok() {
+                        self.stepped = Some(core);
+                        let _ = self.arm.step();
+                    }
+                }
+                CoreAction::Continue => {
+                    if self.select_core(core).is_ok() && self.arm.resume().is_ok() {
+                        self.running[core] = true;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn support_single_step(&mut self) -> Option<MultiThreadSingleStepOps<'_, Self>> {
+        Some(self)
+    }
+
+    fn support_scheduler_locking(&mut self) -> Option<MultiThreadSchedulerLockingOps<'_, Self>> {
         Some(self)
     }
 }
 
-impl SingleThreadSingleStep for RpTarget {
-    fn step(&mut self, _signal: Option<Signal>) -> Result<(), Self::Error> {
-        self.flash_exit();
-        self.stepping = true;
-        let _ = self.arm.step();
+impl MultiThreadSchedulerLocking for RpTarget {
+    fn set_resume_action_scheduler_lock(&mut self) -> Result<(), Self::Error> {
+        self.sched_lock = true;
+        Ok(())
+    }
+}
+
+impl MultiThreadSingleStep for RpTarget {
+    fn set_resume_action_step(
+        &mut self,
+        tid: Tid,
+        _signal: Option<Signal>,
+    ) -> Result<(), Self::Error> {
+        self.actions[tid_core(tid)] = CoreAction::Step;
         Ok(())
     }
 }
@@ -445,8 +614,18 @@ impl HwBreakpoint for RpTarget {
         addr: u32,
         _kind: ArmBreakpointKind,
     ) -> TargetResult<bool, Self> {
-        // FPB comparator (code region 0x0..0x2000_0000; ROM/flash included).
-        self.arm.hw_breakpoint_set(addr).map_err(Self::map_err)
+        // FPB comparators are per-core; arm both so either core traps.
+        for core in 0..2 {
+            self.select_core(core).map_err(Self::map_err)?;
+            if !self.arm.hw_breakpoint_set(addr).map_err(Self::map_err)? {
+                if core == 1 {
+                    let _ = self.select_core(0);
+                    let _ = self.arm.hw_breakpoint_clear(addr);
+                }
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn remove_hw_breakpoint(
@@ -454,7 +633,12 @@ impl HwBreakpoint for RpTarget {
         addr: u32,
         _kind: ArmBreakpointKind,
     ) -> TargetResult<bool, Self> {
-        self.arm.hw_breakpoint_clear(addr).map_err(Self::map_err)
+        let mut any = false;
+        for core in 0..2 {
+            self.select_core(core).map_err(Self::map_err)?;
+            any |= self.arm.hw_breakpoint_clear(addr).map_err(Self::map_err)?;
+        }
+        Ok(any)
     }
 }
 
@@ -473,9 +657,22 @@ impl HwWatchpoint for RpTarget {
         len: u32,
         kind: WatchKind,
     ) -> TargetResult<bool, Self> {
-        self.arm
-            .watchpoint_set(addr, len, watch_access(kind))
-            .map_err(Self::map_err)
+        // DWT comparators are per-core; arm both so either core traps.
+        for core in 0..2 {
+            self.select_core(core).map_err(Self::map_err)?;
+            let ok = self
+                .arm
+                .watchpoint_set(addr, len, watch_access(kind))
+                .map_err(Self::map_err)?;
+            if !ok {
+                if core == 1 {
+                    let _ = self.select_core(0);
+                    let _ = self.arm.watchpoint_clear(addr, len, watch_access(kind));
+                }
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     fn remove_hw_watchpoint(
@@ -484,9 +681,15 @@ impl HwWatchpoint for RpTarget {
         len: u32,
         kind: WatchKind,
     ) -> TargetResult<bool, Self> {
-        self.arm
-            .watchpoint_clear(addr, len, watch_access(kind))
-            .map_err(Self::map_err)
+        let mut any = false;
+        for core in 0..2 {
+            self.select_core(core).map_err(Self::map_err)?;
+            any |= self
+                .arm
+                .watchpoint_clear(addr, len, watch_access(kind))
+                .map_err(Self::map_err)?;
+        }
+        Ok(any)
     }
 }
 
@@ -699,7 +902,11 @@ fn main() -> ! {
     let mut target = RpTarget {
         arm,
         breakpoints: heapless::Vec::new(),
-        stepping: false,
+        cur_core: None,
+        actions: [CoreAction::Default; 2],
+        running: [false; 2],
+        stepped: None,
+        sched_lock: false,
         diag: [
             0,
             0,
@@ -755,21 +962,23 @@ fn main() -> ! {
                     if let Some(b) = inner.borrow_conn().0.read_byte() {
                         // Typically a Ctrl-C (0x03) to interrupt.
                         inner.incoming_data(&mut target, b).ok()
-                    } else if target.arm.is_halted().unwrap_or(false) {
-                        // The core stopped on its own (breakpoint / watchpoint
-                        // / step done).
-                        let reason = target.stop_reason();
+                    } else if let Some(reason) = target.poll_stopped() {
+                        // A core stopped on its own (breakpoint / watchpoint
+                        // / step done); the others were halted with it.
                         inner.report_stop(&mut target, reason).ok()
                     } else {
                         Some(GdbStubStateMachine::Running(inner))
                     }
                 }
                 GdbStubStateMachine::CtrlCInterrupt(inner) => {
-                    let _ = target.arm.halt();
+                    target.halt_running(None);
                     inner
                         .interrupt_handled(
                             &mut target,
-                            Some(SingleThreadStopReason::Signal(Signal::SIGINT)),
+                            Some(MultiThreadStopReason::SignalWithThread {
+                                tid: core_tid(0),
+                                signal: Signal::SIGINT,
+                            }),
                         )
                         .ok()
                 }
