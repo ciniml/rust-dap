@@ -458,3 +458,18 @@ bootloader/アプリ別ブロック要件に対応)。blink_demo に rtt-target 
 
 次: M-RTT2 = 第 2 USB-CDC ポートへの常時ブリッジ(Running 中ポーリング)。
 RTIC 化済みなので USB 側の土台は整っている。
+
+## 追記20: M-RTT2(第 2 CDC ポートへの RTT 常時ストリーミング)実機検証 (2026-07-16)
+
+プローブを IAD 複合デバイス化(CDC×2)。1 本目 = RSP、2 本目 = RTT 端末。
+idle ループが静穏イテレーションで up バッファをポーリング(デシメーション付き、
+flash mode 中はスキップ)し、SPSC キュー経由で USBCTRL_IRQ タスクが CDC へ橋渡し。
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | 2 ポート列挙(ttyACM3=RSP, ttyACM4=RTT) | OK |
+| 2 | ターゲット実行中のライブストリーミング | 5 秒で 14KB / 783 行 |
+| 3 | `monitor reset` 後の継続(CB 同一アドレスで自動継続) | OK(#0 から再開) |
+| 4 | RSP E2E 回帰 | 3/3 |
+
+これで J-Link RTT Viewer 相当(`picocom /dev/ttyACM4` を開くだけ)が成立。
