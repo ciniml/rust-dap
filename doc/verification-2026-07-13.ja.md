@@ -350,3 +350,26 @@ TAR オートインクリメントのブロック転送(1KB 境界で分割、16
 (`drop_stray_acks`)に変更。**実機検証済み(再接続後)**: セッション間スリープ
 なしの back-to-back 連続 attach ×10 が 10/10 成功、フル E2E・`load` 24KB/s・
 `compare-sections` 一致も回帰確認。
+
+## 追記15: GDB デバッガ M6(デュアルコア)実機検証 (2026-07-15)
+
+arm-debug に `reselect`(dormant 手順なしの高速マルチドロップ切替)を追加し、
+gdb_server を gdbstub の MultiThreadBase に移行(tid 1/2 = Core0/Core1)。
+vCont は gdbstub の規約どおり「未指定スレッド = continue、ワイルドカード無し =
+scheduler locking」を実装。all-stop(1 コア停止で全コア halt、停止コアの tid で
+報告)。step 完了は tid 無しの DoneStep ではなく「stepped スレッドへの SIGTRAP」
+で報告(誤帰属バグの修正)。HW ブレーク/ウォッチは両コアの FPB/DWT に設定。
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | `info threads` = 2 スレッド、pc/sp がコア毎に異なる | OK |
+| 2 | スレッド往復 ×3 でレジスタ値が一貫(reselect の信頼性) | OK |
+| 3 | `continue` → 「Thread 1 hit Breakpoint 1」(tid 帰属) | OK |
+| 4 | thread 2 の `stepi` ×2(0x10001028→102a→102c)、誤帰属なし | OK |
+| 5 | `set scheduler-locking on` で thread 1 のみ step、thread 2 不動 | OK |
+| 6 | scheduler locking off では他コアが暗黙 continue(all-stop 準拠) | OK |
+| 7 | E2E / `load` + compare-sections / 再 attach ×5(2 スレッド認識) | 全 OK |
+
+**M6 完了 = 設計文書の M1〜M6 全マイルストーン達成。** スタンドアロン GDB
+デバッガとして、デュアルコア RP2040 の RAM/フラッシュデバッグ・フラッシュ書込・
+HW ブレーク/ウォッチが gdb-multiarch から一通り使用可能。
