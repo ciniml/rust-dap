@@ -91,3 +91,29 @@ ELF を渡して起動するとシンボル(`main`, `BLINK_*`)が使える。
   修飾パスで参照する。
 - ターゲットが暴走/不明な状態: `monitor reset halt` で確実に既知状態へ。
 - スタブ内部の診断: `x/11wx 0xF0000000`(接続回数・エラーコード・リセット履歴)。
+
+## 6. RTT ログ(J-Link RTT Viewer 相当)
+
+blink_demo はトグル毎に RTT(ch0)へ 1 行出力する。プローブは CDC を 2 本持ち、
+2 本目が RTT 端末になっている:
+
+```gdb
+(gdb) monitor rtt scan               # 制御ブロックを列挙(複数ある場合は選ぶ)
+cb at 0x20000008: up=1 down=0 [valid]
+(gdb) monitor rtt attach 0x20000008
+(gdb) continue                        # ターゲットを走らせる
+```
+
+別端末で:
+
+```console
+$ picocom /dev/ttyACM4      # ← RSP の次の番号の CDC ポート
+blink #123 led=1
+blink #124 led=0
+...
+```
+
+halt 中に溜まった分だけ見たい場合は `monitor rtt dump`。チャネル切替は
+`monitor rtt channel <n>`(既定 0 = Terminal)。nRF Connect SDK のように
+bootloader とアプリで別々の制御ブロックがある場合は scan が全部列挙するので、
+生きている方(valid 表示・実行中に伸びる方)に attach する。
