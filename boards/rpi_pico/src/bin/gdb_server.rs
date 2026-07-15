@@ -47,7 +47,9 @@ use gdbstub_arch::arm::{ArmBreakpointKind, Armv4t};
 
 use hal::clocks::Clock;
 use hal::pac;
-use rust_dap::{DapConfig, DapIdentity};
+use rust_dap::{
+    DapConfig, DapIdentity, USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON,
+};
 use rust_dap_rp2040::bitbang::{CortexMDelay, PicoBidirPin, SwdIoSet};
 use usb_device::prelude::*;
 use usbd_serial::SerialPort;
@@ -190,6 +192,10 @@ fn rtt_id() -> [u8; 16] {
 struct RttState {
     cb: Option<u32>,
     channel: u32,
+    /// Cached descriptor addresses for the selected channel (recomputed on
+    /// attach / channel change so the streaming poll avoids header reads).
+    up_desc: Option<u32>,
+    down_desc: Option<u32>,
 }
 
 fn err_code(e: &arm_debug::ArmError) -> u32 {
@@ -665,6 +671,75 @@ impl RpTarget {
     }
 }
 
+impl RpTarget {
+    /// Recompute the cached up/down descriptor addresses for the selected
+    /// control block + channel.
+    fn rtt_cache_descs(&mut self) {
+        self.rtt.up_desc = self.rtt_channel_desc(true).ok().flatten();
+        self.rtt.down_desc = self.rtt_channel_desc(false).ok().flatten();
+    }
+
+    /// One bounded streaming step: move up-buffer bytes into `tx` and `rx`
+    /// bytes into the down buffer. Called from the session loop while the
+    /// target runs (RAM is readable via the MEM-AP regardless of core state).
+    fn rtt_stream(
+        &mut self,
+        tx: &mut heapless::spsc::Producer<'static, u8, RTT_TX_QUEUE_SIZE>,
+        rx: &mut heapless::spsc::Consumer<'static, u8, RTT_RX_QUEUE_SIZE>,
+    ) -> bool {
+        if self.flash_mode {
+            return false; // don't interleave with flash programming
+        }
+        let mut moved = false;
+        // Up: target -> host CDC.
+        if let Some(desc) = self.rtt.up_desc {
+            if tx.capacity() - tx.len() >= 64 {
+                if let Ok((_, pbuf, size, wr, rd)) = self.rtt_desc(desc) {
+                    if size > 0 && wr < size && rd < size && wr != rd {
+                        let run = if wr > rd { wr - rd } else { size - rd };
+                        let mut chunk = [0u8; 64];
+                        let n = (run as usize).min(chunk.len());
+                        if self.arm.read_mem(pbuf + rd, &mut chunk[..n]).is_ok() {
+                            for &b in &chunk[..n] {
+                                let _ = tx.enqueue(b);
+                            }
+                            let _ = self.arm.write_word(desc + 16, (rd + n as u32) % size);
+                            moved = true;
+                        }
+                    }
+                }
+            }
+        }
+        // Down: host CDC -> target.
+        if let Some(desc) = self.rtt.down_desc {
+            if rx.ready() {
+                if let Ok((_, pbuf, size, wr, rd)) = self.rtt_desc(desc) {
+                    if size > 0 && wr < size && rd < size {
+                        let free = (rd + size - wr - 1) % size;
+                        let run = free.min(size - wr).min(64);
+                        let mut chunk = [0u8; 64];
+                        let mut n = 0usize;
+                        while (n as u32) < run {
+                            match rx.dequeue() {
+                                Some(b) => {
+                                    chunk[n] = b;
+                                    n += 1;
+                                }
+                                None => break,
+                            }
+                        }
+                        if n > 0 && self.arm.write_mem(pbuf + wr, &chunk[..n]).is_ok() {
+                            let _ = self.arm.write_word(desc + 12, (wr + n as u32) % size);
+                            moved = true;
+                        }
+                    }
+                }
+            }
+        }
+        moved
+    }
+}
+
 impl MonitorCmd for RpTarget {
     fn handle_monitor_cmd(
         &mut self,
@@ -699,6 +774,8 @@ impl MonitorCmd for RpTarget {
             b"rtt dump" => self.rtt_dump(&mut out),
             b"rtt stop" => {
                 self.rtt.cb = None;
+                self.rtt.up_desc = None;
+                self.rtt.down_desc = None;
                 outputln!(out, "rtt: detached");
             }
             _ if cmd.starts_with(b"rtt attach ") || cmd.starts_with(b"rtt setup ") => {
@@ -709,6 +786,7 @@ impl MonitorCmd for RpTarget {
                         let mut id = [0u8; 16];
                         if self.arm.read_mem(addr, &mut id).is_ok() && id == rtt_id() {
                             self.rtt.cb = Some(addr);
+                            self.rtt_cache_descs();
                             outputln!(out, "rtt: attached to cb 0x{:08x}", addr);
                             self.rtt_report_cb(addr, &mut out);
                         } else {
@@ -723,6 +801,7 @@ impl MonitorCmd for RpTarget {
                 match parse_hex(arg) {
                     Some(ch) if ch < 16 => {
                         self.rtt.channel = ch;
+                        self.rtt_cache_descs();
                         outputln!(out, "rtt: channel {}", ch);
                     }
                     _ => outputln!(out, "rtt: bad channel"),
@@ -1073,6 +1152,9 @@ impl SwBreakpoint for RpTarget {
 
 const RX_QUEUE_SIZE: usize = 1024;
 const TX_QUEUE_SIZE: usize = 2048;
+/// RTT bridge queues (second CDC port <-> target ring buffers).
+const RTT_TX_QUEUE_SIZE: usize = 2048;
+const RTT_RX_QUEUE_SIZE: usize = 256;
 
 /// The idle-side view of the USB connection: lock-free SPSC queues shared
 /// with the USBCTRL_IRQ task, which owns the USB device and services it at
@@ -1193,16 +1275,23 @@ mod app {
         // --- USBCTRL_IRQ task ---
         usb_dev: UsbDevice<'static, hal::usb::UsbBus>,
         serial: SerialPort<'static, hal::usb::UsbBus>,
+        rtt_serial: SerialPort<'static, hal::usb::UsbBus>,
         rx_prod: heapless::spsc::Producer<'static, u8, RX_QUEUE_SIZE>,
         tx_cons: heapless::spsc::Consumer<'static, u8, TX_QUEUE_SIZE>,
+        rtt_tx_cons: heapless::spsc::Consumer<'static, u8, RTT_TX_QUEUE_SIZE>,
+        rtt_rx_prod: heapless::spsc::Producer<'static, u8, RTT_RX_QUEUE_SIZE>,
         // --- idle (GDB session loop) ---
         conn: QueueConn,
         target: RpTarget,
+        rtt_tx_prod: heapless::spsc::Producer<'static, u8, RTT_TX_QUEUE_SIZE>,
+        rtt_rx_cons: heapless::spsc::Consumer<'static, u8, RTT_RX_QUEUE_SIZE>,
     }
 
     #[init(local = [
         rx_queue: heapless::spsc::Queue<u8, RX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
         tx_queue: heapless::spsc::Queue<u8, TX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
+        rtt_tx_queue: heapless::spsc::Queue<u8, RTT_TX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
+        rtt_rx_queue: heapless::spsc::Queue<u8, RTT_RX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
         USB_ALLOCATOR: Option<UsbBusAllocator<hal::usb::UsbBus>> = None,
     ])]
     fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
@@ -1238,12 +1327,18 @@ mod app {
                 true,
                 &mut resets,
             )));
+        // Interface order fixes host tty numbering: first CDC = RSP,
+        // second CDC = RTT terminal.
         let serial = SerialPort::new(usb_allocator);
+        let rtt_serial = SerialPort::new(usb_allocator);
         let usb_dev = UsbDeviceBuilder::new(usb_allocator, UsbVidPid(0x6666, 0x4444))
             .manufacturer("fugafuga.org")
             .product("rust-dap GDB server")
             .serial_number("raspberry-pi-pico-gdb")
-            .device_class(usbd_serial::USB_CLASS_CDC)
+            // Two CDC-ACM functions -> IAD composite device.
+            .device_class(USB_CLASS_MISCELLANEOUS)
+            .device_sub_class(USB_SUBCLASS_COMMON)
+            .device_protocol(USB_PROTOCOL_IAD)
             .build();
 
         // Bit-banging SWD transport + arm-debug.
@@ -1288,11 +1383,15 @@ mod app {
             rtt: RttState {
                 cb: None,
                 channel: 0,
+                up_desc: None,
+                down_desc: None,
             },
         };
 
         let (rx_prod, rx_cons) = ctx.local.rx_queue.split();
         let (tx_prod, tx_cons) = ctx.local.tx_queue.split();
+        let (rtt_tx_prod, rtt_tx_cons) = ctx.local.rtt_tx_queue.split();
+        let (rtt_rx_prod, rtt_rx_cons) = ctx.local.rtt_rx_queue.split();
         let conn = QueueConn {
             rx: rx_cons,
             tx: tx_prod,
@@ -1304,10 +1403,15 @@ mod app {
             Local {
                 usb_dev,
                 serial,
+                rtt_serial,
                 rx_prod,
                 tx_cons,
+                rtt_tx_cons,
+                rtt_rx_prod,
                 conn,
                 target,
+                rtt_tx_prod,
+                rtt_rx_cons,
             },
             init::Monotonics(),
         )
@@ -1315,11 +1419,12 @@ mod app {
 
     /// Service USB at interrupt priority: enumeration and CDC transfers stay
     /// responsive while idle blocks in long SWD operations.
-    #[task(binds = USBCTRL_IRQ, priority = 2, local = [usb_dev, serial, rx_prod, tx_cons])]
+    #[task(binds = USBCTRL_IRQ, priority = 2, local = [usb_dev, serial, rtt_serial, rx_prod, tx_cons, rtt_tx_cons, rtt_rx_prod])]
     fn usb_irq(ctx: usb_irq::Context) {
         let usb_dev = ctx.local.usb_dev;
         let serial = ctx.local.serial;
-        usb_dev.poll(&mut [serial]);
+        let rtt_serial = ctx.local.rtt_serial;
+        usb_dev.poll(&mut [serial, rtt_serial]);
         // 1200 bps touch → reboot into the bootloader (reflash without BOOTSEL).
         rust_dap_rp2040::util::bootsel_on_1200bps_touch(serial);
         USB_CONFIGURED.store(
@@ -1349,12 +1454,35 @@ mod app {
             }
         }
         let _ = serial.flush();
+        // RTT CDC: drain the up-stream queue to the host, collect host input.
+        while let Some(&b) = ctx.local.rtt_tx_cons.peek() {
+            match rtt_serial.write(&[b]) {
+                Ok(1) => {
+                    ctx.local.rtt_tx_cons.dequeue();
+                }
+                _ => break,
+            }
+        }
+        let _ = rtt_serial.flush();
+        while let Ok(n) = rtt_serial.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            for &b in &buf[..n] {
+                let _ = ctx.local.rtt_rx_prod.enqueue(b);
+            }
+        }
     }
 
-    #[idle(local = [conn, target])]
+    #[idle(local = [conn, target, rtt_tx_prod, rtt_rx_cons])]
     fn idle(ctx: idle::Context) -> ! {
         let conn = ctx.local.conn;
         let target = ctx.local.target;
+        let rtt_tx = ctx.local.rtt_tx_prod;
+        let rtt_rx = ctx.local.rtt_rx_cons;
+        // Decimate RTT polling: only on quiet iterations (no RSP byte), and
+        // only every N of those, so RSP throughput is unaffected.
+        let mut rtt_tick: u32 = 0;
         boot_progress(1); // idle entered
 
         // Wait for USB enumeration before touching the target, then connect
@@ -1391,7 +1519,13 @@ mod app {
                     GdbStubStateMachine::Idle(mut inner) => {
                         match inner.borrow_conn().0.read_byte() {
                             Some(b) => inner.incoming_data(target, b).ok(),
-                            None => Some(GdbStubStateMachine::Idle(inner)),
+                            None => {
+                                rtt_tick = rtt_tick.wrapping_add(1);
+                                if rtt_tick % 64 == 0 && target.rtt_stream(rtt_tx, rtt_rx) {
+                                    QueueConn::kick();
+                                }
+                                Some(GdbStubStateMachine::Idle(inner))
+                            }
                         }
                     }
                     GdbStubStateMachine::Running(mut inner) => {
@@ -1404,6 +1538,10 @@ mod app {
                             // halted with it.
                             inner.report_stop(target, reason).ok()
                         } else {
+                            rtt_tick = rtt_tick.wrapping_add(1);
+                            if rtt_tick % 4 == 0 && target.rtt_stream(rtt_tx, rtt_rx) {
+                                QueueConn::kick();
+                            }
                             Some(GdbStubStateMachine::Running(inner))
                         }
                     }
