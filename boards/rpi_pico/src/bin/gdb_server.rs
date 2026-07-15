@@ -66,9 +66,19 @@ type Swd = SwdIoSet<hal::gpio::bank0::Gpio2, hal::gpio::bank0::Gpio3, hal::gpio:
 
 const BKPT: u16 = 0xBE00; // Thumb BKPT #0
 
+/// How a GDB "software" (Z0) breakpoint is realized.
+enum SwBpKind {
+    /// RAM: original halfword saved, BKPT patched in.
+    Ram { orig: u16 },
+    /// ROM/flash (code region): silently promoted to an FPB comparator —
+    /// BKPT patching is impossible there (XIP writes are ignored), which
+    /// used to make plain `break` on flash a silent no-op.
+    Fpb,
+}
+
 struct SwBp {
     addr: u32,
-    orig: u16,
+    kind: SwBpKind,
 }
 
 /// SWD multidrop TARGETSEL per core; GDB thread ids are `core + 1`.
@@ -394,7 +404,9 @@ impl RpTarget {
             },
             Ok(HaltReason::Breakpoint) => {
                 let pc = self.arm.read_core_reg(cm::PC).unwrap_or(0);
-                if self.arm.hw_breakpoint_at(pc).unwrap_or(false) {
+                // A promoted Z0 breakpoint lives in the FPB but must still be
+                // reported as a software breakpoint for GDB to match it.
+                if !self.promoted_sw_at(pc) && self.arm.hw_breakpoint_at(pc).unwrap_or(false) {
                     MultiThreadStopReason::HwBreak(tid)
                 } else {
                     MultiThreadStopReason::SwBreak(tid)
@@ -680,17 +692,7 @@ impl HwBreakpoint for RpTarget {
         _kind: ArmBreakpointKind,
     ) -> TargetResult<bool, Self> {
         // FPB comparators are per-core; arm both so either core traps.
-        for core in 0..2 {
-            self.select_core(core).map_err(Self::map_err)?;
-            if !self.arm.hw_breakpoint_set(addr).map_err(Self::map_err)? {
-                if core == 1 {
-                    let _ = self.select_core(0);
-                    let _ = self.arm.hw_breakpoint_clear(addr);
-                }
-                return Ok(false);
-            }
-        }
-        Ok(true)
+        self.fpb_set_both(addr)
     }
 
     fn remove_hw_breakpoint(
@@ -698,12 +700,7 @@ impl HwBreakpoint for RpTarget {
         addr: u32,
         _kind: ArmBreakpointKind,
     ) -> TargetResult<bool, Self> {
-        let mut any = false;
-        for core in 0..2 {
-            self.select_core(core).map_err(Self::map_err)?;
-            any |= self.arm.hw_breakpoint_clear(addr).map_err(Self::map_err)?;
-        }
-        Ok(any)
+        self.fpb_clear_both(addr)
     }
 }
 
@@ -758,22 +755,69 @@ impl HwWatchpoint for RpTarget {
     }
 }
 
+impl RpTarget {
+    /// Arm an FPB comparator for `addr` on both cores (rolls back on partial
+    /// failure). Returns false when out of comparators / not breakable.
+    fn fpb_set_both(&mut self, addr: u32) -> TargetResult<bool, Self> {
+        for core in 0..2 {
+            self.select_core(core).map_err(Self::map_err)?;
+            if !self.arm.hw_breakpoint_set(addr).map_err(Self::map_err)? {
+                if core == 1 {
+                    let _ = self.select_core(0);
+                    let _ = self.arm.hw_breakpoint_clear(addr);
+                }
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn fpb_clear_both(&mut self, addr: u32) -> TargetResult<bool, Self> {
+        let mut any = false;
+        for core in 0..2 {
+            self.select_core(core).map_err(Self::map_err)?;
+            any |= self.arm.hw_breakpoint_clear(addr).map_err(Self::map_err)?;
+        }
+        Ok(any)
+    }
+
+    /// Whether pc is covered by a Z0 breakpoint that was promoted to FPB
+    /// (so its stop must be reported as SwBreak, not HwBreak).
+    fn promoted_sw_at(&self, pc: u32) -> bool {
+        self.breakpoints
+            .iter()
+            .any(|b| b.addr == pc && matches!(b.kind, SwBpKind::Fpb))
+    }
+}
+
 impl SwBreakpoint for RpTarget {
     fn add_sw_breakpoint(
         &mut self,
         addr: u32,
         _kind: ArmBreakpointKind,
     ) -> TargetResult<bool, Self> {
-        // Save the original halfword and patch a Thumb BKPT (RAM only).
-        let mut orig = [0u8; 2];
-        self.arm.read_mem(addr, &mut orig).map_err(Self::map_err)?;
-        let orig = u16::from_le_bytes(orig);
-        if self.breakpoints.push(SwBp { addr, orig }).is_err() {
-            return Ok(false); // out of breakpoint slots
+        if self.breakpoints.is_full() {
+            return Ok(false);
         }
-        self.arm
-            .write_mem(addr, &BKPT.to_le_bytes())
-            .map_err(Self::map_err)?;
+        // ROM/flash can't be BKPT-patched: promote to an FPB comparator so a
+        // plain `break` works there too.
+        let kind = if addr < 0x2000_0000 {
+            if !self.fpb_set_both(addr)? {
+                return Ok(false);
+            }
+            SwBpKind::Fpb
+        } else {
+            // RAM: save the original halfword and patch a Thumb BKPT.
+            let mut orig = [0u8; 2];
+            self.arm.read_mem(addr, &mut orig).map_err(Self::map_err)?;
+            self.arm
+                .write_mem(addr, &BKPT.to_le_bytes())
+                .map_err(Self::map_err)?;
+            SwBpKind::Ram {
+                orig: u16::from_le_bytes(orig),
+            }
+        };
+        let _ = self.breakpoints.push(SwBp { addr, kind });
         Ok(true)
     }
 
@@ -782,14 +826,18 @@ impl SwBreakpoint for RpTarget {
         addr: u32,
         _kind: ArmBreakpointKind,
     ) -> TargetResult<bool, Self> {
-        if let Some(pos) = self.breakpoints.iter().position(|b| b.addr == addr) {
-            let bp = self.breakpoints.swap_remove(pos);
-            self.arm
-                .write_mem(addr, &bp.orig.to_le_bytes())
-                .map_err(Self::map_err)?;
-            Ok(true)
-        } else {
-            Ok(false)
+        let Some(pos) = self.breakpoints.iter().position(|b| b.addr == addr) else {
+            return Ok(false);
+        };
+        let bp = self.breakpoints.swap_remove(pos);
+        match bp.kind {
+            SwBpKind::Ram { orig } => {
+                self.arm
+                    .write_mem(addr, &orig.to_le_bytes())
+                    .map_err(Self::map_err)?;
+                Ok(true)
+            }
+            SwBpKind::Fpb => self.fpb_clear_both(addr),
         }
     }
 }
