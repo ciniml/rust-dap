@@ -495,3 +495,28 @@ nRF52 dpidr=0x2ba01477 ctrl-ap idr OK approtect=OPEN part=0x52832
 実シリコンで裏付けられた。コアデバッグ層(DHCSR/DCRSR/…)は ARMv6/v7-M 共通の
 ため halt/step/レジスタは追加実装なしで動作見込み(次: TargetFamily トレイト化
 で gdb_server から nRF52 を gdb-target-nrf52 として選べるようにする = M-nRF2)。
+
+## 追記22: M-nRF2(TargetFamily トレイトで nRF52 GDB デバッグ)実機検証 (2026-07-16)
+
+gdb_server を TargetFamily トレイト(静的ディスパッチ、1 ビルド 1 family、
+feature 選択)化。family 固有部(接続・コア選択・フラッシュ・メモリマップ)を分離し、
+コアデバッグ共通部は Family::NUM_CORES で駆動。Rp2040Family(既存ロジック移設)/
+Nrf52Family(connect_swd・単一コア・NVMC・512KB flash・64KB RAM)を実装。
+
+ビルド: `cargo build --bin gdb_server --no-default-features --features gdb-target-nrf52`
+
+nRF52832 実機(gdb-multiarch, armv7):
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | attach でスレッド 1 個(nRF は単一コア) | OK(旧: 2 個表示のバグを NUM_CORES で修正) |
+| 2 | pc/sp 読み出し、FICR.INFO.PART = 0x52832 | OK |
+| 3 | RAM 読み書き(0x20000100 ← 0xcafebabe) | OK |
+| 4 | RAM ソフトウェアブレークポイント + continue で停止 | OK |
+| 5 | 再 attach ×3 | 3/3 |
+| 6 | NVMC フラッシュ書込(0x7f000 に 2 ワード)+ 読み戻し | 一致 |
+
+**M-nRF2 完了 = nRF52 を GDB でデバッグ可能に**(単一ファームで RP2040/nRF52 を
+feature 選択)。RP2040 版はビルド維持(実機回帰はターゲット再配線後 = nRF が SWD
+ピンを占有中のため保留)。次: HW ブレーク(FPB NUM_CODE 7bit)/ CTRL-AP リセット /
+monitor erase_all を nRF family に追加(M-nRF3)。
