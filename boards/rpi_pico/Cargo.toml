@@ -31,6 +31,8 @@ ram-exec = ["rust-dap-rp2040/ram-exec"] # Execute-in-SRAM support
 gdbserver = ["dep:gdbstub", "dep:gdbstub_arch", "dep:arm-debug"]
 # RP2040 targets: SWD multidrop connect, dual-core threads, bootrom flashing.
 gdb-target-rp2040 = ["gdbserver"]
+# nRF52 targets: SW-DP connect, single core, NVMC flashing, CTRL-AP recovery.
+gdb-target-nrf52 = ["gdbserver"]
 # arm-debug hardware self-test firmware (m1_selftest).
 selftest = ["dep:arm-debug"]
 
@@ -40,7 +42,9 @@ selftest = ["dep:arm-debug"]
 [[bin]]
 name = "gdb_server"
 path = "src/bin/gdb_server.rs"
-required-features = ["gdb-target-rp2040"]
+# One target family must be selected (mutually exclusive). The default build
+# picks RP2040; nRF52 needs --no-default-features --features gdb-target-nrf52.
+required-features = ["gdbserver"]
 
 [[bin]]
 name = "m1_selftest"

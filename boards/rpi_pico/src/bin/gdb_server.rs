@@ -22,7 +22,9 @@
 #![no_std]
 #![no_main]
 
-use arm_debug::{cortex_m as cm, rp2040, ArmDebug, HaltReason, WatchAccess};
+use arm_debug::{cortex_m as cm, ArmDebug, HaltReason, WatchAccess};
+#[cfg(feature = "gdb-target-rp2040")]
+use arm_debug::rp2040;
 use core::convert::Infallible;
 use rp_pico::hal;
 
@@ -80,14 +82,11 @@ struct SwBp {
     kind: SwBpKind,
 }
 
-/// SWD multidrop TARGETSEL per core; GDB thread ids are `core + 1`.
-const CORE_TARGETSEL: [u32; 2] = [rp2040::CORE0_TARGETSEL, rp2040::CORE1_TARGETSEL];
-
 fn core_tid(core: usize) -> Tid {
     Tid::new(core + 1).unwrap()
 }
 fn tid_core(tid: Tid) -> usize {
-    (tid.get() - 1).min(1)
+    (tid.get() - 1).min(Family::NUM_CORES - 1)
 }
 
 /// Requested vCont action for one core. `Default` means "no explicit
@@ -102,13 +101,12 @@ enum CoreAction {
 
 struct RpTarget {
     arm: ArmDebug<Swd>,
+    family: Family,
     breakpoints: heapless::Vec<SwBp, 8>,
-    /// Which core's DP the SWD link currently addresses (None = unknown).
-    cur_core: Option<usize>,
     /// Pending vCont actions per core.
-    actions: [CoreAction; 2],
+    actions: [CoreAction; MAX_CORES],
     /// Cores currently running (resumed and not yet re-halted).
-    running: [bool; 2],
+    running: [bool; MAX_CORES],
     /// Core whose last resume was a single-step (stop reported as DoneStep).
     stepped: Option<usize>,
     /// GDB engaged scheduler locking: cores without an explicit action stay
@@ -128,12 +126,6 @@ struct RpTarget {
     /// [9] reset count (survives sys_reset via watchdog scratch)
     /// [10] sessions ended (clean disconnect or recovered stub error)
     diag: [u32; 11],
-    /// Cached bootrom flash routine addresses.
-    flash_fns: Option<RomFlashFns>,
-    /// Whether the target is in flash-command mode (XIP disabled).
-    flash_mode: bool,
-    /// Sectors erased since entering flash mode (1 bit per 4 KiB sector).
-    erased: [u32; (FLASH_SIZE / FLASH_SECTOR / 32) as usize],
     /// RTT bridge state.
     rtt: RttState,
 }
@@ -143,20 +135,28 @@ const DIAG_OK: u32 = 0x0a11_600d;
 
 // --- Flash writing (M5): GDB `load`/memory writes into the XIP window are
 // implemented by calling the target's bootrom flash routines.
-const FLASH_BASE: u32 = rp2040::FLASH_BASE;
-const FLASH_SIZE: u32 = 2 * 1024 * 1024; // Pico W25Q16 (2 MiB)
-const FLASH_SECTOR: u32 = 4096;
+#[cfg(feature = "gdb-target-rp2040")]
+const RP2040_FLASH_BASE: u32 = rp2040::FLASH_BASE;
+#[cfg(feature = "gdb-target-rp2040")]
+const RP2040_FLASH_SIZE: u32 = 2 * 1024 * 1024; // Pico W25Q16 (2 MiB)
+#[cfg(feature = "gdb-target-rp2040")]
+const RP2040_FLASH_SECTOR: u32 = 4096;
 /// Staging buffer in target RAM for flash_range_program's source data.
+#[cfg(feature = "gdb-target-rp2040")]
 const TARGET_STAGE: u32 = 0x2001_0000;
 /// Stack for remote bootrom calls (grows down).
+#[cfg(feature = "gdb-target-rp2040")]
 const TARGET_CALL_SP: u32 = 0x2000_8000;
 /// BKPT return trampoline for remote calls.
+#[cfg(feature = "gdb-target-rp2040")]
 const TARGET_TRAMPOLINE: u32 = 0x2000_7000;
 /// DHCSR poll budgets: a 4 KiB sector erase takes tens of ms.
+#[cfg(feature = "gdb-target-rp2040")]
 const POLLS_CALL: u32 = 100_000;
 const POLLS_ERASE: u32 = 400_000;
 
 /// Bootrom flash routine addresses, looked up once per boot.
+#[cfg(feature = "gdb-target-rp2040")]
 #[derive(Clone, Copy)]
 struct RomFlashFns {
     connect: u32,
@@ -173,9 +173,7 @@ struct RomFlashFns {
 // buffers, then all down buffers: { pName, pBuffer, SizeOfBuffer, WrOff,
 // RdOff, Flags }. Up buffers: target writes WrOff, we consume via RdOff.
 
-/// Target RAM range scanned for control blocks.
-const RTT_SCAN_START: u32 = 0x2000_0000;
-const RTT_SCAN_END: u32 = 0x2004_2000;
+/// Max control blocks reported by an RTT scan.
 const RTT_MAX_FOUND: usize = 4;
 
 /// The 16-byte RTT control-block ID, assembled at runtime so the probe's own
@@ -211,6 +209,319 @@ fn err_code(e: &arm_debug::ArmError) -> u32 {
     }
 }
 
+// --- Target-family abstraction --------------------------------------------
+// One family is selected at compile time (gdb-target-rp2040 / -nrf52). The
+// architecture-common core debug (halt/step/registers/breakpoints/reset)
+// lives in RpTarget; the family provides only what differs: the SWD connect,
+// core selection, flash programming, and the memory map.
+
+/// Upper bound on cores across families (RP2040 has 2); active count is
+/// `Family::NUM_CORES`.
+const MAX_CORES: usize = 2;
+
+trait TargetFamily {
+    const NUM_CORES: usize;
+    /// Flash window base/size (writes here are routed to `flash_write`).
+    const FLASH_BASE: u32;
+    const FLASH_SIZE: u32;
+    /// Target RAM range (RTT control-block scan).
+    const RAM_START: u32;
+    const RAM_END: u32;
+
+    fn new() -> Self;
+    /// Raw SWD connect to core 0; returns DPIDR. Retry/halt/diagnostics are
+    /// handled by RpTarget.
+    fn connect(&mut self, arm: &mut ArmDebug<Swd>) -> Result<u32, arm_debug::ArmError>;
+    /// Point the link at `core`'s DP (cheap no-op when already there or when
+    /// single-core). Owns the current-core cache.
+    fn select_core(
+        &mut self,
+        arm: &mut ArmDebug<Swd>,
+        core: usize,
+    ) -> Result<(), arm_debug::ArmError>;
+    /// Forget the cached current core (call before a fresh connect).
+    fn forget_core(&mut self);
+    /// Erase + program flash for the given XIP/flash-window address.
+    fn flash_write(
+        &mut self,
+        arm: &mut ArmDebug<Swd>,
+        addr: u32,
+        data: &[u8],
+    ) -> Result<(), arm_debug::ArmError>;
+    /// Leave any flash-command mode so the flash window reads/executes again.
+    fn flash_finish(&mut self, arm: &mut ArmDebug<Swd>);
+    /// Reset per-session flash bookkeeping on reconnect.
+    fn reset_flash_state(&mut self);
+    /// Whether flash is currently in command mode (skip RTT polling then).
+    fn in_flash_mode(&self) -> bool;
+}
+
+#[cfg(feature = "gdb-target-rp2040")]
+type Family = Rp2040Family;
+#[cfg(feature = "gdb-target-nrf52")]
+type Family = Nrf52Family;
+
+// --- RP2040 family --------------------------------------------------------
+
+/// SWD multidrop TARGETSEL per core.
+#[cfg(feature = "gdb-target-rp2040")]
+const CORE_TARGETSEL: [u32; 2] = [rp2040::CORE0_TARGETSEL, rp2040::CORE1_TARGETSEL];
+
+#[cfg(feature = "gdb-target-rp2040")]
+struct Rp2040Family {
+    cur_core: Option<usize>,
+    flash_fns: Option<RomFlashFns>,
+    flash_mode: bool,
+    erased: [u32; (RP2040_FLASH_SIZE / RP2040_FLASH_SECTOR / 32) as usize],
+}
+
+#[cfg(feature = "gdb-target-rp2040")]
+impl Rp2040Family {
+    fn rom_flash_fns(&mut self, arm: &mut ArmDebug<Swd>) -> Result<RomFlashFns, arm_debug::ArmError> {
+        if let Some(f) = self.flash_fns {
+            return Ok(f);
+        }
+        let mut get = |code| -> Result<u32, arm_debug::ArmError> {
+            arm.rom_func_lookup(code)?.ok_or(arm_debug::ArmError::Internal)
+        };
+        let fns = RomFlashFns {
+            connect: get(rp2040::FN_CONNECT_INTERNAL_FLASH)?,
+            exit_xip: get(rp2040::FN_FLASH_EXIT_XIP)?,
+            erase: get(rp2040::FN_FLASH_RANGE_ERASE)?,
+            program: get(rp2040::FN_FLASH_RANGE_PROGRAM)?,
+            flush: get(rp2040::FN_FLASH_FLUSH_CACHE)?,
+            enter_xip: get(rp2040::FN_FLASH_ENTER_CMD_XIP)?,
+        };
+        self.flash_fns = Some(fns);
+        Ok(fns)
+    }
+
+    fn rom_call(
+        &mut self,
+        arm: &mut ArmDebug<Swd>,
+        fn_addr: u32,
+        args: [u32; 4],
+        polls: u32,
+    ) -> Result<u32, arm_debug::ArmError> {
+        self.select_core(arm, 0)?; // bootrom calls always run on core 0
+        arm.call_function(fn_addr, &args, TARGET_CALL_SP, TARGET_TRAMPOLINE, polls)
+    }
+
+    fn flash_enter(&mut self, arm: &mut ArmDebug<Swd>) -> Result<(), arm_debug::ArmError> {
+        if self.flash_mode {
+            return Ok(());
+        }
+        self.select_core(arm, 0)?;
+        let f = self.rom_flash_fns(arm)?;
+        self.rom_call(arm, f.connect, [0; 4], POLLS_CALL)?;
+        self.rom_call(arm, f.exit_xip, [0; 4], POLLS_CALL)?;
+        self.erased = Default::default();
+        self.flash_mode = true;
+        Ok(())
+    }
+}
+
+#[cfg(feature = "gdb-target-rp2040")]
+impl TargetFamily for Rp2040Family {
+    const NUM_CORES: usize = 2;
+    const FLASH_BASE: u32 = RP2040_FLASH_BASE;
+    const FLASH_SIZE: u32 = RP2040_FLASH_SIZE;
+    const RAM_START: u32 = 0x2000_0000;
+    const RAM_END: u32 = 0x2004_2000;
+
+    fn new() -> Self {
+        Self {
+            cur_core: None,
+            flash_fns: None,
+            flash_mode: false,
+            erased: Default::default(),
+        }
+    }
+
+    fn connect(&mut self, arm: &mut ArmDebug<Swd>) -> Result<u32, arm_debug::ArmError> {
+        let dpidr = arm.connect_multidrop(rp2040::CORE0_TARGETSEL)?;
+        self.cur_core = Some(0);
+        Ok(dpidr)
+    }
+
+    fn select_core(
+        &mut self,
+        arm: &mut ArmDebug<Swd>,
+        core: usize,
+    ) -> Result<(), arm_debug::ArmError> {
+        if self.cur_core == Some(core) {
+            return Ok(());
+        }
+        self.cur_core = None;
+        arm.reselect(CORE_TARGETSEL[core])?;
+        self.cur_core = Some(core);
+        Ok(())
+    }
+
+    fn forget_core(&mut self) {
+        self.cur_core = None;
+    }
+
+    fn flash_write(
+        &mut self,
+        arm: &mut ArmDebug<Swd>,
+        addr: u32,
+        data: &[u8],
+    ) -> Result<(), arm_debug::ArmError> {
+        let off = addr - RP2040_FLASH_BASE;
+        let end = off + data.len() as u32;
+        if end > RP2040_FLASH_SIZE {
+            return Err(arm_debug::ArmError::Internal);
+        }
+        self.flash_enter(arm)?;
+        let f = self.rom_flash_fns(arm)?;
+        for sector in off / RP2040_FLASH_SECTOR..=(end - 1) / RP2040_FLASH_SECTOR {
+            let (word, bit) = ((sector / 32) as usize, sector % 32);
+            if self.erased[word] & (1 << bit) == 0 {
+                self.rom_call(
+                    arm,
+                    f.erase,
+                    [sector * RP2040_FLASH_SECTOR, RP2040_FLASH_SECTOR, 1 << 16, 0xD8],
+                    POLLS_ERASE,
+                )?;
+                self.erased[word] |= 1 << bit;
+            }
+        }
+        let mut buf = [0xFFu8; 1024];
+        let mut pos = off & !0xFF;
+        let span_end = (end + 0xFF) & !0xFF;
+        while pos < span_end {
+            let n = buf.len().min((span_end - pos) as usize);
+            buf[..n].fill(0xFF);
+            for (i, slot) in buf[..n].iter_mut().enumerate() {
+                let a = pos + i as u32;
+                if a >= off && a < end {
+                    *slot = data[(a - off) as usize];
+                }
+            }
+            arm.write_mem(TARGET_STAGE, &buf[..n])?;
+            self.rom_call(arm, f.program, [pos, TARGET_STAGE, n as u32, 0], POLLS_ERASE)?;
+            pos += n as u32;
+        }
+        Ok(())
+    }
+
+    fn flash_finish(&mut self, arm: &mut ArmDebug<Swd>) {
+        if !self.flash_mode {
+            return;
+        }
+        if self.select_core(arm, 0).is_err() {
+            self.flash_mode = false;
+            return;
+        }
+        if let Ok(f) = self.rom_flash_fns(arm) {
+            let _ = self.rom_call(arm, f.flush, [0; 4], POLLS_CALL);
+            let _ = self.rom_call(arm, f.enter_xip, [0; 4], POLLS_CALL);
+        }
+        self.flash_mode = false;
+    }
+
+    fn reset_flash_state(&mut self) {
+        self.flash_mode = false;
+    }
+
+    fn in_flash_mode(&self) -> bool {
+        self.flash_mode
+    }
+}
+
+// --- nRF52 family ---------------------------------------------------------
+
+#[cfg(feature = "gdb-target-nrf52")]
+struct Nrf52Family {
+    /// Pages erased this session (1 bit per 4 KiB page; 512 KiB max).
+    erased: [u32; 4],
+}
+
+#[cfg(feature = "gdb-target-nrf52")]
+impl TargetFamily for Nrf52Family {
+    const NUM_CORES: usize = 1;
+    const FLASH_BASE: u32 = arm_debug::nrf52::FLASH_BASE;
+    const FLASH_SIZE: u32 = 512 * 1024; // nRF52832: 512 KiB
+    const RAM_START: u32 = 0x2000_0000;
+    const RAM_END: u32 = 0x2001_0000; // nRF52832: 64 KiB
+
+    fn new() -> Self {
+        Self { erased: [0; 4] }
+    }
+
+    fn connect(&mut self, arm: &mut ArmDebug<Swd>) -> Result<u32, arm_debug::ArmError> {
+        arm.connect_swd()
+    }
+
+    fn select_core(
+        &mut self,
+        _arm: &mut ArmDebug<Swd>,
+        _core: usize,
+    ) -> Result<(), arm_debug::ArmError> {
+        Ok(()) // single core
+    }
+
+    fn forget_core(&mut self) {}
+
+    fn flash_write(
+        &mut self,
+        arm: &mut ArmDebug<Swd>,
+        addr: u32,
+        data: &[u8],
+    ) -> Result<(), arm_debug::ArmError> {
+        use arm_debug::nrf52;
+        let end = addr + data.len() as u32;
+        if end > Self::FLASH_SIZE {
+            return Err(arm_debug::ArmError::Internal);
+        }
+        // Erase each not-yet-erased page the write touches.
+        let first = addr / nrf52::FLASH_PAGE;
+        let last = (end - 1) / nrf52::FLASH_PAGE;
+        for page in first..=last {
+            let (w, b) = ((page / 32) as usize, page % 32);
+            if self.erased[w] & (1 << b) == 0 {
+                arm.nrf52_erase_page(page * nrf52::FLASH_PAGE, POLLS_ERASE)?;
+                self.erased[w] |= 1 << b;
+            }
+        }
+        // Program the word-aligned span, padding edges with 0xFF (NVMC only
+        // clears bits, and an erased page reads 0xFF, so padding is a no-op).
+        // Build each ≤256-word batch and program it at its own base address.
+        let span = addr & !3;
+        let span_end = (end + 3) & !3;
+        let mut base = span;
+        while base < span_end {
+            let mut words: heapless::Vec<u32, 256> = heapless::Vec::new();
+            let mut a = base;
+            while a < span_end && !words.is_full() {
+                let mut bytes = [0xFFu8; 4];
+                for (i, slot) in bytes.iter_mut().enumerate() {
+                    let ba = a + i as u32;
+                    if ba >= addr && ba < end {
+                        *slot = data[(ba - addr) as usize];
+                    }
+                }
+                let _ = words.push(u32::from_le_bytes(bytes));
+                a += 4;
+            }
+            arm.nrf52_program(base, &words, POLLS_ERASE)?;
+            base = a;
+        }
+        Ok(())
+    }
+
+    fn flash_finish(&mut self, _arm: &mut ArmDebug<Swd>) {}
+
+    fn reset_flash_state(&mut self) {
+        self.erased = [0; 4];
+    }
+
+    fn in_flash_mode(&self) -> bool {
+        false
+    }
+}
+
 impl RpTarget {
     fn map_err<E>(_e: E) -> TargetError<Infallible> {
         // arm-debug errors surface to GDB as a generic non-fatal error.
@@ -225,15 +536,9 @@ impl RpTarget {
         r
     }
 
-    /// Point the SWD link at `core`'s DP (cheap no-op when already there).
+    /// Point the SWD link at `core`'s DP (delegated to the family).
     fn select_core(&mut self, core: usize) -> Result<(), arm_debug::ArmError> {
-        if self.cur_core == Some(core) {
-            return Ok(());
-        }
-        self.cur_core = None; // unknown while switching
-        self.arm.reselect(CORE_TARGETSEL[core])?;
-        self.cur_core = Some(core);
-        Ok(())
+        self.family.select_core(&mut self.arm, core)
     }
 
     /// Establish the SWD link and halt both cores, retrying from scratch
@@ -244,14 +549,13 @@ impl RpTarget {
     fn connect_and_halt(&mut self) {
         self.diag[0] = self.diag[0].wrapping_add(1);
         self.diag[5] = 0;
-        self.flash_mode = false; // fresh link: assume XIP state unknown
-        self.running = [false; 2];
+        self.family.reset_flash_state();
+        self.running = [false; MAX_CORES];
         for attempt in 1u32..=4 {
-            self.cur_core = None;
-            self.diag[2] = match self.arm.connect_multidrop(rp2040::CORE0_TARGETSEL) {
+            self.family.forget_core();
+            self.diag[2] = match self.family.connect(&mut self.arm) {
                 Ok(dpidr) => {
                     self.diag[6] = dpidr;
-                    self.cur_core = Some(0);
                     DIAG_OK
                 }
                 Err(e) => err_code(&e),
@@ -269,10 +573,12 @@ impl RpTarget {
                 // Comparators survive in target hardware across sessions;
                 // start each session without leftover HW break/watchpoints.
                 let _ = self.arm.debug_units_clear();
-                // Bring core 1 to the same state, then return to core 0.
-                if self.select_core(1).is_ok() {
-                    let _ = self.arm.halt();
-                    let _ = self.arm.debug_units_clear();
+                // Bring the other cores to the same state, then return to 0.
+                for core in 1..Family::NUM_CORES {
+                    if self.select_core(core).is_ok() {
+                        let _ = self.arm.halt();
+                        let _ = self.arm.debug_units_clear();
+                    }
                 }
                 let _ = self.select_core(0);
                 return;
@@ -281,117 +587,13 @@ impl RpTarget {
         self.diag[1] = 0xdead;
     }
 
-    fn rom_flash_fns(&mut self) -> Result<RomFlashFns, arm_debug::ArmError> {
-        if let Some(f) = self.flash_fns {
-            return Ok(f);
-        }
-        let mut get = |code| -> Result<u32, arm_debug::ArmError> {
-            self.arm
-                .rom_func_lookup(code)?
-                .ok_or(arm_debug::ArmError::Internal)
-        };
-        let fns = RomFlashFns {
-            connect: get(rp2040::FN_CONNECT_INTERNAL_FLASH)?,
-            exit_xip: get(rp2040::FN_FLASH_EXIT_XIP)?,
-            erase: get(rp2040::FN_FLASH_RANGE_ERASE)?,
-            program: get(rp2040::FN_FLASH_RANGE_PROGRAM)?,
-            flush: get(rp2040::FN_FLASH_FLUSH_CACHE)?,
-            enter_xip: get(rp2040::FN_FLASH_ENTER_CMD_XIP)?,
-        };
-        self.flash_fns = Some(fns);
-        Ok(fns)
-    }
-
-    fn rom_call(&mut self, fn_addr: u32, args: [u32; 4], polls: u32) -> Result<u32, arm_debug::ArmError> {
-        self.select_core(0)?; // bootrom calls always run on core 0
-        self.arm
-            .call_function(fn_addr, &args, TARGET_CALL_SP, TARGET_TRAMPOLINE, polls)
-    }
-
-    /// Put the target's flash into command mode (XIP off) for erase/program.
-    /// Flash routines always run on core 0.
-    fn flash_enter(&mut self) -> Result<(), arm_debug::ArmError> {
-        if self.flash_mode {
-            return Ok(());
-        }
-        self.select_core(0)?;
-        let f = self.rom_flash_fns()?;
-        self.rom_call(f.connect, [0; 4], POLLS_CALL)?;
-        self.rom_call(f.exit_xip, [0; 4], POLLS_CALL)?;
-        self.erased = Default::default();
-        self.flash_mode = true;
-        Ok(())
-    }
-
-    /// Leave flash-command mode: flush the XIP cache and restore XIP so the
-    /// flash window is readable/executable again. Best-effort.
-    fn flash_exit(&mut self) {
-        if !self.flash_mode {
-            return;
-        }
-        if self.select_core(0).is_err() {
-            self.flash_mode = false;
-            return;
-        }
-        if let Ok(f) = self.rom_flash_fns() {
-            let _ = self.rom_call(f.flush, [0; 4], POLLS_CALL);
-            let _ = self.rom_call(f.enter_xip, [0; 4], POLLS_CALL);
-        }
-        self.flash_mode = false;
-    }
-
-    /// Write `data` to flash at XIP address `addr`: erase not-yet-erased
-    /// sectors, then program 256-byte pages padded with 0xFF (programming a
-    /// bit to 1 leaves it unchanged, so sequential chunks within one page
-    /// compose correctly).
-    fn flash_write(&mut self, addr: u32, data: &[u8]) -> Result<(), arm_debug::ArmError> {
-        let off = addr - FLASH_BASE;
-        let end = off + data.len() as u32;
-        if end > FLASH_SIZE {
-            return Err(arm_debug::ArmError::Internal);
-        }
-        self.flash_enter()?;
-        let f = self.rom_flash_fns()?;
-        for sector in off / FLASH_SECTOR..=(end - 1) / FLASH_SECTOR {
-            let (word, bit) = ((sector / 32) as usize, sector % 32);
-            if self.erased[word] & (1 << bit) == 0 {
-                // (offset, count, block_size, block_cmd) — SDK defaults.
-                self.rom_call(
-                    f.erase,
-                    [sector * FLASH_SECTOR, FLASH_SECTOR, 1 << 16, 0xD8],
-                    POLLS_ERASE,
-                )?;
-                self.erased[word] |= 1 << bit;
-            }
-        }
-        // Program the 256-byte-aligned span covering the chunk, staging
-        // through target RAM in buffer-sized pieces.
-        let mut buf = [0xFFu8; 1024];
-        let mut pos = off & !0xFF;
-        let span_end = (end + 0xFF) & !0xFF;
-        while pos < span_end {
-            let n = buf.len().min((span_end - pos) as usize);
-            buf[..n].fill(0xFF);
-            for (i, slot) in buf[..n].iter_mut().enumerate() {
-                let a = pos + i as u32;
-                if a >= off && a < end {
-                    *slot = data[(a - off) as usize];
-                }
-            }
-            self.arm.write_mem(TARGET_STAGE, &buf[..n])?;
-            self.rom_call(f.program, [pos, TARGET_STAGE, n as u32, 0], POLLS_ERASE)?;
-            pos += n as u32;
-        }
-        Ok(())
-    }
-
     /// System reset via AIRCR.SYSRESETREQ (resets both cores + peripherals),
     /// then re-establish the SWD link with everything halted. With `halt`,
     /// core 0 is caught at the reset vector via DEMCR.VC_CORERESET; without
     /// it, the target runs briefly until the reconnect halts it. Returns
     /// core 0's pc after the reset.
     fn target_reset(&mut self, halt: bool) -> Result<u32, arm_debug::ArmError> {
-        self.flash_exit();
+        self.flash_finish();
         self.select_core(0)?;
         let demcr = self.arm.read_word(cm::DEMCR)?;
         let demcr = (demcr & !cm::DEMCR_VC_CORERESET) | cm::DEMCR_DWTENA;
@@ -413,6 +615,14 @@ impl RpTarget {
         }
         self.select_core(0)?;
         self.arm.read_core_reg(cm::PC)
+    }
+
+    /// Leave flash-command mode via the family (best-effort, core 0).
+    fn flash_finish(&mut self) {
+        if self.family.in_flash_mode() {
+            let _ = self.select_core(0);
+        }
+        self.family.flash_finish(&mut self.arm);
     }
 
     /// Classify why `core` stopped, for GDB's stop reply. DFSR (cleared by
@@ -453,7 +663,7 @@ impl RpTarget {
 
     /// Halt every core still marked running (all-stop semantics).
     fn halt_running(&mut self, except: Option<usize>) {
-        for core in 0..2 {
+        for core in 0..Family::NUM_CORES {
             if Some(core) != except && self.running[core] && self.select_core(core).is_ok() {
                 let _ = self.arm.halt();
             }
@@ -478,7 +688,7 @@ impl RpTarget {
             });
         }
         let mut stopped = None;
-        for core in 0..2 {
+        for core in 0..Family::NUM_CORES {
             if !self.running[core] {
                 continue;
             }
@@ -560,10 +770,10 @@ impl RpTarget {
         let id = rtt_id();
         let mut found = 0usize;
         let mut buf = [0u8; 1024 + 15];
-        let mut addr = RTT_SCAN_START;
-        while addr < RTT_SCAN_END && found < RTT_MAX_FOUND {
-            let n = 1024.min((RTT_SCAN_END - addr) as usize) + 15;
-            let n = n.min(buf.len()).min((RTT_SCAN_END - addr) as usize);
+        let mut addr = Family::RAM_START;
+        while addr < Family::RAM_END && found < RTT_MAX_FOUND {
+            let n = 1024.min((Family::RAM_END - addr) as usize) + 15;
+            let n = n.min(buf.len()).min((Family::RAM_END - addr) as usize);
             if self.arm.read_mem(addr, &mut buf[..n]).is_err() {
                 outputln!(out, "rtt: RAM read failed at 0x{:08x}", addr);
                 return;
@@ -601,7 +811,7 @@ impl RpTarget {
             Ok((_, pbuf, size, wr, rd)) => {
                 size > 0
                     && size <= 0x10000
-                    && (RTT_SCAN_START..RTT_SCAN_END).contains(&pbuf)
+                    && (Family::RAM_START..Family::RAM_END).contains(&pbuf)
                     && wr < size
                     && rd < size
             }
@@ -687,7 +897,7 @@ impl RpTarget {
         tx: &mut heapless::spsc::Producer<'static, u8, RTT_TX_QUEUE_SIZE>,
         rx: &mut heapless::spsc::Consumer<'static, u8, RTT_RX_QUEUE_SIZE>,
     ) -> bool {
-        if self.flash_mode {
+        if self.family.in_flash_mode() {
             return false; // don't interleave with flash programming
         }
         let mut moved = false;
@@ -857,8 +1067,9 @@ impl MultiThreadBase for RpTarget {
         &mut self,
         thread_is_active: &mut dyn FnMut(Tid),
     ) -> Result<(), Self::Error> {
-        thread_is_active(core_tid(0));
-        thread_is_active(core_tid(1));
+        for core in 0..Family::NUM_CORES {
+            thread_is_active(core_tid(core));
+        }
         Ok(())
     }
 
@@ -878,9 +1089,13 @@ impl MultiThreadBase for RpTarget {
             data[..n].copy_from_slice(&bytes[off..off + n]);
             return Ok(n);
         }
-        // Reading the XIP window requires flash to be back in XIP mode.
-        if self.flash_mode && start >= FLASH_BASE && start < FLASH_BASE + FLASH_SIZE {
-            self.flash_exit();
+        // Reading the flash window requires leaving flash-command mode.
+        if self.family.in_flash_mode()
+            && start >= Family::FLASH_BASE
+            && start < Family::FLASH_BASE + Family::FLASH_SIZE
+        {
+            let _ = self.select_core(0);
+            self.family.flash_finish(&mut self.arm);
         }
         let r = self.arm.read_mem(start, data);
         self.diag_err(r).map_err(Self::map_err)?;
@@ -891,10 +1106,10 @@ impl MultiThreadBase for RpTarget {
         if data.is_empty() {
             return Ok(());
         }
-        // Writes into the XIP window go through the bootrom flash routines
-        // (this is how GDB `load` programs the target).
-        if (FLASH_BASE..FLASH_BASE + FLASH_SIZE).contains(&start) {
-            let r = self.flash_write(start, data);
+        // Writes into the flash window are programmed by the family.
+        if (Family::FLASH_BASE..Family::FLASH_BASE + Family::FLASH_SIZE).contains(&start) {
+            let sel = self.select_core(0);
+            let r = sel.and_then(|_| self.family.flash_write(&mut self.arm, start, data));
             return self.diag_err(r).map_err(Self::map_err);
         }
         let r = self.arm.write_mem(start, data);
@@ -923,12 +1138,12 @@ impl MultiThreadResume for RpTarget {
     }
 
     fn resume(&mut self) -> Result<(), Self::Error> {
-        self.flash_exit(); // code may run from the XIP window
+        self.flash_finish(); // code may run from the flash window
         self.stepped = None;
         // Steps complete synchronously (arm.step waits for the re-halt), so
         // stepped cores are not marked running; the stop poll then reports
         // DoneStep.
-        for core in 0..2 {
+        for core in 0..Family::NUM_CORES {
             let action = match self.actions[core] {
                 CoreAction::Default if self.sched_lock => continue, // stay halted
                 CoreAction::Default => CoreAction::Continue,
@@ -1026,7 +1241,7 @@ impl HwWatchpoint for RpTarget {
         kind: WatchKind,
     ) -> TargetResult<bool, Self> {
         // DWT comparators are per-core; arm both so either core traps.
-        for core in 0..2 {
+        for core in 0..Family::NUM_CORES {
             self.select_core(core).map_err(Self::map_err)?;
             let ok = self
                 .arm
@@ -1050,7 +1265,7 @@ impl HwWatchpoint for RpTarget {
         kind: WatchKind,
     ) -> TargetResult<bool, Self> {
         let mut any = false;
-        for core in 0..2 {
+        for core in 0..Family::NUM_CORES {
             self.select_core(core).map_err(Self::map_err)?;
             any |= self
                 .arm
@@ -1065,7 +1280,7 @@ impl RpTarget {
     /// Arm an FPB comparator for `addr` on both cores (rolls back on partial
     /// failure). Returns false when out of comparators / not breakable.
     fn fpb_set_both(&mut self, addr: u32) -> TargetResult<bool, Self> {
-        for core in 0..2 {
+        for core in 0..Family::NUM_CORES {
             self.select_core(core).map_err(Self::map_err)?;
             if !self.arm.hw_breakpoint_set(addr).map_err(Self::map_err)? {
                 if core == 1 {
@@ -1080,7 +1295,7 @@ impl RpTarget {
 
     fn fpb_clear_both(&mut self, addr: u32) -> TargetResult<bool, Self> {
         let mut any = false;
-        for core in 0..2 {
+        for core in 0..Family::NUM_CORES {
             self.select_core(core).map_err(Self::map_err)?;
             any |= self.arm.hw_breakpoint_clear(addr).map_err(Self::map_err)?;
         }
@@ -1358,9 +1573,9 @@ mod app {
         let target = RpTarget {
             arm,
             breakpoints: heapless::Vec::new(),
-            cur_core: None,
-            actions: [CoreAction::Default; 2],
-            running: [false; 2],
+            family: Family::new(),
+            actions: [CoreAction::Default; MAX_CORES],
+            running: [false; MAX_CORES],
             stepped: None,
             sched_lock: false,
             diag: [
@@ -1377,9 +1592,6 @@ mod app {
                 unsafe { WATCHDOG_SCRATCH1.read_volatile() },
                 0,
             ],
-            flash_fns: None,
-            flash_mode: false,
-            erased: Default::default(),
             rtt: RttState {
                 cb: None,
                 channel: 0,
