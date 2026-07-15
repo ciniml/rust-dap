@@ -539,3 +539,21 @@ nRF52832 実機:
 
 `erase_all` は実装済みだがユーザボードを消すため未実行。M-nRF3 完了。
 残: RP2040 ターゲット再配線 → gdb_server RP2040 版のフル回帰。
+
+## 追記24: TargetFamily 化後の RP2040 フル回帰 (2026-07-16)
+
+M-nRF2/3(family 化)後、RP2040 ターゲットを再配線して gdb_server(RP2040 版)の
+全機能を回帰確認。family 化は挙動を変えていないことを実証。
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | デュアルコア attach(2 スレッド、別 pc)/ 再 attach ×5 | OK / 5/5 |
+| 2 | E2E(メモリ/レジスタ/BP/continue/stepi) | 3/3 |
+| 3 | scheduler-locked デュアルコア stepi(thread 2 のみ前進) | OK |
+| 4 | monitor reset halt + break main | OK |
+| 5 | load(全セクション compare 一致)+ reset でブート | OK(pc=XIP) |
+| 6 | RTT scan + 第 2 CDC ライブストリーミング | OK |
+| 7 | Z0→FPB 昇格(フラッシュ上 break main が hit) | OK |
+| 8 | 1200bps タッチ連続 ×3 | 3/3 |
+
+**RP2040 回帰完了。単一コードベースで RP2040/nRF52 両対応が実機で確定。**
