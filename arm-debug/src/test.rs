@@ -321,6 +321,32 @@ fn targetsel_written_without_ack_and_correct_value() {
 }
 
 #[test]
+fn reselect_switches_target_without_dormant_dance() {
+    let acked = CDBGPWRUPACK | CSYSPWRUPACK;
+    let mock = MockSwd::new(&[
+        0x0bc1_2477, /* DPIDR core0 */
+        acked,
+        0x0bc1_2477, /* DPIDR core1 */
+        acked,
+    ]);
+    let mut arm = ArmDebug::new(mock, DapConfig::default());
+    arm.connect_multidrop(rp2040::CORE0_TARGETSEL).unwrap();
+    let before = arm.transport().written_bits.len();
+    let dpidr = arm.reselect(rp2040::CORE1_TARGETSEL).unwrap();
+    assert_eq!(dpidr, 0x0bc1_2477);
+    // The TARGETSEL raw-bit write ran again (request + value + parity).
+    let writes = &arm.transport().written_bits[before..];
+    let value_write = writes.iter().find(|(n, _)| *n == 32).expect("TARGETSEL value");
+    assert_eq!(
+        u32::from_le_bytes(value_write.1[..4].try_into().unwrap()),
+        rp2040::CORE1_TARGETSEL
+    );
+    // SELECT re-initialized and errors cleared on the new DP.
+    let log = &arm.transport().log;
+    assert_eq!(log.iter().filter(|x| *x == &dp_w(DP_SELECT, 0)).count(), 2);
+}
+
+#[test]
 fn wait_ack_retries_then_gives_up() {
     struct AlwaysWait;
     impl DapTransport for AlwaysWait {

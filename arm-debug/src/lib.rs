@@ -248,6 +248,27 @@ impl<T: DapTransport> ArmDebug<T> {
         Ok(dpidr)
     }
 
+    /// Switch to another multidrop target on an already-active SWD link
+    /// (e.g. the other RP2040 core): line reset, TARGETSEL, DPIDR, power
+    /// check. Much cheaper than [`connect_multidrop`] — no dormant dance —
+    /// but requires that a full connect has happened since power-on.
+    pub fn reselect(&mut self, targetsel: u32) -> Result<u32, ArmError> {
+        self.swd_line_reset()?;
+        self.write_targetsel(targetsel)?;
+        let dpidr = self.dp_read(DP_DPIDR)?;
+        if dpidr == 0 || dpidr == 0xffff_ffff {
+            return Err(ArmError::NoTarget);
+        }
+        self.select = 0xffff_ffff;
+        self.csw_valid = false;
+        self.dp_write(DP_ABORT, ABORT_CLEAR_ALL)?;
+        self.dp_write(DP_SELECT, 0)?;
+        self.select = 0;
+        // Fast when this DP was already powered (first CTRL/STAT read acks).
+        self.power_up()?;
+        Ok(dpidr)
+    }
+
     fn power_up(&mut self) -> Result<(), ArmError> {
         self.dp_write(DP_CTRL_STAT, CDBGPWRUPREQ | CSYSPWRUPREQ)?;
         let want = CDBGPWRUPACK | CSYSPWRUPACK;
