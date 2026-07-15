@@ -520,3 +520,22 @@ nRF52832 実機(gdb-multiarch, armv7):
 feature 選択)。RP2040 版はビルド維持(実機回帰はターゲット再配線後 = nRF が SWD
 ピンを占有中のため保留)。次: HW ブレーク(FPB NUM_CODE 7bit)/ CTRL-AP リセット /
 monitor erase_all を nRF family に追加(M-nRF3)。
+
+## 追記23: M-nRF3(nRF52 HW ブレーク/ウォッチ + approtect/erase_all)(2026-07-16)
+
+FPB NUM_CODE を ARMv7-M の 7bit(FP_CTRL[14:12]:[7:4])デコードに拡張(M0+ は
+上位 0 のため RP2040 無影響)。gdb_server に nRF 専用 monitor コマンド追加:
+`approtect`(CTRL-AP APPROTECTSTATUS 報告)、`erase_all`(CTRL-AP ERASEALL 解除
++ 再接続、フラッシュ/UICR/RAM 全消去)。
+
+nRF52832 実機:
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | `monitor approtect` = OPEN | OK |
+| 2 | FP_CTRL=0x260 → NUM_CODE=6(7bit デコード) | OK |
+| 3 | フラッシュ上 hbreak(0x8000、RAM トランポリン経由)が正確に停止 | OK(BKPT パッチでは不可能) |
+| 4 | RAM str ループへの DWT ウォッチポイント(Old/New 値表示) | OK |
+
+`erase_all` は実装済みだがユーザボードを消すため未実行。M-nRF3 完了。
+残: RP2040 ターゲット再配線 → gdb_server RP2040 版のフル回帰。
