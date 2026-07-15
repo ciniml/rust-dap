@@ -1128,5 +1128,8 @@ fn reset_self(site: u32) -> ! {
         WATCHDOG_SCRATCH0.write_volatile(0x5e1f_0000 | site);
         WATCHDOG_SCRATCH1.write_volatile(WATCHDOG_SCRATCH1.read_volatile().wrapping_add(1));
     }
+    // Detach from USB cleanly first — rebooting mid-enumeration can wedge
+    // the host's hub port (see util::usb_detach_for_reset).
+    rust_dap_rp2040::util::usb_detach_for_reset();
     cortex_m::peripheral::SCB::sys_reset();
 }

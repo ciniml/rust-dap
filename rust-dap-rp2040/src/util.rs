@@ -98,11 +98,31 @@ pub struct UartConfigAndClock {
     pub clock: fugit::HertzU32,
 }
 
+/// Cleanly detach from the USB bus before a self-initiated reboot: drop the
+/// D+ pull-up so the host sees an orderly disconnect, then give it time to
+/// tear the device down (hub debounce + OS driver removal).
+///
+/// Rebooting the chip while enumerated bounces D+ faster than the host can
+/// process — the old device vanishes mid-transaction and the new one attaches
+/// before the port state machine has settled. Observed on a Linux xHCI host
+/// as the port wedging into endless `SET_ADDRESS` timeouts (-62/-110) that
+/// only a physical replug cleared.
+pub fn usb_detach_for_reset() {
+    unsafe {
+        let usb = &*hal::pac::USBCTRL_REGS::ptr();
+        usb.sie_ctrl.modify(|_, w| w.pullup_en().clear_bit());
+    }
+    // ~0.5 s at the 125 MHz default core clock (longer on slower clocks,
+    // which is harmless — we are about to reboot anyway).
+    cortex_m::asm::delay(60_000_000);
+}
+
 /// Reboot the RP2040 into the USB mass-storage / PICOBOOT bootloader
 /// (equivalent to holding BOOTSEL at power-on). Never returns.
 ///
 /// Lets a host reflash the board without pressing the physical button.
 pub fn reset_to_bootloader() -> ! {
+    usb_detach_for_reset();
     // gpio_activity_pin_mask = 0, disable_interface_mask = 0 → expose both the
     // mass-storage and PICOBOOT interfaces.
     hal::rom_data::reset_to_usb_boot(0, 0);
