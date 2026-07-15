@@ -73,3 +73,4 @@ embedded-hal = { version = "0.2", features = ["unproven"] }
 defmt = { version = "0.3", optional = true }
 defmt-rtt = { version = "0.4", optional = true }
 panic-probe = { version = "0.3", features = ["print-defmt"], optional = true }
+rtt-target = "0.5"

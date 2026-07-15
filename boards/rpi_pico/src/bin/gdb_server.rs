@@ -132,6 +132,8 @@ struct RpTarget {
     flash_mode: bool,
     /// Sectors erased since entering flash mode (1 bit per 4 KiB sector).
     erased: [u32; (FLASH_SIZE / FLASH_SECTOR / 32) as usize],
+    /// RTT bridge state.
+    rtt: RttState,
 }
 
 const DIAG_BASE: u32 = 0xF000_0000;
@@ -161,6 +163,33 @@ struct RomFlashFns {
     program: u32,
     flush: u32,
     enter_xip: u32,
+}
+
+// --- SEGGER RTT (M-RTT1): control-block discovery + halt-time dump --------
+// Layout: 16-byte ID "SEGGER RTT" (zero-padded), MaxNumUpBuffers (u32),
+// MaxNumDownBuffers (u32), then descriptors of 24 bytes each — all up
+// buffers, then all down buffers: { pName, pBuffer, SizeOfBuffer, WrOff,
+// RdOff, Flags }. Up buffers: target writes WrOff, we consume via RdOff.
+
+/// Target RAM range scanned for control blocks.
+const RTT_SCAN_START: u32 = 0x2000_0000;
+const RTT_SCAN_END: u32 = 0x2004_2000;
+const RTT_MAX_FOUND: usize = 4;
+
+/// The 16-byte RTT control-block ID, assembled at runtime so the probe's own
+/// binary never contains the literal (which a RAM scan could false-hit on).
+fn rtt_id() -> [u8; 16] {
+    let mut id = [0u8; 16];
+    for (i, b) in b"TTR REGGES".iter().rev().enumerate() {
+        id[i] = *b;
+    }
+    id
+}
+
+/// RTT bridge state (selected control block + channel).
+struct RttState {
+    cb: Option<u32>,
+    channel: u32,
 }
 
 fn err_code(e: &arm_debug::ArmError) -> u32 {
@@ -479,6 +508,163 @@ impl Target for RpTarget {
     }
 }
 
+/// Parse a hex address argument ("20001234" or "0x20001234").
+fn parse_hex(s: &[u8]) -> Option<u32> {
+    let s = s.strip_prefix(b"0x").unwrap_or(s);
+    if s.is_empty() || s.len() > 8 {
+        return None;
+    }
+    let mut v = 0u32;
+    for &b in s {
+        v = (v << 4) | (b as char).to_digit(16)?;
+    }
+    Some(v)
+}
+
+impl RpTarget {
+    /// Read one RTT buffer descriptor: (pName, pBuffer, Size, WrOff, RdOff).
+    fn rtt_desc(&mut self, desc: u32) -> Result<(u32, u32, u32, u32, u32), arm_debug::ArmError> {
+        let mut raw = [0u8; 20];
+        self.arm.read_mem(desc, &mut raw)?;
+        let w = |i: usize| u32::from_le_bytes(raw[i * 4..i * 4 + 4].try_into().unwrap());
+        Ok((w(0), w(1), w(2), w(3), w(4)))
+    }
+
+    /// Address of the selected channel's descriptor, if a CB is attached.
+    /// `up` selects the target→host (true) or host→target (false) array.
+    fn rtt_channel_desc(&mut self, up: bool) -> Result<Option<u32>, arm_debug::ArmError> {
+        let Some(cb) = self.rtt.cb else { return Ok(None) };
+        let mut counts = [0u8; 8];
+        self.arm.read_mem(cb + 16, &mut counts)?;
+        let max_up = u32::from_le_bytes(counts[0..4].try_into().unwrap());
+        let max_down = u32::from_le_bytes(counts[4..8].try_into().unwrap());
+        let (base, count) = if up {
+            (cb + 24, max_up)
+        } else {
+            (cb + 24 + 24 * max_up, max_down)
+        };
+        if self.rtt.channel >= count {
+            return Ok(None);
+        }
+        Ok(Some(base + 24 * self.rtt.channel))
+    }
+
+    /// Scan target RAM for RTT control blocks; report each via `out`.
+    fn rtt_scan(&mut self, out: &mut ConsoleOutput<'_>) {
+        let id = rtt_id();
+        let mut found = 0usize;
+        let mut buf = [0u8; 1024 + 15];
+        let mut addr = RTT_SCAN_START;
+        while addr < RTT_SCAN_END && found < RTT_MAX_FOUND {
+            let n = 1024.min((RTT_SCAN_END - addr) as usize) + 15;
+            let n = n.min(buf.len()).min((RTT_SCAN_END - addr) as usize);
+            if self.arm.read_mem(addr, &mut buf[..n]).is_err() {
+                outputln!(out, "rtt: RAM read failed at 0x{:08x}", addr);
+                return;
+            }
+            let mut off = 0;
+            while off + 16 <= n {
+                if buf[off..off + 16] == id {
+                    let cb = addr + off as u32;
+                    self.rtt_report_cb(cb, out);
+                    found += 1;
+                }
+                off += 4;
+            }
+            addr += 1024;
+        }
+        if found == 0 {
+            outputln!(out, "rtt: no control block found in RAM");
+        }
+    }
+
+    /// Print one control block's summary (address, channels, validity).
+    fn rtt_report_cb(&mut self, cb: u32, out: &mut ConsoleOutput<'_>) {
+        let mut counts = [0u8; 8];
+        if self.arm.read_mem(cb + 16, &mut counts).is_err() {
+            return;
+        }
+        let max_up = u32::from_le_bytes(counts[0..4].try_into().unwrap());
+        let max_down = u32::from_le_bytes(counts[4..8].try_into().unwrap());
+        if max_up == 0 || max_up > 16 || max_down > 16 {
+            outputln!(out, "cb at 0x{:08x}: implausible header, skipped", cb);
+            return;
+        }
+        // Validity heuristic from up[0]: offsets inside the buffer, buffer in RAM.
+        let valid = match self.rtt_desc(cb + 24) {
+            Ok((_, pbuf, size, wr, rd)) => {
+                size > 0
+                    && size <= 0x10000
+                    && (RTT_SCAN_START..RTT_SCAN_END).contains(&pbuf)
+                    && wr < size
+                    && rd < size
+            }
+            Err(_) => false,
+        };
+        outputln!(
+            out,
+            "cb at 0x{:08x}: up={} down={} [{}]",
+            cb,
+            max_up,
+            max_down,
+            if valid { "valid" } else { "stale?" }
+        );
+    }
+
+    /// Drain the selected up buffer (bounded) and print it as text.
+    fn rtt_dump(&mut self, out: &mut ConsoleOutput<'_>) {
+        let desc = match self.rtt_channel_desc(true) {
+            Ok(Some(d)) => d,
+            Ok(None) => {
+                outputln!(out, "rtt: no control block attached (use monitor rtt scan/attach)");
+                return;
+            }
+            Err(e) => {
+                outputln!(out, "rtt: read failed: 0x{:x}", err_code(&e));
+                return;
+            }
+        };
+        let Ok((_, pbuf, size, wr, mut rd)) = self.rtt_desc(desc) else {
+            outputln!(out, "rtt: descriptor read failed");
+            return;
+        };
+        if size == 0 || wr >= size || rd >= size {
+            outputln!(out, "rtt: descriptor looks corrupt (size={} wr={} rd={})", size, wr, rd);
+            return;
+        }
+        if wr == rd {
+            outputln!(out, "rtt: no new data");
+            return;
+        }
+        let mut total = 0usize;
+        while rd != wr && total < 1024 {
+            let run = if wr > rd { wr - rd } else { size - rd };
+            let mut chunk = [0u8; 64];
+            let n = (run as usize).min(chunk.len()).min(1024 - total);
+            if self.arm.read_mem(pbuf + rd, &mut chunk[..n]).is_err() {
+                break;
+            }
+            // Print lossily as ASCII (RTT terminal data is normally text).
+            let mut line = heapless::String::<192>::new();
+            for &b in &chunk[..n] {
+                let c = if (0x20..0x7f).contains(&b) || b == b'\n' || b == b'\t' {
+                    b as char
+                } else {
+                    '.'
+                };
+                let _ = line.push(c);
+            }
+            gdbstub::output!(*out, "{}", line);
+            rd = (rd + n as u32) % size;
+            total += n;
+        }
+        // Consume: write RdOff back (descriptor offset +16).
+        let _ = self.arm.write_word(desc + 16, rd);
+        outputln!(out, "");
+        outputln!(out, "rtt: {} bytes", total);
+    }
+}
+
 impl MonitorCmd for RpTarget {
     fn handle_monitor_cmd(
         &mut self,
@@ -498,10 +684,54 @@ impl MonitorCmd for RpTarget {
                 ),
                 Err(e) => outputln!(out, "reset halt failed: 0x{:x}", err_code(&e)),
             },
+            b"rtt scan" => self.rtt_scan(&mut out),
+            b"rtt status" => {
+                match self.rtt.cb {
+                    Some(cb) => outputln!(
+                        out,
+                        "rtt: attached to cb 0x{:08x}, channel {}",
+                        cb,
+                        self.rtt.channel
+                    ),
+                    None => outputln!(out, "rtt: not attached"),
+                }
+            }
+            b"rtt dump" => self.rtt_dump(&mut out),
+            b"rtt stop" => {
+                self.rtt.cb = None;
+                outputln!(out, "rtt: detached");
+            }
+            _ if cmd.starts_with(b"rtt attach ") || cmd.starts_with(b"rtt setup ") => {
+                let arg = cmd.split(|&b| b == b' ').last().unwrap_or(b"");
+                match parse_hex(arg) {
+                    Some(addr) => {
+                        // Verify the ID before accepting the address.
+                        let mut id = [0u8; 16];
+                        if self.arm.read_mem(addr, &mut id).is_ok() && id == rtt_id() {
+                            self.rtt.cb = Some(addr);
+                            outputln!(out, "rtt: attached to cb 0x{:08x}", addr);
+                            self.rtt_report_cb(addr, &mut out);
+                        } else {
+                            outputln!(out, "rtt: no control block at 0x{:08x}", addr);
+                        }
+                    }
+                    None => outputln!(out, "rtt: bad address"),
+                }
+            }
+            _ if cmd.starts_with(b"rtt channel ") => {
+                let arg = cmd.split(|&b| b == b' ').last().unwrap_or(b"");
+                match parse_hex(arg) {
+                    Some(ch) if ch < 16 => {
+                        self.rtt.channel = ch;
+                        outputln!(out, "rtt: channel {}", ch);
+                    }
+                    _ => outputln!(out, "rtt: bad channel"),
+                }
+            }
             _ => {
                 outputln!(out, "unknown command; available:");
-                outputln!(out, "  monitor reset       - system reset, halt wherever it lands");
-                outputln!(out, "  monitor reset halt  - system reset, halt at the reset vector");
+                outputln!(out, "  monitor reset / reset halt");
+                outputln!(out, "  monitor rtt scan|attach <addr>|setup <addr>|channel <n>|dump|status|stop");
             }
         }
         Ok(())
@@ -1055,6 +1285,10 @@ mod app {
             flash_fns: None,
             flash_mode: false,
             erased: Default::default(),
+            rtt: RttState {
+                cb: None,
+                channel: 0,
+            },
         };
 
         let (rx_prod, rx_cons) = ctx.local.rx_queue.split();

@@ -61,6 +61,10 @@ fn main() -> ! {
     let mut led = pins.led.into_push_pull_output();
     let mut led_on = false;
 
+    // SEGGER RTT channel 0 ("Terminal"): one log line per toggle, so the
+    // probe's RTT support (monitor rtt / the RTT CDC port) has data to show.
+    rtt_target::rtt_init_print!();
+
     loop {
         // Volatile reads so GDB writes to the globals take effect mid-run.
         let enabled = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(BLINK_ENABLED)) } != 0;
@@ -74,6 +78,7 @@ fn main() -> ! {
             unsafe {
                 let count = core::ptr::read_volatile(core::ptr::addr_of!(BLINK_COUNT));
                 core::ptr::write_volatile(core::ptr::addr_of_mut!(BLINK_COUNT), count.wrapping_add(1));
+                rtt_target::rprintln!("blink #{} led={}", count, led_on as u32);
             }
         }
         let delay = unsafe { core::ptr::read_volatile(core::ptr::addr_of!(BLINK_DELAY)) };
