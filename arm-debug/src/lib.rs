@@ -931,7 +931,10 @@ pub enum HaltReason {
 impl<T: DapTransport> ArmDebug<T> {
     /// Number of FPB code comparators (0 if no FPB).
     fn fpb_num_comps(&mut self) -> Result<u32, ArmError> {
-        Ok((self.read_word(fpb::FP_CTRL)? >> 4) & 0xF)
+        // NUM_CODE spans FP_CTRL[14:12]:[7:4] (7 bits) on ARMv7-M; the high
+        // field reads 0 on ARMv6-M (Cortex-M0+), so this covers both.
+        let ctrl = self.read_word(fpb::FP_CTRL)?;
+        Ok(((ctrl >> 12) & 0x7) << 4 | (ctrl >> 4) & 0xF)
     }
 
     /// FP_COMP value for a breakpoint at `addr`, or None if the address is
@@ -953,7 +956,7 @@ impl<T: DapTransport> ArmDebug<T> {
             return Ok(false);
         };
         let ctrl = self.read_word(fpb::FP_CTRL)?;
-        let n = (ctrl >> 4) & 0xF;
+        let n = ((ctrl >> 12) & 0x7) << 4 | (ctrl >> 4) & 0xF;
         if n == 0 {
             return Ok(false);
         }

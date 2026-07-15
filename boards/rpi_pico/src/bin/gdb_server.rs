@@ -969,6 +969,28 @@ impl MonitorCmd for RpTarget {
                 ),
                 Err(e) => outputln!(out, "reset halt failed: 0x{:x}", err_code(&e)),
             },
+            #[cfg(feature = "gdb-target-nrf52")]
+            b"approtect" => match self.arm.nrf52_approtect_status() {
+                Ok((open, _)) => outputln!(
+                    out,
+                    "approtect: {}",
+                    if open { "OPEN (debug enabled)" } else { "CLOSED (locked)" }
+                ),
+                Err(e) => outputln!(out, "approtect read failed: 0x{:x}", err_code(&e)),
+            },
+            #[cfg(feature = "gdb-target-nrf52")]
+            b"erase_all" => {
+                // CTRL-AP ERASEALL: wipes flash+UICR+RAM, the only APPROTECT
+                // unlock. Follow with a reconnect so the session is usable.
+                outputln!(out, "erasing entire chip (flash+UICR+RAM)...");
+                match self.arm.nrf52_erase_all(2_000_000) {
+                    Ok(()) => {
+                        self.connect_and_halt();
+                        outputln!(out, "erase_all done; reconnected + halted");
+                    }
+                    Err(e) => outputln!(out, "erase_all failed: 0x{:x}", err_code(&e)),
+                }
+            }
             b"rtt scan" => self.rtt_scan(&mut out),
             b"rtt status" => {
                 match self.rtt.cb {
@@ -1020,6 +1042,8 @@ impl MonitorCmd for RpTarget {
             _ => {
                 outputln!(out, "unknown command; available:");
                 outputln!(out, "  monitor reset / reset halt");
+                #[cfg(feature = "gdb-target-nrf52")]
+                outputln!(out, "  monitor approtect / erase_all");
                 outputln!(out, "  monitor rtt scan|attach <addr>|setup <addr>|channel <n>|dump|status|stop");
             }
         }
