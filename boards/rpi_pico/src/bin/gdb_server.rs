@@ -22,8 +22,6 @@
 #![no_std]
 #![no_main]
 
-use panic_halt as _;
-
 use arm_debug::{cortex_m as cm, rp2040, ArmDebug, HaltReason, WatchAccess};
 use core::convert::Infallible;
 use rp_pico::hal;
@@ -51,7 +49,6 @@ use hal::clocks::Clock;
 use hal::pac;
 use rust_dap::{DapConfig, DapIdentity};
 use rust_dap_rp2040::bitbang::{CortexMDelay, PicoBidirPin, SwdIoSet};
-use usb_device::class_prelude::UsbBusAllocator;
 use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
@@ -844,41 +841,33 @@ impl SwBreakpoint for RpTarget {
 
 // --- USB-CDC as a gdbstub Connection --------------------------------------
 
-/// Connection that queues outgoing bytes; the main loop pumps USB and drains
-/// the queue to the CDC endpoint (so Connection::write never blocks on USB).
-struct UsbConn<'a> {
-    usb_dev: UsbDevice<'a, hal::usb::UsbBus>,
-    serial: SerialPort<'a, hal::usb::UsbBus>,
-    tx: heapless::Deque<u8, 2048>,
+const RX_QUEUE_SIZE: usize = 1024;
+const TX_QUEUE_SIZE: usize = 2048;
+
+/// The idle-side view of the USB connection: lock-free SPSC queues shared
+/// with the USBCTRL_IRQ task, which owns the USB device and services it at
+/// interrupt priority. This keeps USB responsive during long blocking SWD
+/// operations (flash erases, connect sequences) that previously starved the
+/// polled `pump()` loop.
+struct QueueConn {
+    rx: heapless::spsc::Consumer<'static, u8, RX_QUEUE_SIZE>,
+    tx: heapless::spsc::Producer<'static, u8, TX_QUEUE_SIZE>,
     /// One byte un-read by drop_stray_acks, delivered by the next read_byte.
     pushback: Option<u8>,
 }
 
-impl UsbConn<'_> {
-    /// Poll USB and flush queued TX to the CDC endpoint.
-    fn pump(&mut self) {
-        self.usb_dev.poll(&mut [&mut self.serial]);
-        // 1200 bps touch → reboot into the bootloader (reflash without BOOTSEL).
-        rust_dap_rp2040::util::bootsel_on_1200bps_touch(&self.serial);
-        while let Some(&b) = self.tx.front() {
-            match self.serial.write(&[b]) {
-                Ok(1) => {
-                    self.tx.pop_front();
-                }
-                _ => break,
-            }
-        }
+impl QueueConn {
+    /// Nudge the USB task so it drains the TX queue without waiting for the
+    /// next host-initiated bus event.
+    fn kick() {
+        pac::NVIC::pend(pac::Interrupt::USBCTRL_IRQ);
     }
     /// Try to read one incoming byte.
     fn read_byte(&mut self) -> Option<u8> {
         if let Some(b) = self.pushback.take() {
             return Some(b);
         }
-        let mut b = [0u8; 1];
-        match self.serial.read(&mut b) {
-            Ok(1) => Some(b[0]),
-            _ => None,
-        }
+        self.rx.dequeue()
     }
     /// Drop leading ack bytes ('+'/'-') left over from the previous session.
     /// Anything else — e.g. the next session's opening '$' packet, which can
@@ -886,8 +875,7 @@ impl UsbConn<'_> {
     /// the state machine, NOT discarded (a blind purge here loses the new
     /// session's qSupported and hangs that GDB).
     fn drop_stray_acks(&mut self) {
-        for _ in 0..50_000 {
-            self.pump();
+        for _ in 0..500_000 {
             match self.read_byte() {
                 Some(b'+') | Some(b'-') => {}
                 Some(other) => {
@@ -898,36 +886,36 @@ impl UsbConn<'_> {
             }
         }
     }
-    fn configured(&self) -> bool {
-        self.usb_dev.state() == UsbDeviceState::Configured
-    }
     /// Flush pending TX (bounded, in case the host stopped reading), then
-    /// drop whatever is left plus any unread RX, so a new GDB session starts
-    /// with a clean channel (stale detach responses desync the next
-    /// session's RSP).
+    /// drop any unread RX, so a new GDB session starts with a clean channel
+    /// (stale detach responses desync the next session's RSP).
     fn purge(&mut self) {
-        for _ in 0..200_000 {
-            if self.tx.is_empty() {
+        for _ in 0..500_000 {
+            if self.tx.len() == 0 {
                 break;
             }
-            self.pump();
+            Self::kick();
         }
-        self.tx.clear();
-        let mut sink = [0u8; 64];
-        while matches!(self.serial.read(&mut sink), Ok(n) if n > 0) {}
+        self.pushback = None;
+        while self.rx.dequeue().is_some() {}
     }
 }
 
-impl Connection for UsbConn<'_> {
+impl Connection for QueueConn {
     type Error = Infallible;
     fn write(&mut self, byte: u8) -> Result<(), Self::Error> {
-        // If the queue is full, pump synchronously to make room.
-        while self.tx.push_back(byte).is_err() {
-            self.pump();
+        // If the queue is full, keep nudging the USB task to make room (it
+        // preempts this priority, so progress only stalls while the host
+        // isn't reading).
+        loop {
+            match self.tx.enqueue(byte) {
+                Ok(()) => return Ok(()),
+                Err(_) => Self::kick(),
+            }
         }
-        Ok(())
     }
     fn flush(&mut self) -> Result<(), Self::Error> {
+        Self::kick();
         Ok(())
     }
 }
@@ -936,11 +924,11 @@ impl Connection for UsbConn<'_> {
 /// carries per-session protocol state (notably no-ack mode negotiated via
 /// QStartNoAckMode), so it cannot be reused across sessions: the next GDB
 /// starts in ack mode and its leading '+' errors a stub still in no-ack mode.
-/// Handing the machine a reborrow lets main rebuild it per session while
-/// keeping ownership of the USB connection.
-struct ConnRef<'b, 'a>(&'b mut UsbConn<'a>);
+/// Handing the machine a reborrow lets the session loop rebuild it per
+/// session while keeping ownership of the queues.
+struct ConnRef<'b>(&'b mut QueueConn);
 
-impl Connection for ConnRef<'_, '_> {
+impl Connection for ConnRef<'_> {
     type Error = Infallible;
     fn write(&mut self, byte: u8) -> Result<(), Self::Error> {
         Connection::write(self.0, byte)
@@ -950,167 +938,271 @@ impl Connection for ConnRef<'_, '_> {
     }
 }
 
-#[rp_pico::entry]
-fn main() -> ! {
-    let pac = pac::Peripherals::take().unwrap();
-    let mut watchdog = hal::Watchdog::new(pac.WATCHDOG);
-    let mut resets = pac.RESETS;
-    let sio = hal::Sio::new(pac.SIO);
-    let pins = rp_pico::Pins::new(pac.IO_BANK0, pac.PADS_BANK0, sio.gpio_bank0, &mut resets);
+/// `#[rtic::app]` bypasses `#[rp2040_hal::entry]`, so the SIO spinlocks that
+/// the hal entry point would normally release must be released here.
+#[cortex_m_rt::pre_init]
+unsafe fn pre_init() {
+    rust_dap_rp2040::clear_spinlocks();
+}
 
-    let clocks = hal::clocks::init_clocks_and_plls(
-        rp_pico::XOSC_CRYSTAL_FREQ,
-        pac.XOSC,
-        pac.CLOCKS,
-        pac.PLL_SYS,
-        pac.PLL_USB,
-        &mut resets,
-        &mut watchdog,
-    )
-    .ok()
-    .unwrap();
+/// Set by the USB task once the host has configured the device. A plain
+/// atomic (thumbv6 supports load/store) instead of an RTIC shared resource.
+static USB_CONFIGURED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 
-    let usb_allocator = UsbBusAllocator::new(hal::usb::UsbBus::new(
-        pac.USBCTRL_REGS,
-        pac.USBCTRL_DPRAM,
-        clocks.usb_clock,
-        true,
-        &mut resets,
-    ));
-    let serial = SerialPort::new(&usb_allocator);
-    let usb_dev = UsbDeviceBuilder::new(&usb_allocator, UsbVidPid(0x6666, 0x4444))
-        .manufacturer("fugafuga.org")
-        .product("rust-dap GDB server")
-        .serial_number("raspberry-pi-pico-gdb")
-        .device_class(usbd_serial::USB_CLASS_CDC)
-        .build();
+#[rtic::app(device = rp_pico::hal::pac, peripherals = true)]
+mod app {
+    use super::*;
+    use usb_device::class_prelude::UsbBusAllocator;
 
-    let mut conn = UsbConn {
-        usb_dev,
-        serial,
-        tx: heapless::Deque::new(),
-        pushback: None,
-    };
+    #[shared]
+    struct Shared {}
 
-    // Bit-banging SWD transport + arm-debug.
-    let swclk = PicoBidirPin::new(pins.gpio2.into_floating_input());
-    let swdio = PicoBidirPin::new(pins.gpio3.into_floating_input());
-    let reset = PicoBidirPin::new(pins.gpio4.into_floating_input());
-    let swd = SwdIoSet::new(swclk, swdio, reset, CortexMDelay);
-    let config = DapConfig::new(
-        DapIdentity {
-            serial_number: "raspberry-pi-pico-gdb",
-            ..DapIdentity::default()
-        },
-        clocks.system_clock.freq().to_Hz(),
-    );
-    let arm = ArmDebug::new(swd, config);
-
-    // Wait for USB enumeration before touching the target (keeps enumeration
-    // responsive), then connect + halt so GDB attaches to a stopped core.
-    while !conn.configured() {
-        conn.pump();
+    #[local]
+    struct Local {
+        // --- USBCTRL_IRQ task ---
+        usb_dev: UsbDevice<'static, hal::usb::UsbBus>,
+        serial: SerialPort<'static, hal::usb::UsbBus>,
+        rx_prod: heapless::spsc::Producer<'static, u8, RX_QUEUE_SIZE>,
+        tx_cons: heapless::spsc::Consumer<'static, u8, TX_QUEUE_SIZE>,
+        // --- idle (GDB session loop) ---
+        conn: QueueConn,
+        target: RpTarget,
     }
 
-    let mut target = RpTarget {
-        arm,
-        breakpoints: heapless::Vec::new(),
-        cur_core: None,
-        actions: [CoreAction::Default; 2],
-        running: [false; 2],
-        stepped: None,
-        sched_lock: false,
-        diag: [
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0xd1a6_d1a6,
-            // Reset site + count of the previous boot (survive sys_reset).
-            unsafe { WATCHDOG_SCRATCH0.read_volatile() },
-            unsafe { WATCHDOG_SCRATCH1.read_volatile() },
-            0,
-        ],
-        flash_fns: None,
-        flash_mode: false,
-        erased: Default::default(),
-    };
-    target.connect_and_halt();
+    #[init(local = [
+        rx_queue: heapless::spsc::Queue<u8, RX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
+        tx_queue: heapless::spsc::Queue<u8, TX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
+        USB_ALLOCATOR: Option<UsbBusAllocator<hal::usb::UsbBus>> = None,
+    ])]
+    fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
+        let mut resets = ctx.device.RESETS;
+        let mut watchdog = hal::Watchdog::new(ctx.device.WATCHDOG);
+        let sio = hal::Sio::new(ctx.device.SIO);
+        let pins = rp_pico::Pins::new(
+            ctx.device.IO_BANK0,
+            ctx.device.PADS_BANK0,
+            sio.gpio_bank0,
+            &mut resets,
+        );
 
-    // One iteration per GDB session: the gdbstub state machine holds
-    // per-session protocol state (e.g. negotiated no-ack mode), so it must be
-    // rebuilt from scratch after every disconnect — reusing it makes the next
-    // session's opening ack error the stub.
-    let mut packet_buffer = [0u8; 1024];
-    loop {
-        let gdb = match GdbStubBuilder::new(ConnRef(&mut conn))
-            .with_packet_buffer(&mut packet_buffer)
-            .build()
-        {
-            Ok(g) => g,
-            Err(_) => reset_self(1),
+        let clocks = hal::clocks::init_clocks_and_plls(
+            rp_pico::XOSC_CRYSTAL_FREQ,
+            ctx.device.XOSC,
+            ctx.device.CLOCKS,
+            ctx.device.PLL_SYS,
+            ctx.device.PLL_USB,
+            &mut resets,
+            &mut watchdog,
+        )
+        .ok()
+        .unwrap();
+
+        let usb_allocator = ctx
+            .local
+            .USB_ALLOCATOR
+            .insert(UsbBusAllocator::new(hal::usb::UsbBus::new(
+                ctx.device.USBCTRL_REGS,
+                ctx.device.USBCTRL_DPRAM,
+                clocks.usb_clock,
+                true,
+                &mut resets,
+            )));
+        let serial = SerialPort::new(usb_allocator);
+        let usb_dev = UsbDeviceBuilder::new(usb_allocator, UsbVidPid(0x6666, 0x4444))
+            .manufacturer("fugafuga.org")
+            .product("rust-dap GDB server")
+            .serial_number("raspberry-pi-pico-gdb")
+            .device_class(usbd_serial::USB_CLASS_CDC)
+            .build();
+
+        // Bit-banging SWD transport + arm-debug.
+        let swclk = PicoBidirPin::new(pins.gpio2.into_floating_input());
+        let swdio = PicoBidirPin::new(pins.gpio3.into_floating_input());
+        let reset = PicoBidirPin::new(pins.gpio4.into_floating_input());
+        let swd = SwdIoSet::new(swclk, swdio, reset, CortexMDelay);
+        let config = DapConfig::new(
+            DapIdentity {
+                serial_number: "raspberry-pi-pico-gdb",
+                ..DapIdentity::default()
+            },
+            clocks.system_clock.freq().to_Hz(),
+        );
+        let arm = ArmDebug::new(swd, config);
+
+        let target = RpTarget {
+            arm,
+            breakpoints: heapless::Vec::new(),
+            cur_core: None,
+            actions: [CoreAction::Default; 2],
+            running: [false; 2],
+            stepped: None,
+            sched_lock: false,
+            diag: [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0xd1a6_d1a6,
+                // Reset site + count of the previous boot (survive sys_reset).
+                unsafe { WATCHDOG_SCRATCH0.read_volatile() },
+                unsafe { WATCHDOG_SCRATCH1.read_volatile() },
+                0,
+            ],
+            flash_fns: None,
+            flash_mode: false,
+            erased: Default::default(),
         };
-        let mut sm = gdb
-            .run_state_machine(&mut target)
-            .unwrap_or_else(|_| reset_self(2));
 
-        // Drive this session until GDB disconnects. A gdbstub error (e.g. a
-        // new GDB attaching while the previous session's state machine is
-        // still Running) ends the session the same way — the outer loop
-        // rebuilds a fresh stub — instead of rebooting the firmware.
-        loop {
-            let next = match sm {
-                GdbStubStateMachine::Idle(mut inner) => {
-                    inner.borrow_conn().0.pump();
-                    match inner.borrow_conn().0.read_byte() {
-                        Some(b) => inner.incoming_data(&mut target, b).ok(),
-                        None => Some(GdbStubStateMachine::Idle(inner)),
-                    }
-                }
-                GdbStubStateMachine::Running(mut inner) => {
-                    inner.borrow_conn().0.pump();
-                    if let Some(b) = inner.borrow_conn().0.read_byte() {
-                        // Typically a Ctrl-C (0x03) to interrupt.
-                        inner.incoming_data(&mut target, b).ok()
-                    } else if let Some(reason) = target.poll_stopped() {
-                        // A core stopped on its own (breakpoint / watchpoint
-                        // / step done); the others were halted with it.
-                        inner.report_stop(&mut target, reason).ok()
-                    } else {
-                        Some(GdbStubStateMachine::Running(inner))
-                    }
-                }
-                GdbStubStateMachine::CtrlCInterrupt(inner) => {
-                    target.halt_running(None);
-                    inner
-                        .interrupt_handled(
-                            &mut target,
-                            Some(MultiThreadStopReason::SignalWithThread {
-                                tid: core_tid(0),
-                                signal: Signal::SIGINT,
-                            }),
-                        )
-                        .ok()
-                }
-                GdbStubStateMachine::Disconnected(_) => None,
-            };
-            match next {
-                Some(s) => sm = s,
-                None => break,
+        let (rx_prod, rx_cons) = ctx.local.rx_queue.split();
+        let (tx_prod, tx_cons) = ctx.local.tx_queue.split();
+        let conn = QueueConn {
+            rx: rx_cons,
+            tx: tx_prod,
+            pushback: None,
+        };
+
+        (
+            Shared {},
+            Local {
+                usb_dev,
+                serial,
+                rx_prod,
+                tx_cons,
+                conn,
+                target,
+            },
+            init::Monotonics(),
+        )
+    }
+
+    /// Service USB at interrupt priority: enumeration and CDC transfers stay
+    /// responsive while idle blocks in long SWD operations.
+    #[task(binds = USBCTRL_IRQ, priority = 2, local = [usb_dev, serial, rx_prod, tx_cons])]
+    fn usb_irq(ctx: usb_irq::Context) {
+        let usb_dev = ctx.local.usb_dev;
+        let serial = ctx.local.serial;
+        usb_dev.poll(&mut [serial]);
+        // 1200 bps touch → reboot into the bootloader (reflash without BOOTSEL).
+        rust_dap_rp2040::util::bootsel_on_1200bps_touch(serial);
+        USB_CONFIGURED.store(
+            usb_dev.state() == UsbDeviceState::Configured,
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        // RX: CDC → queue (drop on overflow; RSP retransmits via its acks).
+        let mut buf = [0u8; 64];
+        while let Ok(n) = serial.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            for &b in &buf[..n] {
+                let _ = ctx.local.rx_prod.enqueue(b);
             }
         }
-        target.diag[10] = target.diag[10].wrapping_add(1); // sessions ended (any cause)
-        // GDB detached: the state machine (and its borrow of conn) is dropped.
-        // Flush the detach response and drop stale RX, re-establish the SWD
-        // link + halt so the next `target remote` sees a clean target state,
-        // then swallow the detach ack — but keep any packet bytes: a new
-        // session may attach while the SWD link is still being re-established.
-        conn.purge();
+        // TX: queue → CDC. Unlike the old polled loop there is no "next
+        // iteration" to push the write buffer out, so flush explicitly —
+        // without it a partial packet sits in usbd-serial's buffer forever
+        // (no endpoint armed → no further IRQ → deadlock).
+        while let Some(&b) = ctx.local.tx_cons.peek() {
+            match serial.write(&[b]) {
+                Ok(1) => {
+                    ctx.local.tx_cons.dequeue();
+                }
+                _ => break,
+            }
+        }
+        let _ = serial.flush();
+    }
+
+    #[idle(local = [conn, target])]
+    fn idle(ctx: idle::Context) -> ! {
+        let conn = ctx.local.conn;
+        let target = ctx.local.target;
+        boot_progress(1); // idle entered
+
+        // Wait for USB enumeration before touching the target, then connect
+        // + halt so GDB attaches to stopped cores.
+        while !USB_CONFIGURED.load(core::sync::atomic::Ordering::Relaxed) {}
+        boot_progress(2); // USB configured
         target.connect_and_halt();
-        conn.drop_stray_acks();
+        boot_progress(3); // SWD connected
+
+        // One iteration per GDB session: the gdbstub state machine holds
+        // per-session protocol state (e.g. negotiated no-ack mode), so it
+        // must be rebuilt from scratch after every disconnect — reusing it
+        // makes the next session's opening ack error the stub.
+        let mut packet_buffer = [0u8; 1024];
+        loop {
+            let gdb = match GdbStubBuilder::new(ConnRef(conn))
+                .with_packet_buffer(&mut packet_buffer)
+                .build()
+            {
+                Ok(g) => g,
+                Err(_) => reset_self(1),
+            };
+            let mut sm = gdb
+                .run_state_machine(target)
+                .unwrap_or_else(|_| reset_self(2));
+            boot_progress(4); // session loop live
+
+            // Drive this session until GDB disconnects. A gdbstub error
+            // (e.g. a new GDB attaching while the previous session's state
+            // machine is still Running) ends the session the same way — the
+            // outer loop rebuilds a fresh stub — instead of rebooting.
+            loop {
+                let next = match sm {
+                    GdbStubStateMachine::Idle(mut inner) => {
+                        match inner.borrow_conn().0.read_byte() {
+                            Some(b) => inner.incoming_data(target, b).ok(),
+                            None => Some(GdbStubStateMachine::Idle(inner)),
+                        }
+                    }
+                    GdbStubStateMachine::Running(mut inner) => {
+                        if let Some(b) = inner.borrow_conn().0.read_byte() {
+                            // Typically a Ctrl-C (0x03) to interrupt.
+                            inner.incoming_data(target, b).ok()
+                        } else if let Some(reason) = target.poll_stopped() {
+                            // A core stopped on its own (breakpoint /
+                            // watchpoint / step done); the others were
+                            // halted with it.
+                            inner.report_stop(target, reason).ok()
+                        } else {
+                            Some(GdbStubStateMachine::Running(inner))
+                        }
+                    }
+                    GdbStubStateMachine::CtrlCInterrupt(inner) => {
+                        target.halt_running(None);
+                        inner
+                            .interrupt_handled(
+                                target,
+                                Some(MultiThreadStopReason::SignalWithThread {
+                                    tid: core_tid(0),
+                                    signal: Signal::SIGINT,
+                                }),
+                            )
+                            .ok()
+                    }
+                    GdbStubStateMachine::Disconnected(_) => None,
+                };
+                match next {
+                    Some(s) => sm = s,
+                    None => break,
+                }
+            }
+            target.diag[10] = target.diag[10].wrapping_add(1); // sessions ended
+            // GDB detached: the state machine (and its borrow of conn) is
+            // dropped. Flush the detach response and drop stale RX,
+            // re-establish the SWD link + halt so the next `target remote`
+            // sees a clean target state, then swallow the detach ack — but
+            // keep any packet bytes: a new session may attach while the SWD
+            // link is still being re-established.
+            conn.purge();
+            target.connect_and_halt();
+            conn.drop_stray_acks();
+        }
     }
 }
 
@@ -1118,6 +1210,22 @@ fn main() -> ! {
 // site + count across reset_self for the diagnostic window.
 const WATCHDOG_SCRATCH0: *mut u32 = 0x4005_800c as *mut u32;
 const WATCHDOG_SCRATCH1: *mut u32 = 0x4005_8010 as *mut u32;
+
+/// Boot-progress marker at the top of SRAM: survives a 1200bps-touch reboot,
+/// so `picotool save -r 0x20041f00 0x20041f08` can show how far the firmware
+/// got even when RSP is dead. Written as 0xb007_00XX stage codes.
+const BOOT_PROGRESS: *mut u32 = 0x2004_1f00 as *mut u32;
+
+fn boot_progress(stage: u32) {
+    unsafe { BOOT_PROGRESS.write_volatile(0xb007_0000 | stage) };
+}
+
+/// Record panics like reset sites (0xfa) instead of hanging silently with
+/// interrupts still enabled (which keeps USB alive but the stub dead).
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    reset_self(0xfa)
+}
 
 /// Last-resort recovery: a gdbstub protocol/state error leaves the stub
 /// unusable, so reboot the whole firmware instead of going dead (the old
