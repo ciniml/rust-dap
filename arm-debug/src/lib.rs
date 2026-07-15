@@ -535,6 +535,11 @@ pub mod cortex_m {
 
     /// DEMCR: enable the DWT unit (called DWTENA on ARMv6-M, TRCENA on v7-M).
     pub const DEMCR_DWTENA: u32 = 1 << 24;
+    /// DEMCR: vector catch — halt the core at the reset vector.
+    pub const DEMCR_VC_CORERESET: u32 = 1 << 0;
+
+    /// AIRCR value requesting a system reset (VECTKEY | SYSRESETREQ).
+    pub const AIRCR_SYSRESETREQ: u32 = 0x05FA_0004;
 
     // Core register selector values (a subset; r0-r15 are 0..=15).
     pub const R0: u8 = 0;

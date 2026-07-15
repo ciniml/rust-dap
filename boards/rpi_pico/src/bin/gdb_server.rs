@@ -37,10 +37,12 @@ use gdbstub::target::ext::base::multithread::{
     MultiThreadSchedulerLockingOps, MultiThreadSingleStep, MultiThreadSingleStepOps,
 };
 use gdbstub::target::ext::base::BaseOps;
+use gdbstub::outputln;
 use gdbstub::target::ext::breakpoints::{
     Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, HwWatchpoint, HwWatchpointOps,
     SwBreakpoint, SwBreakpointOps, WatchKind,
 };
+use gdbstub::target::ext::monitor_cmd::{ConsoleOutput, MonitorCmd, MonitorCmdOps};
 use gdbstub::target::{Target, TargetError, TargetResult};
 use gdbstub_arch::arm::reg::ArmCoreRegs;
 use gdbstub_arch::arm::{ArmBreakpointKind, Armv4t};
@@ -341,6 +343,36 @@ impl RpTarget {
         Ok(())
     }
 
+    /// System reset via AIRCR.SYSRESETREQ (resets both cores + peripherals),
+    /// then re-establish the SWD link with everything halted. With `halt`,
+    /// core 0 is caught at the reset vector via DEMCR.VC_CORERESET; without
+    /// it, the target runs briefly until the reconnect halts it. Returns
+    /// core 0's pc after the reset.
+    fn target_reset(&mut self, halt: bool) -> Result<u32, arm_debug::ArmError> {
+        self.flash_exit();
+        self.select_core(0)?;
+        let demcr = self.arm.read_word(cm::DEMCR)?;
+        let demcr = (demcr & !cm::DEMCR_VC_CORERESET) | cm::DEMCR_DWTENA;
+        self.arm.write_word(
+            cm::DEMCR,
+            demcr | if halt { cm::DEMCR_VC_CORERESET } else { 0 },
+        )?;
+        // The chip drops mid-transaction; the response never arrives.
+        let _ = self.arm.write_word(cm::AIRCR, cm::AIRCR_SYSRESETREQ);
+        // Give the bootrom time to come up before reconnecting.
+        cortex_m::asm::delay(2_000_000); // ~16 ms @ 125 MHz
+        self.connect_and_halt();
+        if self.diag[1] == 0xdead {
+            return Err(arm_debug::ArmError::NoTarget);
+        }
+        if halt {
+            // Vector catch served its purpose; don't halt future resets.
+            let _ = self.arm.write_word(cm::DEMCR, cm::DEMCR_DWTENA);
+        }
+        self.select_core(0)?;
+        self.arm.read_core_reg(cm::PC)
+    }
+
     /// Classify why `core` stopped, for GDB's stop reply. DFSR (cleared by
     /// the read) distinguishes watchpoints from breakpoints; an FPB
     /// comparator covering the PC distinguishes hardware from software
@@ -431,6 +463,39 @@ impl Target for RpTarget {
 
     fn support_breakpoints(&mut self) -> Option<BreakpointsOps<'_, Self>> {
         Some(self)
+    }
+
+    fn support_monitor_cmd(&mut self) -> Option<MonitorCmdOps<'_, Self>> {
+        Some(self)
+    }
+}
+
+impl MonitorCmd for RpTarget {
+    fn handle_monitor_cmd(
+        &mut self,
+        cmd: &[u8],
+        mut out: ConsoleOutput<'_>,
+    ) -> Result<(), Self::Error> {
+        match cmd {
+            b"reset" => match self.target_reset(false) {
+                Ok(pc) => outputln!(out, "target reset; halted at pc=0x{:08x}", pc),
+                Err(e) => outputln!(out, "reset failed: 0x{:x}", err_code(&e)),
+            },
+            b"reset halt" => match self.target_reset(true) {
+                Ok(pc) => outputln!(
+                    out,
+                    "target reset, caught at reset vector; pc=0x{:08x}",
+                    pc
+                ),
+                Err(e) => outputln!(out, "reset halt failed: 0x{:x}", err_code(&e)),
+            },
+            _ => {
+                outputln!(out, "unknown command; available:");
+                outputln!(out, "  monitor reset       - system reset, halt wherever it lands");
+                outputln!(out, "  monitor reset halt  - system reset, halt at the reset vector");
+            }
+        }
+        Ok(())
     }
 }
 
