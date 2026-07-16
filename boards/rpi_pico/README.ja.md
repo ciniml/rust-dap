@@ -76,3 +76,56 @@ Ubuntuのaptで入れられる `gdb-multiarch` だとアーキテクチャの認
 ```sh
 arm-none-eabi-gdb <target elf file> -ex "target extended-remote localhost:3333"
 ```
+
+## スタンドアロン GDB サーバ(OpenOCD/probe-rs 不要)
+
+このプローブ自体を GDB サーバにして、ホストに pyOCD/OpenOCD/probe-rs を
+入れずに `gdb-multiarch` から直接ターゲットをデバッグできます(Black Magic
+Probe 相当)。USB-CDC 上で GDB Remote Serial Protocol を喋ります。
+詳細な手順・RTT の使い方は [doc/blink-demo.ja.md](../../doc/blink-demo.ja.md)。
+
+### ビルド
+
+ターゲットチップを feature で選びます。
+
+```sh
+# RP2040 ターゲット(デュアルコア/bootrom フラッシュ)
+cargo build --release --bin gdb_server --features gdb-target-rp2040
+
+# nRF52 ターゲット(単一コア/NVMC フラッシュ/APPROTECT)
+cargo build --release --bin gdb_server --no-default-features --features gdb-target-nrf52
+
+# 自動検出(挿さっている方を DPIDR で判別。含める family は feature で指定)
+cargo build --release --bin gdb_server --no-default-features \
+  --features gdb-target-auto,gdb-target-rp2040,gdb-target-nrf52
+```
+
+> nRF52 と RP2040 は SWD 線を共有できません(nRF は single-drop、RP2040 は
+> multidrop)。auto は「挿さっている一方のターゲット」を自動認識します。
+
+### 接続
+
+CDC が 2 本現れます(若い番号 = GDB 用 RSP、次 = RTT 端末)。
+
+```sh
+# RP2040 は armv4t、nRF52(Cortex-M4)は armv7
+gdb-multiarch <target.elf> \
+  -ex 'set architecture armv4t' \
+  -ex 'target remote /dev/ttyACM3'
+```
+
+対応: レジスタ/メモリ R/W、SW/HW ブレークポイント、ウォッチポイント、
+`load`(フラッシュ書込)、`monitor reset` / `reset halt`、デュアルコア
+(RP2040)、SEGGER RTT(`monitor rtt ...` + 2 本目の CDC へのライブ出力)。
+
+### RTT(J-Link RTT Viewer 相当)
+
+```gdb
+(gdb) monitor rtt scan
+(gdb) monitor rtt attach <addr>
+(gdb) continue
+```
+
+別端末で 2 本目の CDC(`/dev/ttyACM4` 等)を `picocom` で開くと実行中の
+ログが流れます。制御ブロックが見つからない(短命 RTT)場合の対処は
+[doc/blink-demo.ja.md](../../doc/blink-demo.ja.md) を参照。

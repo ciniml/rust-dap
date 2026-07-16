@@ -557,3 +557,28 @@ M-nRF2/3(family 化)後、RP2040 ターゲットを再配線して gdb_server(RP
 | 8 | 1200bps タッチ連続 ×3 | 3/3 |
 
 **RP2040 回帰完了。単一コードベースで RP2040/nRF52 両対応が実機で確定。**
+
+## 追記25: ランタイム自動検出 + nRF52 RTT 実機検証 (2026-07-16)
+
+`gdb-target-auto`(接続時に DPIDR で family 自動判別、有効化する family は
+feature ゲート維持)を実装。nRF52832 で SEGGER RTT も実機動作を確認した。
+
+| # | テスト | 結果 |
+|---|---|---|
+| 1 | auto ビルドが nRF52 を自動検出(単一コア、FICR part 0x52832、approtect OPEN) | OK |
+| 2 | 検出順序: nRF を connect_swd(DPIDR 0x2ba01477 完全一致)→ 該当なければ RP2040 multidrop | OK |
+| 3 | nRF52 で SEGGER RTT(scan → attach → 第 2 CDC / dump) | OK |
+
+**RTT 運用ノート(短命 RTT)**: RTT 制御ブロックは `_SEGGER_RTT` 初期化後に RAM 上へ
+現れる。ブート直後の短時間だけ RTT が有効なファーム(初期化後にブロックが
+上書き/消去される等)では、素の `monitor rtt scan` では通り過ぎていて
+見つからないことがある。確実に捕まえる手順:
+
+1. `monitor reset halt`(リセットベクタで停止)
+2. `hbreak <RTT 初期化直後 / main 等>`
+3. `continue` で停止 → `monitor rtt scan` → `attach`(初期化済み・消去前の窓)
+4. `continue` して第 2 CDC で受信
+
+これで RTT がプローブ側チップ非依存(RP2040 で実証済み → nRF52 でも実機動作)で
+あることが両チップで裏付けられた。nRF52 対応(接続/コア制御/フラッシュ/HW ブレーク/
+ウォッチ/APPROTECT/RTT/自動検出)が一通り完結。
