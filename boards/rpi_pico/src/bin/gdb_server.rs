@@ -22,14 +22,15 @@
 #![no_std]
 #![no_main]
 
-use arm_debug::{cortex_m as cm, ArmDebug, HaltReason, WatchAccess};
 #[cfg(feature = "gdb-target-rp2040")]
 use arm_debug::rp2040;
+use arm_debug::{cortex_m as cm, ArmDebug, HaltReason, WatchAccess};
 use core::convert::Infallible;
 use rp_pico::hal;
 
 use gdbstub::common::{Signal, Tid};
 use gdbstub::conn::Connection;
+use gdbstub::outputln;
 use gdbstub::stub::state_machine::GdbStubStateMachine;
 use gdbstub::stub::{GdbStubBuilder, MultiThreadStopReason};
 use gdbstub::target::ext::base::multithread::{
@@ -37,7 +38,6 @@ use gdbstub::target::ext::base::multithread::{
     MultiThreadSchedulerLockingOps, MultiThreadSingleStep, MultiThreadSingleStepOps,
 };
 use gdbstub::target::ext::base::BaseOps;
-use gdbstub::outputln;
 use gdbstub::target::ext::breakpoints::{
     Breakpoints, BreakpointsOps, HwBreakpoint, HwBreakpointOps, HwWatchpoint, HwWatchpointOps,
     SwBreakpoint, SwBreakpointOps, WatchKind,
@@ -277,12 +277,16 @@ struct Rp2040Family {
 
 #[cfg(feature = "gdb-target-rp2040")]
 impl Rp2040Family {
-    fn rom_flash_fns(&mut self, arm: &mut ArmDebug<Swd>) -> Result<RomFlashFns, arm_debug::ArmError> {
+    fn rom_flash_fns(
+        &mut self,
+        arm: &mut ArmDebug<Swd>,
+    ) -> Result<RomFlashFns, arm_debug::ArmError> {
         if let Some(f) = self.flash_fns {
             return Ok(f);
         }
         let mut get = |code| -> Result<u32, arm_debug::ArmError> {
-            arm.rom_func_lookup(code)?.ok_or(arm_debug::ArmError::Internal)
+            arm.rom_func_lookup(code)?
+                .ok_or(arm_debug::ArmError::Internal)
         };
         let fns = RomFlashFns {
             connect: get(rp2040::FN_CONNECT_INTERNAL_FLASH)?,
@@ -381,7 +385,12 @@ impl TargetFamily for Rp2040Family {
                 self.rom_call(
                     arm,
                     f.erase,
-                    [sector * RP2040_FLASH_SECTOR, RP2040_FLASH_SECTOR, 1 << 16, 0xD8],
+                    [
+                        sector * RP2040_FLASH_SECTOR,
+                        RP2040_FLASH_SECTOR,
+                        1 << 16,
+                        0xD8,
+                    ],
                     POLLS_ERASE,
                 )?;
                 self.erased[word] |= 1 << bit;
@@ -400,7 +409,12 @@ impl TargetFamily for Rp2040Family {
                 }
             }
             arm.write_mem(TARGET_STAGE, &buf[..n])?;
-            self.rom_call(arm, f.program, [pos, TARGET_STAGE, n as u32, 0], POLLS_ERASE)?;
+            self.rom_call(
+                arm,
+                f.program,
+                [pos, TARGET_STAGE, n as u32, 0],
+                POLLS_ERASE,
+            )?;
             pos += n as u32;
         }
         Ok(())
@@ -749,7 +763,9 @@ impl RpTarget {
     /// Address of the selected channel's descriptor, if a CB is attached.
     /// `up` selects the target→host (true) or host→target (false) array.
     fn rtt_channel_desc(&mut self, up: bool) -> Result<Option<u32>, arm_debug::ArmError> {
-        let Some(cb) = self.rtt.cb else { return Ok(None) };
+        let Some(cb) = self.rtt.cb else {
+            return Ok(None);
+        };
         let mut counts = [0u8; 8];
         self.arm.read_mem(cb + 16, &mut counts)?;
         let max_up = u32::from_le_bytes(counts[0..4].try_into().unwrap());
@@ -832,7 +848,10 @@ impl RpTarget {
         let desc = match self.rtt_channel_desc(true) {
             Ok(Some(d)) => d,
             Ok(None) => {
-                outputln!(out, "rtt: no control block attached (use monitor rtt scan/attach)");
+                outputln!(
+                    out,
+                    "rtt: no control block attached (use monitor rtt scan/attach)"
+                );
                 return;
             }
             Err(e) => {
@@ -845,7 +864,13 @@ impl RpTarget {
             return;
         };
         if size == 0 || wr >= size || rd >= size {
-            outputln!(out, "rtt: descriptor looks corrupt (size={} wr={} rd={})", size, wr, rd);
+            outputln!(
+                out,
+                "rtt: descriptor looks corrupt (size={} wr={} rd={})",
+                size,
+                wr,
+                rd
+            );
             return;
         }
         if wr == rd {
@@ -962,11 +987,7 @@ impl MonitorCmd for RpTarget {
                 Err(e) => outputln!(out, "reset failed: 0x{:x}", err_code(&e)),
             },
             b"reset halt" => match self.target_reset(true) {
-                Ok(pc) => outputln!(
-                    out,
-                    "target reset, caught at reset vector; pc=0x{:08x}",
-                    pc
-                ),
+                Ok(pc) => outputln!(out, "target reset, caught at reset vector; pc=0x{:08x}", pc),
                 Err(e) => outputln!(out, "reset halt failed: 0x{:x}", err_code(&e)),
             },
             #[cfg(feature = "gdb-target-nrf52")]
@@ -974,7 +995,11 @@ impl MonitorCmd for RpTarget {
                 Ok((open, _)) => outputln!(
                     out,
                     "approtect: {}",
-                    if open { "OPEN (debug enabled)" } else { "CLOSED (locked)" }
+                    if open {
+                        "OPEN (debug enabled)"
+                    } else {
+                        "CLOSED (locked)"
+                    }
                 ),
                 Err(e) => outputln!(out, "approtect read failed: 0x{:x}", err_code(&e)),
             },
@@ -992,17 +1017,15 @@ impl MonitorCmd for RpTarget {
                 }
             }
             b"rtt scan" => self.rtt_scan(&mut out),
-            b"rtt status" => {
-                match self.rtt.cb {
-                    Some(cb) => outputln!(
-                        out,
-                        "rtt: attached to cb 0x{:08x}, channel {}",
-                        cb,
-                        self.rtt.channel
-                    ),
-                    None => outputln!(out, "rtt: not attached"),
-                }
-            }
+            b"rtt status" => match self.rtt.cb {
+                Some(cb) => outputln!(
+                    out,
+                    "rtt: attached to cb 0x{:08x}, channel {}",
+                    cb,
+                    self.rtt.channel
+                ),
+                None => outputln!(out, "rtt: not attached"),
+            },
             b"rtt dump" => self.rtt_dump(&mut out),
             b"rtt stop" => {
                 self.rtt.cb = None;
@@ -1044,7 +1067,10 @@ impl MonitorCmd for RpTarget {
                 outputln!(out, "  monitor reset / reset halt");
                 #[cfg(feature = "gdb-target-nrf52")]
                 outputln!(out, "  monitor approtect / erase_all");
-                outputln!(out, "  monitor rtt scan|attach <addr>|setup <addr>|channel <n>|dump|status|stop");
+                outputln!(
+                    out,
+                    "  monitor rtt scan|attach <addr>|setup <addr>|channel <n>|dump|status|stop"
+                );
             }
         }
         Ok(())
@@ -1498,8 +1524,7 @@ unsafe fn pre_init() {
 
 /// Set by the USB task once the host has configured the device. A plain
 /// atomic (thumbv6 supports load/store) instead of an RTIC shared resource.
-static USB_CONFIGURED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static USB_CONFIGURED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 #[rtic::app(device = rp_pico::hal::pac, peripherals = true)]
 mod app {
@@ -1556,16 +1581,16 @@ mod app {
         .ok()
         .unwrap();
 
-        let usb_allocator = ctx
-            .local
-            .USB_ALLOCATOR
-            .insert(UsbBusAllocator::new(hal::usb::UsbBus::new(
-                ctx.device.USBCTRL_REGS,
-                ctx.device.USBCTRL_DPRAM,
-                clocks.usb_clock,
-                true,
-                &mut resets,
-            )));
+        let usb_allocator =
+            ctx.local
+                .USB_ALLOCATOR
+                .insert(UsbBusAllocator::new(hal::usb::UsbBus::new(
+                    ctx.device.USBCTRL_REGS,
+                    ctx.device.USBCTRL_DPRAM,
+                    clocks.usb_clock,
+                    true,
+                    &mut resets,
+                )));
         // Interface order fixes host tty numbering: first CDC = RSP,
         // second CDC = RTT terminal.
         let serial = SerialPort::new(usb_allocator);
@@ -1801,12 +1826,12 @@ mod app {
                 }
             }
             target.diag[10] = target.diag[10].wrapping_add(1); // sessions ended
-            // GDB detached: the state machine (and its borrow of conn) is
-            // dropped. Flush the detach response and drop stale RX,
-            // re-establish the SWD link + halt so the next `target remote`
-            // sees a clean target state, then swallow the detach ack — but
-            // keep any packet bytes: a new session may attach while the SWD
-            // link is still being re-established.
+                                                               // GDB detached: the state machine (and its borrow of conn) is
+                                                               // dropped. Flush the detach response and drop stale RX,
+                                                               // re-establish the SWD link + halt so the next `target remote`
+                                                               // sees a clean target state, then swallow the detach ack — but
+                                                               // keep any packet bytes: a new session may attach while the SWD
+                                                               // link is still being re-established.
             conn.purge();
             target.connect_and_halt();
             conn.drop_stray_acks();

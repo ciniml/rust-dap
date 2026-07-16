@@ -336,7 +336,10 @@ fn reselect_switches_target_without_dormant_dance() {
     assert_eq!(dpidr, 0x0bc1_2477);
     // The TARGETSEL raw-bit write ran again (request + value + parity).
     let writes = &arm.transport().written_bits[before..];
-    let value_write = writes.iter().find(|(n, _)| *n == 32).expect("TARGETSEL value");
+    let value_write = writes
+        .iter()
+        .find(|(n, _)| *n == 32)
+        .expect("TARGETSEL value");
     assert_eq!(
         u32::from_le_bytes(value_write.1[..4].try_into().unwrap()),
         rp2040::CORE1_TARGETSEL
@@ -364,11 +367,12 @@ fn apsel_selects_ctrl_ap_and_invalidates_csw() {
     // Reading CTRL-AP.APPROTECTSTATUS must set SELECT.APSEL=1, and switching
     // back to APSEL 0 must re-program CSW on the next MEM-AP access.
     let mock = MockSwd::new(&[
-        0, // stale AP read (IDR posted)
+        0,                       // stale AP read (IDR posted)
         nrf52::CTRLAP_IDR_VALUE, // RDBUFF: IDR
-        0, // stale AP read (APPROTECTSTATUS posted)
-        1, // RDBUFF: unprotected
-        0, 0x42, // later MEM-AP read: stale, then value
+        0,                       // stale AP read (APPROTECTSTATUS posted)
+        1,                       // RDBUFF: unprotected
+        0,
+        0x42, // later MEM-AP read: stale, then value
     ]);
     let mut arm = ArmDebug::new(mock, DapConfig::default());
     let (unprotected, idr_ok) = arm.nrf52_approtect_status().unwrap();
@@ -415,7 +419,10 @@ fn nrf52_flash_erase_and_program() {
     arm.nrf52_erase_page(0x0000_1234, 16).unwrap();
     let log_mem = |arm: &mut ArmDebug<MemMock>, a: u32| arm.read_word(a).unwrap();
     assert_eq!(log_mem(&mut arm, nrf52::NVMC_ERASEPAGE), 0x0000_1000); // page base
-    assert_eq!(log_mem(&mut arm, nrf52::NVMC_CONFIG), nrf52::NVMC_CONFIG_REN);
+    assert_eq!(
+        log_mem(&mut arm, nrf52::NVMC_CONFIG),
+        nrf52::NVMC_CONFIG_REN
+    );
     // Program words, then read them back through the MEM-AP.
     let data = [0x1111_2222u32, 0x3333_4444, 0x5555_6666];
     arm.nrf52_program(0x0000_1000, &data, 16).unwrap();
@@ -423,7 +430,10 @@ fn nrf52_flash_erase_and_program() {
     assert_eq!(arm.read_word(0x0000_1004).unwrap(), 0x3333_4444);
     assert_eq!(arm.read_word(0x0000_1008).unwrap(), 0x5555_6666);
     // Left in read-only mode.
-    assert_eq!(arm.read_word(nrf52::NVMC_CONFIG).unwrap(), nrf52::NVMC_CONFIG_REN);
+    assert_eq!(
+        arm.read_word(nrf52::NVMC_CONFIG).unwrap(),
+        nrf52::NVMC_CONFIG_REN
+    );
 }
 
 #[test]
@@ -710,14 +720,18 @@ fn rom_func_lookup_walks_table() {
         .unwrap();
     arm.write_word(0x7a8, 0).unwrap();
     assert_eq!(
-        arm.rom_func_lookup(rp2040::FN_CONNECT_INTERNAL_FLASH).unwrap(),
+        arm.rom_func_lookup(rp2040::FN_CONNECT_INTERNAL_FLASH)
+            .unwrap(),
         Some(0x2345)
     );
     assert_eq!(
         arm.rom_func_lookup(rp2040::FN_FLASH_RANGE_ERASE).unwrap(),
         Some(0x3456)
     );
-    assert_eq!(arm.rom_func_lookup(rp2040::FN_FLASH_ENTER_CMD_XIP).unwrap(), None);
+    assert_eq!(
+        arm.rom_func_lookup(rp2040::FN_FLASH_ENTER_CMD_XIP).unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -733,7 +747,7 @@ fn call_function_returns_r0_and_restores_registers() {
         .call_function(0x0000_2345, &[7, 8, 9, 10], 0x2000_8000, 0x2000_7000, 16)
         .unwrap();
     assert_eq!(r0, 7); // mock function body does nothing, r0 = arg0
-    // BKPT pair planted at the trampoline.
+                       // BKPT pair planted at the trampoline.
     assert_eq!(arm.read_word(0x2000_7000).unwrap(), 0xBE00_BE00);
     // Core left halted with the original register state restored.
     assert!(arm.is_halted().unwrap());
@@ -789,7 +803,7 @@ fn hw_breakpoint_rejects_non_code_region_and_exhaustion() {
         assert!(arm.hw_breakpoint_set(0x100 + 4 * i).unwrap());
     }
     assert!(!arm.hw_breakpoint_set(0x1000).unwrap()); // all comparators busy
-    // Clearing frees the comparator for reuse.
+                                                      // Clearing frees the comparator for reuse.
     assert!(arm.hw_breakpoint_clear(0x104).unwrap());
     assert!(!arm.hw_breakpoint_clear(0x104).unwrap()); // already gone
     assert!(arm.hw_breakpoint_set(0x1000).unwrap());
@@ -809,10 +823,16 @@ fn watchpoint_set_programs_dwt_and_dwtena() {
         cm::DEMCR_DWTENA
     );
     // Unaligned / non-power-of-two rejected.
-    assert!(!arm.watchpoint_set(0x2000_1001, 4, WatchAccess::Read).unwrap());
-    assert!(!arm.watchpoint_set(0x2000_1000, 3, WatchAccess::Read).unwrap());
+    assert!(!arm
+        .watchpoint_set(0x2000_1001, 4, WatchAccess::Read)
+        .unwrap());
+    assert!(!arm
+        .watchpoint_set(0x2000_1000, 3, WatchAccess::Read)
+        .unwrap());
     // Second comparator, then exhaustion.
-    assert!(arm.watchpoint_set(0x2000_2000, 1, WatchAccess::Read).unwrap());
+    assert!(arm
+        .watchpoint_set(0x2000_2000, 1, WatchAccess::Read)
+        .unwrap());
     assert!(!arm
         .watchpoint_set(0x2000_3000, 4, WatchAccess::ReadWrite)
         .unwrap());
@@ -832,7 +852,8 @@ fn watchpoint_set_programs_dwt_and_dwtena() {
 fn halt_reason_decodes_and_clears_dfsr() {
     let mut arm = arm_with_debug_units();
     // Breakpoint.
-    arm.write_word(cm::DFSR, cm::DFSR_BKPT | cm::DFSR_HALTED).unwrap();
+    arm.write_word(cm::DFSR, cm::DFSR_BKPT | cm::DFSR_HALTED)
+        .unwrap();
     assert_eq!(arm.halt_reason().unwrap(), HaltReason::Breakpoint);
     // Watchpoint: DWTTRAP + comparator 1 flagged as matched.
     arm.write_word(cm::DFSR, cm::DFSR_DWTTRAP).unwrap();

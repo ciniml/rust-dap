@@ -57,7 +57,12 @@ pub static mut BLINK_COUNT: u32 = 0;
 fn main() -> ! {
     let mut pac = pac::Peripherals::take().unwrap();
     let sio = hal::Sio::new(pac.SIO);
-    let pins = rp_pico::Pins::new(pac.IO_BANK0, pac.PADS_BANK0, sio.gpio_bank0, &mut pac.RESETS);
+    let pins = rp_pico::Pins::new(
+        pac.IO_BANK0,
+        pac.PADS_BANK0,
+        sio.gpio_bank0,
+        &mut pac.RESETS,
+    );
     let mut led = pins.led.into_push_pull_output();
     let mut led_on = false;
 
@@ -77,7 +82,10 @@ fn main() -> ! {
             }
             unsafe {
                 let count = core::ptr::read_volatile(core::ptr::addr_of!(BLINK_COUNT));
-                core::ptr::write_volatile(core::ptr::addr_of_mut!(BLINK_COUNT), count.wrapping_add(1));
+                core::ptr::write_volatile(
+                    core::ptr::addr_of_mut!(BLINK_COUNT),
+                    count.wrapping_add(1),
+                );
                 rtt_target::rprintln!("blink #{} led={}", count, led_on as u32);
             }
         }

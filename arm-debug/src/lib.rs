@@ -847,7 +847,7 @@ impl<T: DapTransport> ArmDebug<T> {
         self.write_core_reg(cortex_m::LR, trampoline | 1)?;
         self.write_core_reg(cortex_m::PC, fn_addr)?;
         self.write_core_reg(cortex_m::XPSR, 0x0100_0000)?; // T bit only
-        // C_MASKINTS may only change while halted: set it, then release halt.
+                                                           // C_MASKINTS may only change while halted: set it, then release halt.
         let masked = cortex_m::DBGKEY | cortex_m::C_DEBUGEN | cortex_m::C_MASKINTS;
         self.write_word(cortex_m::DHCSR, masked | cortex_m::C_HALT)?;
         self.write_word(cortex_m::DHCSR, masked)?;

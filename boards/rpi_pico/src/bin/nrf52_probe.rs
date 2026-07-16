@@ -62,7 +62,11 @@ fn core_check(arm: &mut ArmDebug<Swd>, line: &mut heapless::String<200>) {
     // Instruction at pc0: a self-branch (0xe7fe = `b .`) explains a PC that
     // doesn't move on step (idle loop) — that still proves step executed.
     let insn = arm.read_word(pc0 & !3).unwrap_or(0);
-    let insn = if pc0 & 2 != 0 { insn >> 16 } else { insn & 0xffff } as u16;
+    let insn = if pc0 & 2 != 0 {
+        insn >> 16
+    } else {
+        insn & 0xffff
+    } as u16;
     let stepped = arm.step().is_ok();
     let pc1 = arm
         .read_core_reg(arm_debug::cortex_m::PC)
