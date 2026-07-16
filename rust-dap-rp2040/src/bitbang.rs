@@ -16,39 +16,50 @@
 
 //! Bit-banging transports over RP2040 GPIO pins.
 
-use hal::gpio::{Floating, Input, Output, Pin, PinId, PushPull};
+use hal::gpio::{FunctionSio, Pin, PinId, PullNone, SioInput, SioOutput, ValidFunction};
 use rp2040_hal as hal;
 use rust_dap::bitbang::{BidirPin, BitBangJtag, BitBangSwd, BitBangSwj};
 use rust_dap::Delay;
 
+/// Pins usable as both SIO input and output (every bank0 GPIO qualifies).
+pub trait BidirPinId:
+    PinId + ValidFunction<FunctionSio<SioInput>> + ValidFunction<FunctionSio<SioOutput>>
+{
+}
+impl<I> BidirPinId for I where
+    I: PinId + ValidFunction<FunctionSio<SioInput>> + ValidFunction<FunctionSio<SioOutput>>
+{
+}
+
+/// A floating input pin in rp2040-hal 0.10's 3-parameter GPIO type-state.
+pub type FloatingInput<I> = Pin<I, FunctionSio<SioInput>, PullNone>;
+/// A push-pull output pin (pull preserved as none from the input state).
+pub type PushPullOutput<I> = Pin<I, FunctionSio<SioOutput>, PullNone>;
+
 /// Bidirectional pin backed by the rp2040-hal type-state GPIO API.
 /// Holds the pin as an enum of its two mode states, so one type covers
 /// both directions without the IoPin input/output type pair.
-pub enum PicoBidirPin<I: PinId> {
-    Input(Pin<I, Input<Floating>>),
-    Output(Pin<I, Output<PushPull>>),
+pub enum PicoBidirPin<I: BidirPinId> {
+    Input(FloatingInput<I>),
+    Output(PushPullOutput<I>),
     /// Transient state during a mode switch; never observable.
     Invalid,
 }
 
-impl<I: PinId> PicoBidirPin<I> {
-    pub fn new(pin: Pin<I, Input<Floating>>) -> Self {
+impl<I: BidirPinId> PicoBidirPin<I> {
+    pub fn new(pin: FloatingInput<I>) -> Self {
         Self::Input(pin)
     }
 }
 
-impl<I: PinId> BidirPin for PicoBidirPin<I> {
+impl<I: BidirPinId> BidirPin for PicoBidirPin<I> {
     fn set_mode_output(&mut self, high: bool) {
-        let state = if high {
-            embedded_hal::digital::v2::PinState::High
-        } else {
-            embedded_hal::digital::v2::PinState::Low
-        };
+        use embedded_hal::digital::{OutputPin, PinState};
+        let state = if high { PinState::High } else { PinState::Low };
         *self = match core::mem::replace(self, Self::Invalid) {
             Self::Input(pin) => Self::Output(pin.into_push_pull_output_in_state(state)),
             Self::Output(mut pin) => {
-                use embedded_hal::digital::v2::OutputPin;
-                pin.set_state(state).ok();
+                let _ = pin.set_state(state);
                 Self::Output(pin)
             }
             Self::Invalid => unreachable!(),
@@ -64,18 +75,14 @@ impl<I: PinId> BidirPin for PicoBidirPin<I> {
     }
 
     fn write(&mut self, high: bool) {
+        use embedded_hal::digital::OutputPin;
         if let Self::Output(pin) = self {
-            use embedded_hal::digital::v2::OutputPin;
-            if high {
-                pin.set_high().ok();
-            } else {
-                pin.set_low().ok();
-            }
+            let _ = if high { pin.set_high() } else { pin.set_low() };
         }
     }
 
     fn read(&mut self) -> bool {
-        use embedded_hal::digital::v2::InputPin;
+        use embedded_hal::digital::InputPin;
         match self {
             Self::Input(pin) => pin.is_high().unwrap_or(false),
             _ => false,

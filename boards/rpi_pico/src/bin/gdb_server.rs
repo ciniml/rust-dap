@@ -1738,9 +1738,13 @@ mod app {
         let serial = SerialPort::new(usb_allocator);
         let rtt_serial = SerialPort::new(usb_allocator);
         let usb_dev = UsbDeviceBuilder::new(usb_allocator, UsbVidPid(0x6666, 0x4444))
-            .manufacturer("fugafuga.org")
-            .product("rust-dap GDB server")
-            .serial_number("raspberry-pi-pico-gdb")
+            .strings(&[
+                usb_device::device::StringDescriptors::new(usb_device::LangID::EN_US)
+                    .manufacturer("fugafuga.org")
+                    .product("rust-dap GDB server")
+                    .serial_number("raspberry-pi-pico-gdb"),
+            ])
+            .unwrap()
             // Two CDC-ACM functions -> IAD composite device.
             .device_class(USB_CLASS_MISCELLANEOUS)
             .device_sub_class(USB_SUBCLASS_COMMON)

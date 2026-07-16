@@ -20,7 +20,7 @@
 
 use crate::line_coding::UartConfig;
 use crate::util::{read_usb_serial_byte_cs, write_usb_serial_byte_cs, UartConfigAndClock};
-use embedded_hal::serial::{Read, Write};
+use embedded_hal_nb::serial::{Read, Write};
 use hal::pac::{UART0, UART1};
 use hal::uart::{Enabled, Reader, UartDevice, UartPeripheral, ValidUartPinout, Writer};
 use hal::usb::UsbBus;

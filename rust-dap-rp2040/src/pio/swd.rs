@@ -20,7 +20,7 @@ use rust_dap::*;
 // use rust_dap::{SwdIo, SwdIoConfig, SwdRequest, DapError};
 // use rust_dap::{DAP_TRANSFER_OK, DAP_TRANSFER_WAIT, DAP_TRANSFER_FAULT, /* DAP_TRANSFER_ERROR, */ DAP_TRANSFER_MISMATCH};
 use crate::pio::*;
-use hal::gpio::{bank0, PinId};
+use hal::gpio::PinId;
 use hal::pac::{self, PIO0};
 use hal::pio::{InstalledProgram, PIOExt};
 
@@ -172,15 +172,19 @@ fn swd_program() -> Program<{ pio::RP2040_MAX_PROGRAM_SIZE }> {
 
 impl<C, D, E> SwdIoSet<pio0::Pin<C>, pio0::Pin<D>, pio0::Pin<E>>
 where
-    C: PinId + bank0::BankPinId,
-    D: PinId + bank0::BankPinId,
-    E: PinId + bank0::BankPinId,
+    C: PinId,
+    D: PinId,
+    E: PinId,
 {
     #[rustfmt::skip]
-    pub fn new(pio0: pac::PIO0, _: pio0::Pin<C>, _: pio0::Pin<D>, _: pio0::Pin<E>, resets: &mut pac::RESETS) -> Self {
-        let clk_pin_id = C::DYN.num;
-        let dat_pin_id = D::DYN.num;
-        let rst_pin_id = E::DYN.num;
+    pub fn new(pio0: pac::PIO0, clk: pio0::Pin<C>, dat: pio0::Pin<D>, rst: pio0::Pin<E>, resets: &mut pac::RESETS) -> Self {
+        // rp2040-hal 0.10 dropped the type-level pin-number const; read it from
+        // the (PIO-configured) pin instances. Forget them afterwards so their
+        // Drop does not revert the pin function the PIO relies on.
+        let clk_pin_id = clk.id().num;
+        let dat_pin_id = dat.id().num;
+        let rst_pin_id = rst.id().num;
+        core::mem::forget((clk, dat, rst));
         // Currently HAL does not provide any way to disable schmitt trigger.
         // unsafe { core::ptr::write_volatile((0x4001C004 + clk_pin_id as u32 * 4) as *mut u32, 0x71 as u32) };
         // unsafe { core::ptr::write_volatile((0x4001C004 + dat_pin_id as u32 * 4) as *mut u32, 0x71 as u32); }

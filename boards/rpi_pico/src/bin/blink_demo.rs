@@ -33,7 +33,7 @@
 
 use panic_halt as _;
 
-use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::digital::OutputPin;
 use rp_pico::hal;
 
 use hal::pac;
