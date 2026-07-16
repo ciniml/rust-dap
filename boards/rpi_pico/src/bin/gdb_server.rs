@@ -248,7 +248,8 @@ trait TargetFamily {
 
     fn new() -> Self;
     /// Raw SWD connect to core 0; returns DPIDR. Retry/halt/diagnostics are
-    /// handled by RpTarget.
+    /// handled by RpTarget. (Only the non-auto path calls this directly.)
+    #[cfg_attr(feature = "gdb-target-auto", allow(dead_code))]
     fn connect(&mut self, arm: &mut ArmDebug<Swd>) -> Result<u32, arm_debug::ArmError>;
     /// Point the link at `core`'s DP (cheap no-op when already there or when
     /// single-core). Owns the current-core cache.
@@ -282,6 +283,8 @@ enum Family {
     Rp2040(Rp2040Family),
     #[cfg(feature = "gdb-target-nrf52")]
     Nrf52(Nrf52Family),
+    #[cfg(feature = "gdb-target-nrf54")]
+    Nrf54(Nrf54Family),
 }
 
 /// Run `$body` (which references the bound inner family `$f`) on whichever
@@ -294,13 +297,15 @@ macro_rules! on_family {
             Family::Rp2040($f) => $body,
             #[cfg(feature = "gdb-target-nrf52")]
             Family::Nrf52($f) => $body,
+            #[cfg(feature = "gdb-target-nrf54")]
+            Family::Nrf54($f) => $body,
         }
     };
 }
 
 impl Family {
     /// Family used before the first connect / when auto-detection is off:
-    /// the first compiled-in variant (RP2040 takes priority).
+    /// the first compiled-in variant (RP2040 > nRF52 > nRF54).
     fn default_family() -> Self {
         #[cfg(feature = "gdb-target-rp2040")]
         {
@@ -310,23 +315,49 @@ impl Family {
         {
             Family::Nrf52(Nrf52Family::new())
         }
+        #[cfg(all(
+            not(feature = "gdb-target-rp2040"),
+            not(feature = "gdb-target-nrf52"),
+            feature = "gdb-target-nrf54"
+        ))]
+        {
+            Family::Nrf54(Nrf54Family::new())
+        }
     }
 
-    /// Whether the active family is nRF52 (gates nRF-only monitor commands).
+    /// Whether the active family is nRF52 (gates nRF52-only monitor commands).
     #[cfg(feature = "gdb-target-nrf52")]
     fn is_nrf52(&self) -> bool {
         matches!(self, Family::Nrf52(_))
     }
 
+    /// Whether the active family is nRF54 (gates nRF54-only monitor commands).
+    #[cfg(feature = "gdb-target-nrf54")]
+    fn is_nrf54(&self) -> bool {
+        matches!(self, Family::Nrf54(_))
+    }
+
     /// Connect, auto-detecting the target when `gdb-target-auto` is set. On
-    /// success `*self` becomes the detected family. Detection order: nRF over
-    /// plain SW-DP (matched by exact DPIDR), then RP2040 over multidrop.
+    /// success `*self` becomes the detected family. Detection order: the nRF
+    /// parts over plain SW-DP (matched by exact DPIDR), then RP2040 over
+    /// multidrop.
     fn connect_detect(&mut self, arm: &mut ArmDebug<Swd>) -> Result<u32, arm_debug::ArmError> {
-        #[cfg(all(feature = "gdb-target-auto", feature = "gdb-target-nrf52"))]
+        #[cfg(all(
+            feature = "gdb-target-auto",
+            any(feature = "gdb-target-nrf52", feature = "gdb-target-nrf54")
+        ))]
         {
+            // One plain SW-DP bring-up serves both nRF families; dispatch on
+            // the returned DPIDR.
             if let Ok(id) = arm.connect_swd() {
+                #[cfg(feature = "gdb-target-nrf52")]
                 if id == arm_debug::nrf52::DPIDR {
                     *self = Family::Nrf52(Nrf52Family::new());
+                    return Ok(id);
+                }
+                #[cfg(feature = "gdb-target-nrf54")]
+                if id == arm_debug::nrf54::DPIDR {
+                    *self = Family::Nrf54(Nrf54Family::new());
                     return Ok(id);
                 }
             }
@@ -367,6 +398,7 @@ impl Family {
     fn ram_end(&self) -> u32 {
         on_family!(self, f => f.ram_end())
     }
+    #[cfg_attr(feature = "gdb-target-auto", allow(dead_code))]
     fn connect(&mut self, arm: &mut ArmDebug<Swd>) -> Result<u32, arm_debug::ArmError> {
         on_family!(self, f => f.connect(arm))
     }
@@ -669,6 +701,92 @@ impl TargetFamily for Nrf52Family {
         self.erased = [0; 4];
     }
 
+    fn in_flash_mode(&self) -> bool {
+        false
+    }
+}
+
+// --- nRF54L family (Cortex-M33 / RRAM) ------------------------------------
+
+#[cfg(feature = "gdb-target-nrf54")]
+struct Nrf54Family;
+
+#[cfg(feature = "gdb-target-nrf54")]
+impl TargetFamily for Nrf54Family {
+    const NUM_CORES: usize = 1; // the M33 application core
+    const FLASH_BASE: u32 = arm_debug::nrf54::RRAM_BASE;
+    const FLASH_SIZE: u32 = arm_debug::nrf54::RRAM_SIZE;
+    const RAM_START: u32 = 0x2000_0000;
+    const RAM_END: u32 = 0x2003_C000; // nRF54L15: 240 KiB SRAM
+
+    fn new() -> Self {
+        Self
+    }
+
+    fn connect(&mut self, arm: &mut ArmDebug<Swd>) -> Result<u32, arm_debug::ArmError> {
+        // nRF54L is DPv2 single-drop; the plain SW-DP bring-up works.
+        arm.connect_swd()
+    }
+
+    fn select_core(
+        &mut self,
+        _arm: &mut ArmDebug<Swd>,
+        _core: usize,
+    ) -> Result<(), arm_debug::ArmError> {
+        Ok(())
+    }
+
+    fn forget_core(&mut self) {}
+
+    fn flash_write(
+        &mut self,
+        arm: &mut ArmDebug<Swd>,
+        addr: u32,
+        data: &[u8],
+    ) -> Result<(), arm_debug::ArmError> {
+        let end = addr + data.len() as u32;
+        if end > Self::FLASH_SIZE {
+            return Err(arm_debug::ArmError::Internal);
+        }
+        // RRAM is resistive: no erase, direct overwrite. Program word-aligned
+        // batches; edges read the existing word so partial writes preserve
+        // neighbours (RRAM can set bits either way, unlike NOR flash).
+        let span = addr & !3;
+        let span_end = (end + 3) & !3;
+        let mut base = span;
+        while base < span_end {
+            let mut words: heapless::Vec<u32, 256> = heapless::Vec::new();
+            let mut a = base;
+            while a < span_end && !words.is_full() {
+                let word = if a >= addr && a + 4 <= end {
+                    u32::from_le_bytes([
+                        data[(a - addr) as usize],
+                        data[(a - addr + 1) as usize],
+                        data[(a - addr + 2) as usize],
+                        data[(a - addr + 3) as usize],
+                    ])
+                } else {
+                    // Ragged edge: read-modify-write to keep the other bytes.
+                    let mut bytes = arm.read_word(a)?.to_le_bytes();
+                    for (i, b) in bytes.iter_mut().enumerate() {
+                        let ba = a + i as u32;
+                        if ba >= addr && ba < end {
+                            *b = data[(ba - addr) as usize];
+                        }
+                    }
+                    u32::from_le_bytes(bytes)
+                };
+                let _ = words.push(word);
+                a += 4;
+            }
+            arm.nrf54_program(base, &words, POLLS_ERASE)?;
+            base = a;
+        }
+        Ok(())
+    }
+
+    fn flash_finish(&mut self, _arm: &mut ArmDebug<Swd>) {}
+    fn reset_flash_state(&mut self) {}
     fn in_flash_mode(&self) -> bool {
         false
     }
@@ -1149,6 +1267,30 @@ impl MonitorCmd for RpTarget {
                 // unlock. Follow with a reconnect so the session is usable.
                 outputln!(out, "erasing entire chip (flash+UICR+RAM)...");
                 match self.arm.nrf52_erase_all(2_000_000) {
+                    Ok(()) => {
+                        self.connect_and_halt();
+                        outputln!(out, "erase_all done; reconnected + halted");
+                    }
+                    Err(e) => outputln!(out, "erase_all failed: 0x{:x}", err_code(&e)),
+                }
+            }
+            #[cfg(feature = "gdb-target-nrf54")]
+            b"approtect" if self.family.is_nrf54() => match self.arm.nrf54_approtect_status() {
+                Ok(open) => outputln!(
+                    out,
+                    "approtect: {}",
+                    if open {
+                        "OPEN (debug enabled)"
+                    } else {
+                        "CLOSED (locked)"
+                    }
+                ),
+                Err(e) => outputln!(out, "approtect read failed: 0x{:x}", err_code(&e)),
+            },
+            #[cfg(feature = "gdb-target-nrf54")]
+            b"erase_all" if self.family.is_nrf54() => {
+                outputln!(out, "erasing entire chip (RRAM+RAM)...");
+                match self.arm.nrf54_erase_all(2_000_000) {
                     Ok(()) => {
                         self.connect_and_halt();
                         outputln!(out, "erase_all done; reconnected + halted");

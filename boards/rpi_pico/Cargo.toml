@@ -33,6 +33,8 @@ gdbserver = ["dep:gdbstub", "dep:gdbstub_arch", "dep:arm-debug"]
 gdb-target-rp2040 = ["gdbserver"]
 # nRF52 targets: SW-DP connect, single core, NVMC flashing, CTRL-AP recovery.
 gdb-target-nrf52 = ["gdbserver"]
+# nRF54L targets: DPv2 SW-DP, Cortex-M33, RRAM flashing, CTRL-AP #2.
+gdb-target-nrf54 = ["gdbserver"]
 # Auto-detect the target family (by DPIDR) among the enabled gdb-target-*
 # features, so one build debugs whichever single target is wired. Combine
 # with the families to include, e.g.
