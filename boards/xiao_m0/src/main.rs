@@ -17,90 +17,90 @@
 #![no_std]
 #![no_main]
 
-use embedded_hal::digital::v2::ToggleableOutputPin;
 use panic_halt as _;
+
 use rust_dap::bitbang::BitBangSwd;
 use rust_dap::{CmsisDap, DapConfig, DapIdentity, Delay};
 use rust_dap::{USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON};
 
-use bsp::{entry, hal, pac};
-use hal::clock::GenericClockController;
-use hal::gpio::v2::{Output, Pin, PushPull};
-use pac::{interrupt, CorePeripherals, Peripherals};
 use xiao_m0 as bsp;
-
-use usb_device::bus::UsbBusAllocator;
-use xiao_m0::hal::usb::UsbBus;
-
-use usb_device::prelude::*;
-use usbd_serial::SerialPort;
-
-use cortex_m::asm::delay as cycle_delay;
-use cortex_m::peripheral::NVIC;
+use xiao_m0::hal::gpio::v2::{Output, Pin, PushPull, PA02, PA05, PA07, PA18};
 
 mod swdio_pin;
 use swdio_pin::*;
 
-// Import pin types.
-use hal::gpio::v2::{PA02, PA05, PA07, PA18};
-
-type SwdIoPin = PA05; // D9
-type SwClkPin = PA07; // D8
-type ResetPin = PA02; // D0
+type SwdIoPin = PA05; // D9 = a9
+type SwClkPin = PA07; // D8 = a8
+type ResetPin = PA02; // D0 = a0
 type MySwdIoSet =
     BitBangSwd<XiaoBidirPin<SwClkPin>, XiaoBidirPin<SwdIoPin>, XiaoBidirPin<ResetPin>, CycleDelay>;
 
 /// SAMD21 core clock frequency configured by GenericClockController.
 const CORE_CLOCK_HZ: u32 = 48_000_000;
 
-struct CycleDelay {}
+pub struct CycleDelay {}
 impl Delay for CycleDelay {
     fn delay_cycles(&self, cycles: u32) {
         cortex_m::asm::delay(cycles);
     }
 }
 
-#[entry]
-fn main() -> ! {
-    let mut peripherals = Peripherals::take().unwrap();
-    let mut core = CorePeripherals::take().unwrap();
-    let mut clocks = GenericClockController::with_internal_32kosc(
-        peripherals.GCLK,
-        &mut peripherals.PM,
-        &mut peripherals.SYSCTRL,
-        &mut peripherals.NVMCTRL,
-    );
+// DAP command processing runs in a low-priority software task (dispatched by
+// the unused DAC interrupt) instead of inside the USB interrupt, so USB stays
+// responsive during the (blocking, bit-banged) SWD transfers — the same
+// restructuring already applied to the RP2040 boards.
+#[rtic::app(device = xiao_m0::pac, peripherals = true, dispatchers = [DAC])]
+mod app {
+    use super::*;
+    use usb_device::bus::UsbBusAllocator;
+    use usb_device::prelude::*;
+    use usbd_serial::SerialPort;
+    use xiao_m0::hal::clock::GenericClockController;
+    use xiao_m0::hal::usb::UsbBus;
 
-    let pins = bsp::Pins::new(peripherals.PORT);
-    let mut led0 = pins.led0.into_push_pull_output();
+    #[shared]
+    struct Shared {
+        usb_dev: UsbDevice<'static, UsbBus>,
+        usb_serial: SerialPort<'static, UsbBus>,
+        usb_dap: CmsisDap<'static, UsbBus, MySwdIoSet, 64>,
+    }
 
-    let bus_allocator = unsafe {
-        USB_ALLOCATOR = Some(bsp::usb_allocator(
+    #[local]
+    struct Local {
+        led: Pin<PA18, Output<PushPull>>,
+    }
+
+    #[init(local = [usb_allocator: Option<UsbBusAllocator<UsbBus>> = None])]
+    fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
+        let mut peripherals = ctx.device;
+        let mut clocks = GenericClockController::with_internal_32kosc(
+            peripherals.GCLK,
+            &mut peripherals.PM,
+            &mut peripherals.SYSCTRL,
+            &mut peripherals.NVMCTRL,
+        );
+        let pins = bsp::Pins::new(peripherals.PORT);
+
+        let usb_allocator = ctx.local.usb_allocator.insert(bsp::usb_allocator(
             peripherals.USB,
             &mut clocks,
             &mut peripherals.PM,
             pins.usb_dm,
             pins.usb_dp,
         ));
-        USB_ALLOCATOR.as_ref().unwrap()
-    };
 
-    // RESET pin of Cortex Debug 10-pin connector is negative logic
-    // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
-    let reset_pin = pins.a0.into_floating_input();
+        // SWD pins: a8 = SWCLK, a9 = SWDIO, a0 = RESET (nSRST, active low).
+        let swd = MySwdIoSet::new(
+            XiaoBidirPin::new(pins.a8.into_floating_input()),
+            XiaoBidirPin::new(pins.a9.into_floating_input()),
+            XiaoBidirPin::new(pins.a0.into_floating_input()),
+            CycleDelay {},
+        );
 
-    let swdio = MySwdIoSet::new(
-        XiaoBidirPin::new(pins.a8.into_floating_input()),
-        XiaoBidirPin::new(pins.a9.into_floating_input()),
-        XiaoBidirPin::new(reset_pin),
-        CycleDelay {},
-    );
-
-    unsafe {
-        USB_SERIAL = Some(SerialPort::new(bus_allocator));
-        USB_DAP = Some(CmsisDap::new(
-            bus_allocator,
-            swdio,
+        let usb_serial = SerialPort::new(usb_allocator);
+        let usb_dap = CmsisDap::new(
+            usb_allocator,
+            swd,
             DapConfig::new(
                 DapIdentity {
                     serial_number: "xiao-m0",
@@ -108,69 +108,67 @@ fn main() -> ! {
                 },
                 CORE_CLOCK_HZ,
             ),
-        ));
-        USB_BUS = Some(
-            UsbDeviceBuilder::new(bus_allocator, UsbVidPid(0x6666, 0x4444))
-                .manufacturer("fugafuga.org")
-                .product("CMSIS-DAP")
-                .serial_number("test")
-                .device_class(USB_CLASS_MISCELLANEOUS)
-                .device_class(USB_SUBCLASS_COMMON)
-                .device_protocol(USB_PROTOCOL_IAD)
-                .composite_with_iads()
-                .max_packet_size_0(64)
-                .build(),
         );
-        LED = Some(pins.led1.into_push_pull_output());
+        let usb_dev = UsbDeviceBuilder::new(usb_allocator, UsbVidPid(0x6666, 0x4444))
+            .manufacturer("fugafuga.org")
+            .product("CMSIS-DAP")
+            .serial_number("xiao-m0")
+            .device_class(USB_CLASS_MISCELLANEOUS)
+            .device_class(USB_SUBCLASS_COMMON)
+            .device_protocol(USB_PROTOCOL_IAD)
+            .composite_with_iads()
+            .max_packet_size_0(64)
+            .build();
+
+        let led = pins.led1.into_push_pull_output();
+
+        (
+            Shared {
+                usb_dev,
+                usb_serial,
+                usb_dap,
+            },
+            Local { led },
+            init::Monotonics(),
+        )
     }
 
-    unsafe {
-        core.NVIC.set_priority(interrupt::USB, 1);
-        NVIC::unmask(interrupt::USB);
-    }
-
-    loop {
-        // unsafe {
-        //     USB_DAP.as_mut().map(|dap| {
-        //         let _ = dap.process();
-        //     });
-        // }
-        cycle_delay(15 * 1024 * 1024);
-        led0.toggle().ok();
-    }
-}
-
-static mut USB_ALLOCATOR: Option<UsbBusAllocator<UsbBus>> = None;
-static mut USB_BUS: Option<UsbDevice<UsbBus>> = None;
-static mut USB_SERIAL: Option<SerialPort<UsbBus>> = None;
-static mut USB_DAP: Option<CmsisDap<UsbBus, MySwdIoSet, 64>> = None;
-static mut LED: Option<Pin<PA18, Output<PushPull>>> = None;
-
-fn poll_usb() {
-    unsafe {
-        if let Some(usb_dev) = USB_BUS.as_mut() {
-            if let Some(serial) = USB_SERIAL.as_mut() {
-                if let Some(dap) = USB_DAP.as_mut() {
-                    usb_dev.poll(&mut [serial, dap]);
-
-                    dap.process().ok();
-                    let mut buf = [0u8; 64];
-                    if let Ok(count) = serial.read(&mut buf) {
-                        for (i, c) in buf.iter().enumerate() {
-                            if i >= count {
-                                break;
-                            }
-                            serial.write(&[*c]).unwrap();
-                            LED.as_mut().map(|led| led.toggle());
-                        }
-                    };
+    /// Service USB at interrupt priority: poll the bus, echo the CDC serial,
+    /// and defer DAP command processing to the low-priority software task.
+    #[task(binds = USB, priority = 2, shared = [usb_dev, usb_serial, usb_dap], local = [led])]
+    fn usb(ctx: usb::Context) {
+        use embedded_hal::digital::v2::ToggleableOutputPin;
+        let led = ctx.local.led;
+        (
+            ctx.shared.usb_dev,
+            ctx.shared.usb_serial,
+            ctx.shared.usb_dap,
+        )
+            .lock(|usb_dev, usb_serial, usb_dap| {
+                usb_dev.poll(&mut [usb_serial, usb_dap]);
+                let mut buf = [0u8; 64];
+                if let Ok(count) = usb_serial.read(&mut buf) {
+                    for c in &buf[..count] {
+                        let _ = usb_serial.write(&[*c]);
+                        led.toggle().ok();
+                    }
                 }
-            }
-        }
-    };
-}
+            });
+        process::spawn().ok();
+    }
 
-#[interrupt]
-fn USB() {
-    poll_usb();
+    /// Execute a pending DAP command outside the USB interrupt.
+    #[task(priority = 1, shared = [usb_dap])]
+    fn process(mut ctx: process::Context) {
+        ctx.shared.usb_dap.lock(|dap| {
+            let _ = dap.process();
+        });
+    }
+
+    #[idle]
+    fn idle(_: idle::Context) -> ! {
+        loop {
+            cortex_m::asm::wfi();
+        }
+    }
 }
