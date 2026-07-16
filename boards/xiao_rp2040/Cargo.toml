@@ -7,14 +7,8 @@ license = "Apache-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
-[profile.release]
-debug = 2
-codegen-units = 1
-opt-level = 3
-lto = true
-
 [features]
-bitbang = ["rust-dap/bitbang", "rust-dap-rp2040/bitbang"]
+bitbang = ["rust-dap-rp2040/bitbang"]
 set_clock = ["rust-dap-rp2040/set_clock"]   # Enable swj_clock implementation for PIO and set appropriate SWCLK frequency. Otherwise, SWCLK is fixed to 15.625[MHz]
 ram-exec = ["rust-dap-rp2040/ram-exec"] # Execute-in-SRAM support
 
@@ -25,11 +19,12 @@ default-features = false
 features = [ "rt", "critical-section-impl" ]
 
 [dependencies]
-rust-dap = { path = "../../rust-dap", features = ["unproven"] }
+rust-dap = { path = "../../rust-dap" }
 rust-dap-rp2040 = { path = "../../rust-dap-rp2040" }
 panic-halt = "0.2"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
+rp2040-boot2 = "0.2"
 cortex-m-rtic = "1.0"
 
 usb-device = { version = "0.2", features = ["control-buffer-256"]}

@@ -17,7 +17,7 @@ fn main() {
     // Put `link.ram.x` in our output directory and ensure it's
     // on the linker search path.
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());
-    let ram_exec = env::var("CARGO_FEATURE_RAM_EXEC").ok() != None;
+    let ram_exec = env::var("CARGO_FEATURE_RAM_EXEC").is_ok();
     File::create(out.join("link.ram.x"))
         .unwrap()
         .write_all(if ram_exec {

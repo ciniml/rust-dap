@@ -425,7 +425,7 @@ impl<C, D, E> SwdIoSet<C, D, E> {
             },
         );
     }
-    fn idle_cycle(&mut self, config: &SwdIoConfig) {
+    fn idle_cycle(&mut self, config: &SwdConfig) {
         if config.idle_cycles != 0 {
             self.write_bits(config.idle_cycles, 0);
         }
@@ -450,27 +450,9 @@ pub trait SupplementSwdIo {
 }
 */
 
-impl<C, D, E> SwdIo for SwdIoSet<C, D, E> {
-    fn connect(&mut self) {
-        self.connect();
-    }
-    fn disconnect(&mut self) {
-        self.disconnect();
-    }
-    fn swj_clock(
-        &mut self,
-        _config: &mut SwdIoConfig,
-        #[allow(unused_variables)] frequency_hz: u32,
-    ) -> core::result::Result<(), DapError> {
-        #[cfg(feature = "set_clock")]
-        self.set_clock(frequency_hz);
-        Ok(())
-    }
-
-    fn swj_sequence(&mut self, config: &SwdIoConfig, count: usize, data: &[u8]) {
-        self.swd_write_sequence(config, count, data);
-    }
-    fn swd_read_sequence(&mut self, _config: &SwdIoConfig, count: usize, data: &mut [u8]) {
+// Sequence helpers shared by the DapTransport implementation.
+impl<C, D, E> SwdIoSet<C, D, E> {
+    fn read_sequence(&mut self, count: usize, data: &mut [u8]) {
         let mut count = count as u32;
         let mut index = 0;
         let mut bits = 0;
@@ -487,7 +469,8 @@ impl<C, D, E> SwdIo for SwdIoSet<C, D, E> {
             bits -= if bits <= 8 { bits } else { 8 };
         }
     }
-    fn swd_write_sequence(&mut self, _config: &SwdIoConfig, count: usize, data: &[u8]) {
+
+    fn write_sequence(&mut self, count: usize, data: &[u8]) {
         let mut count = count as u32;
         let mut index = 0;
         let mut bits = 0;
@@ -507,205 +490,45 @@ impl<C, D, E> SwdIo for SwdIoSet<C, D, E> {
             }
         }
     }
-    fn swd_transfer(
-        &mut self,
-        config: &SwdIoConfig,
-        request: SwdRequest,
-        data: u32,
-    ) -> core::result::Result<u32, DapError> {
-        // READ or WIRTE operation
-        // send request
-        self.enable_output();
-        {
-            let mut bits = request.bits() & 0b1111;
-            bits |= (bits.count_ones() as u8 & 1) << 4;
-            bits = bits << 1 | 0x81;
-            self.write_bits(8, bits as u32);
-        }
-
-        let ack;
-        if request.contains(SwdRequest::RnW) {
-            // READ operation
-            self.disable_output();
-            // turnaround + recv ack.
-            ack = self.read_bits(3 + config.turn_around_cycles) as u8 >> config.turn_around_cycles
-                & 0b111;
-            if ack == DAP_TRANSFER_OK {
-                // recv data
-                let value = self.read_bits(32);
-                let parity = value.count_ones() & 1;
-                // recv parity + turnaround
-                let parity_expected = self.read_bits(1 + config.turn_around_cycles) & 1;
-                let result = match parity == parity_expected {
-                    true => Ok(value),
-                    false => Err(DapError::SwdError(DAP_TRANSFER_MISMATCH)),
-                };
-                // TODO: capture timestamp
-                self.enable_output();
-                self.idle_cycle(config);
-                self.to_swdio_out(true);
-                return result;
-            }
-        } else {
-            // WRITE operation
-            self.disable_output();
-            // turnaround + read ack + turnaround.
-            ack = self.read_bits(3 + config.turn_around_cycles * 2) as u8
-                >> config.turn_around_cycles
-                & 0b111;
-            if ack == DAP_TRANSFER_OK {
-                self.enable_output();
-                // send data
-                self.write_bits(32, data);
-                // send parity
-                self.write_bits(1, data.count_ones());
-                // TODO: capture timestamp
-                self.idle_cycle(config);
-                self.to_swdio_out(true);
-                return Ok(0);
-            }
-        }
-
-        // An error occured.
-        if ack == DAP_TRANSFER_WAIT || ack == DAP_TRANSFER_FAULT {
-            self.disable_output();
-            if config.always_generate_data_phase && request.contains(SwdRequest::RnW) {
-                self.read_bits(33);
-            }
-            if request.contains(SwdRequest::RnW) {
-                // turnaround
-                self.read_bits(config.turn_around_cycles);
-            }
-            self.enable_output();
-            if config.always_generate_data_phase && !request.contains(SwdRequest::RnW) {
-                self.write_bits(33, 0);
-            }
-            self.to_swdio_out(true);
-            return Err(DapError::SwdError(ack));
-        }
-
-        // Protocol error
-        self.read_bits(33);
-        if request.contains(SwdRequest::RnW) {
-            // turnaround
-            self.read_bits(config.turn_around_cycles);
-        }
-        self.enable_output();
-        self.to_swdio_out(true);
-        Err(DapError::SwdError(ack))
-    }
-
-    fn enable_output(&mut self) {
-        // Enabling of output is inherent in write_bits()
-    }
-
-    fn disable_output(&mut self) {
-        // Disabling of output is inherent in read_bits()
-    }
 }
 
-impl<C, D, E> CmsisDapCommandInner for SwdIoSet<C, D, E> {
-    fn connect(&mut self, _config: &CmsisDapConfig) {
-        SwdIo::connect(self);
-    }
-    fn disconnect(&mut self, _config: &CmsisDapConfig) {
-        SwdIo::disconnect(self);
+impl<C, D, E> DapTransport for SwdIoSet<C, D, E> {
+    fn capabilities(&self) -> DapCapabilities {
+        DapCapabilities::SWD
     }
 
-    fn swj_sequence(&mut self, config: &CmsisDapConfig, count: usize, data: &[u8]) {
-        SwdIo::swj_sequence(self, &config.swdio, count, data);
-    }
-
-    fn swj_clock(
-        &mut self,
-        config: &mut CmsisDapConfig,
-        frequency_hz: u32,
-    ) -> core::result::Result<(), DapError> {
-        SwdIo::swj_clock(self, &mut config.swdio, frequency_hz)
-    }
-
-    fn swd_sequence(
-        &mut self,
-        config: &CmsisDapConfig,
-        request: &[u8],
-        response: &mut [u8],
-    ) -> core::result::Result<(usize, usize), DapError> {
-        if request.is_empty() {
-            return Err(DapError::InvalidCommand);
-        }
-
-        let mut sequence_count = request[0];
-        let mut request_index = 1;
-        let mut response_index = 1;
-        while sequence_count > 0 {
-            sequence_count -= 1;
-            let sequence_info = request[request_index];
-            request_index += 1;
-
-            let clock_count = if sequence_info & SWD_SEQUENCE_CLOCK == 0 {
-                64
-            } else {
-                sequence_info & SWD_SEQUENCE_CLOCK
-            } as usize;
-            let bytes_count = (clock_count + 7) >> 3;
-            let do_input = sequence_info & SWD_SEQUENCE_DIN != 0;
-
-            if do_input {
-                SwdIo::disable_output(self);
-                SwdIo::swd_read_sequence(
-                    self,
-                    &config.swdio,
-                    clock_count,
-                    &mut response[response_index..],
-                );
-                response_index += bytes_count;
-            } else {
-                SwdIo::enable_output(self);
-                SwdIo::swd_write_sequence(
-                    self,
-                    &config.swdio,
-                    clock_count,
-                    &request[request_index..],
-                );
-                request_index += bytes_count;
+    fn connect(&mut self, port: ConnectPort, _config: &DapConfig) -> Result<ActivePort, DapError> {
+        match port {
+            ConnectPort::Default | ConnectPort::Swd => {
+                self.connect();
+                Ok(ActivePort::Swd)
             }
-
-            if sequence_count == 0 {
-                SwdIo::enable_output(self)
-            }
-        }
-        response[0] = DAP_OK;
-        Ok((request_index, response_index))
-    }
-
-    fn transfer_inner_with_retry(
-        &mut self,
-        config: &CmsisDapConfig,
-        _dap_index: u8,
-        request: SwdRequest,
-        data: u32,
-    ) -> core::result::Result<u32, DapError> {
-        let mut retry_count = 0;
-        loop {
-            match SwdIo::swd_transfer(self, &config.swdio, request, data) {
-                Ok(value) => break Ok(value),
-                Err(DapError::SwdError(err)) => {
-                    if err != DAP_TRANSFER_WAIT || retry_count == config.retry_count {
-                        break Err(DapError::SwdError(err));
-                    }
-                    retry_count += 1;
-                }
-                Err(err) => break Err(err),
-            }
+            ConnectPort::Jtag => Err(DapError::NotSupported),
         }
     }
+
+    fn disconnect(&mut self, _config: &DapConfig) -> Result<(), DapError> {
+        self.disconnect();
+        Ok(())
+    }
+
+    fn swj_sequence(
+        &mut self,
+        _config: &DapConfig,
+        count: usize,
+        data: &[u8],
+    ) -> Result<(), DapError> {
+        self.write_sequence(count, data);
+        Ok(())
+    }
+
     fn swj_pins(
         &mut self,
-        _config: &CmsisDapConfig,
-        pin_output: u8,
-        pin_select: u8,
+        _config: &DapConfig,
+        output: SwjPins,
+        select: SwjPins,
         wait_us: u32,
-    ) -> core::result::Result<u8, DapError> {
+    ) -> Result<SwjPins, DapError> {
         // install swj_pins program
         self.setup_swj_pins();
 
@@ -714,37 +537,21 @@ impl<C, D, E> CmsisDapCommandInner for SwdIoSet<C, D, E> {
             let _ = self.get_context().rx_fifo.read();
         }
 
-        let pin_output = SwjPins::from_bits(pin_output).unwrap();
-        let pin_select = SwjPins::from_bits(pin_select).unwrap();
-
         // output
         let mut pio_pin_out: u32 = 0;
-        if pin_select.contains(SwjPins::TCK_SWDCLK) {
-            pio_pin_out |= if pin_output.contains(SwjPins::TCK_SWDCLK) {
-                1
-            } else {
-                0
-            } << self.clk_pin_id;
+        if select.contains(SwjPins::TCK_SWDCLK) && output.contains(SwjPins::TCK_SWDCLK) {
+            pio_pin_out |= 1 << self.clk_pin_id;
         }
-        if pin_select.contains(SwjPins::TMS_SWDIO) {
-            pio_pin_out |= if pin_output.contains(SwjPins::TMS_SWDIO) {
-                1
-            } else {
-                0
-            } << self.dat_pin_id;
+        if select.contains(SwjPins::TMS_SWDIO) && output.contains(SwjPins::TMS_SWDIO) {
+            pio_pin_out |= 1 << self.dat_pin_id;
         }
-        if pin_select.contains(SwjPins::N_RESET) {
-            pio_pin_out |= if pin_output.contains(SwjPins::N_RESET) {
-                1
-            } else {
-                0
-            } << self.rst_pin_id;
+        if select.contains(SwjPins::N_RESET) && output.contains(SwjPins::N_RESET) {
+            pio_pin_out |= 1 << self.rst_pin_id;
         }
         self.context.as_mut().unwrap().tx_fifo.write(pio_pin_out);
 
         // directions
         let pio_pin_directions = 1 << self.clk_pin_id | 0 << self.dat_pin_id | 1 << self.rst_pin_id;
-        // let pio_pin_directions:u32 = 0;
         self.context
             .as_mut()
             .unwrap()
@@ -778,24 +585,122 @@ impl<C, D, E> CmsisDapCommandInner for SwdIoSet<C, D, E> {
         // restore SWD program
         self.setup_swd();
 
-        Ok(input.bits())
+        Ok(input)
     }
 
-    fn jtag_idcode(
-        &self,
-        _config: &mut CmsisDapConfig,
-        _request: &[u8],
-        _response: &mut [u8],
-    ) -> core::result::Result<(usize, usize), DapError> {
-        Err(DapError::InvalidCommand)
-    }
-
-    fn jtag_sequence(
+    fn swj_clock(
         &mut self,
-        _config: &CmsisDapConfig,
-        _sequence_info: &JtagSequenceInfo,
-        _tdi_data: u64,
-    ) -> core::result::Result<Option<u64>, DapError> {
-        Err(DapError::InvalidCommand)
+        _config: &mut DapConfig,
+        #[allow(unused_variables)] frequency_hz: u32,
+    ) -> Result<(), DapError> {
+        #[cfg(feature = "set_clock")]
+        self.set_clock(frequency_hz);
+        Ok(())
+    }
+
+    fn swd_transfer(
+        &mut self,
+        config: &DapConfig,
+        request: SwdRequest,
+        data: u32,
+    ) -> Result<u32, DapError> {
+        let config = &config.swd;
+        // READ or WRITE operation
+        // send request
+        {
+            let mut bits = request.bits() & 0b1111;
+            bits |= (bits.count_ones() as u8 & 1) << 4;
+            bits = bits << 1 | 0x81;
+            self.write_bits(8, bits as u32);
+        }
+
+        let ack;
+        if request.contains(SwdRequest::RnW) {
+            // READ operation
+            // turnaround + recv ack.
+            ack = self.read_bits(3 + config.turn_around_cycles) as u8 >> config.turn_around_cycles
+                & 0b111;
+            if ack == DAP_TRANSFER_OK {
+                // recv data
+                let value = self.read_bits(32);
+                let parity = value.count_ones() & 1;
+                // recv parity + turnaround
+                let parity_expected = self.read_bits(1 + config.turn_around_cycles) & 1;
+                let result = match parity == parity_expected {
+                    true => Ok(value),
+                    false => Err(DapError::SwdError(DAP_TRANSFER_MISMATCH)),
+                };
+                // TODO: capture timestamp
+                self.idle_cycle(config);
+                self.to_swdio_out(true);
+                return result;
+            }
+        } else {
+            // WRITE operation
+            // turnaround + read ack + turnaround.
+            ack = self.read_bits(3 + config.turn_around_cycles * 2) as u8
+                >> config.turn_around_cycles
+                & 0b111;
+            if ack == DAP_TRANSFER_OK {
+                // send data
+                self.write_bits(32, data);
+                // send parity
+                self.write_bits(1, data.count_ones());
+                // TODO: capture timestamp
+                self.idle_cycle(config);
+                self.to_swdio_out(true);
+                return Ok(0);
+            }
+        }
+
+        // An error occured.
+        if ack == DAP_TRANSFER_WAIT || ack == DAP_TRANSFER_FAULT {
+            if config.always_generate_data_phase && request.contains(SwdRequest::RnW) {
+                self.read_bits(33);
+            }
+            if request.contains(SwdRequest::RnW) {
+                // turnaround
+                self.read_bits(config.turn_around_cycles);
+            }
+            if config.always_generate_data_phase && !request.contains(SwdRequest::RnW) {
+                self.write_bits(33, 0);
+            }
+            self.to_swdio_out(true);
+            return Err(DapError::SwdError(ack));
+        }
+
+        // Protocol error
+        self.read_bits(33);
+        if request.contains(SwdRequest::RnW) {
+            // turnaround
+            self.read_bits(config.turn_around_cycles);
+        }
+        self.to_swdio_out(true);
+        Err(DapError::SwdError(ack))
+    }
+
+    fn swd_read_bits(
+        &mut self,
+        _config: &DapConfig,
+        count: usize,
+        data: &mut [u8],
+    ) -> Result<(), DapError> {
+        self.read_sequence(count, data);
+        Ok(())
+    }
+
+    fn swd_write_bits(
+        &mut self,
+        _config: &DapConfig,
+        count: usize,
+        data: &[u8],
+    ) -> Result<(), DapError> {
+        self.write_sequence(count, data);
+        Ok(())
+    }
+
+    fn swd_output_enable(&mut self, _enable: bool) -> Result<(), DapError> {
+        // Direction switching is inherent in write_bits()/read_bits().
+        Ok(())
     }
 }
