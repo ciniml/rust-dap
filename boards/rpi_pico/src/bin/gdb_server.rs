@@ -1184,14 +1184,18 @@ impl RpTarget {
             return false; // don't interleave with flash programming
         }
         let mut moved = false;
-        // Up: target -> host CDC.
+        // Up: target -> host CDC. Read as large a contiguous run as fits the
+        // TX queue in one bulk MEM-AP transfer (256 B), so the per-poll SWD
+        // round-trips — descriptor read + RdOff write-back — are amortised
+        // over many more bytes than a 64 B chunk, lifting throughput.
         if let Some(desc) = self.rtt.up_desc {
-            if tx.capacity() - tx.len() >= 64 {
+            let room = tx.capacity() - tx.len();
+            if room >= 64 {
                 if let Ok((_, pbuf, size, wr, rd)) = self.rtt_desc(desc) {
                     if size > 0 && wr < size && rd < size && wr != rd {
                         let run = if wr > rd { wr - rd } else { size - rd };
-                        let mut chunk = [0u8; 64];
-                        let n = (run as usize).min(chunk.len());
+                        let mut chunk = [0u8; 256];
+                        let n = (run as usize).min(chunk.len()).min(room);
                         if self.arm.read_mem(pbuf + rd, &mut chunk[..n]).is_ok() {
                             for &b in &chunk[..n] {
                                 let _ = tx.enqueue(b);
