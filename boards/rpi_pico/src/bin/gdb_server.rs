@@ -86,7 +86,7 @@ fn core_tid(core: usize) -> Tid {
     Tid::new(core + 1).unwrap()
 }
 fn tid_core(tid: Tid) -> usize {
-    (tid.get() - 1).min(Family::NUM_CORES - 1)
+    (tid.get() - 1).min(MAX_CORES - 1)
 }
 
 /// Requested vCont action for one core. `Default` means "no explicit
@@ -228,6 +228,24 @@ trait TargetFamily {
     const RAM_START: u32;
     const RAM_END: u32;
 
+    // Runtime accessors for the const memory-map/topology (needed once the
+    // family is chosen at runtime by auto-detection).
+    fn num_cores(&self) -> usize {
+        Self::NUM_CORES
+    }
+    fn flash_base(&self) -> u32 {
+        Self::FLASH_BASE
+    }
+    fn flash_size(&self) -> u32 {
+        Self::FLASH_SIZE
+    }
+    fn ram_start(&self) -> u32 {
+        Self::RAM_START
+    }
+    fn ram_end(&self) -> u32 {
+        Self::RAM_END
+    }
+
     fn new() -> Self;
     /// Raw SWD connect to core 0; returns DPIDR. Retry/halt/diagnostics are
     /// handled by RpTarget.
@@ -256,10 +274,130 @@ trait TargetFamily {
     fn in_flash_mode(&self) -> bool;
 }
 
-#[cfg(feature = "gdb-target-rp2040")]
-type Family = Rp2040Family;
-#[cfg(feature = "gdb-target-nrf52")]
-type Family = Nrf52Family;
+/// The compiled-in target families. With `gdb-target-auto`, connect probes
+/// the wire and picks the matching variant at runtime; otherwise the single
+/// enabled family is used. Either way, which families exist is feature-gated.
+enum Family {
+    #[cfg(feature = "gdb-target-rp2040")]
+    Rp2040(Rp2040Family),
+    #[cfg(feature = "gdb-target-nrf52")]
+    Nrf52(Nrf52Family),
+}
+
+/// Run `$body` (which references the bound inner family `$f`) on whichever
+/// variant is active. cfg-gated arms vanish with their feature, so a
+/// single-family build compiles to a one-arm (exhaustive) match.
+macro_rules! on_family {
+    ($self:expr, $f:ident => $body:expr) => {
+        match $self {
+            #[cfg(feature = "gdb-target-rp2040")]
+            Family::Rp2040($f) => $body,
+            #[cfg(feature = "gdb-target-nrf52")]
+            Family::Nrf52($f) => $body,
+        }
+    };
+}
+
+impl Family {
+    /// Family used before the first connect / when auto-detection is off:
+    /// the first compiled-in variant (RP2040 takes priority).
+    fn default_family() -> Self {
+        #[cfg(feature = "gdb-target-rp2040")]
+        {
+            Family::Rp2040(Rp2040Family::new())
+        }
+        #[cfg(all(not(feature = "gdb-target-rp2040"), feature = "gdb-target-nrf52"))]
+        {
+            Family::Nrf52(Nrf52Family::new())
+        }
+    }
+
+    /// Whether the active family is nRF52 (gates nRF-only monitor commands).
+    #[cfg(feature = "gdb-target-nrf52")]
+    fn is_nrf52(&self) -> bool {
+        matches!(self, Family::Nrf52(_))
+    }
+
+    /// Connect, auto-detecting the target when `gdb-target-auto` is set. On
+    /// success `*self` becomes the detected family. Detection order: nRF over
+    /// plain SW-DP (matched by exact DPIDR), then RP2040 over multidrop.
+    fn connect_detect(&mut self, arm: &mut ArmDebug<Swd>) -> Result<u32, arm_debug::ArmError> {
+        #[cfg(all(feature = "gdb-target-auto", feature = "gdb-target-nrf52"))]
+        {
+            if let Ok(id) = arm.connect_swd() {
+                if id == arm_debug::nrf52::DPIDR {
+                    *self = Family::Nrf52(Nrf52Family::new());
+                    return Ok(id);
+                }
+            }
+        }
+        #[cfg(all(feature = "gdb-target-auto", feature = "gdb-target-rp2040"))]
+        {
+            // Multidrop connect only succeeds (valid DPIDR) on an RP2040.
+            if let Ok(id) = arm.connect_multidrop(rp2040::CORE0_TARGETSEL) {
+                let mut fam = Rp2040Family::new();
+                fam.cur_core = Some(0);
+                *self = Family::Rp2040(fam);
+                return Ok(id);
+            }
+        }
+        #[cfg(feature = "gdb-target-auto")]
+        {
+            Err(arm_debug::ArmError::NoTarget)
+        }
+        // Single-family build: just connect the fixed family.
+        #[cfg(not(feature = "gdb-target-auto"))]
+        {
+            self.connect(arm)
+        }
+    }
+
+    fn num_cores(&self) -> usize {
+        on_family!(self, f => f.num_cores())
+    }
+    fn flash_base(&self) -> u32 {
+        on_family!(self, f => f.flash_base())
+    }
+    fn flash_size(&self) -> u32 {
+        on_family!(self, f => f.flash_size())
+    }
+    fn ram_start(&self) -> u32 {
+        on_family!(self, f => f.ram_start())
+    }
+    fn ram_end(&self) -> u32 {
+        on_family!(self, f => f.ram_end())
+    }
+    fn connect(&mut self, arm: &mut ArmDebug<Swd>) -> Result<u32, arm_debug::ArmError> {
+        on_family!(self, f => f.connect(arm))
+    }
+    fn select_core(
+        &mut self,
+        arm: &mut ArmDebug<Swd>,
+        core: usize,
+    ) -> Result<(), arm_debug::ArmError> {
+        on_family!(self, f => f.select_core(arm, core))
+    }
+    fn forget_core(&mut self) {
+        on_family!(self, f => f.forget_core())
+    }
+    fn flash_write(
+        &mut self,
+        arm: &mut ArmDebug<Swd>,
+        addr: u32,
+        data: &[u8],
+    ) -> Result<(), arm_debug::ArmError> {
+        on_family!(self, f => f.flash_write(arm, addr, data))
+    }
+    fn flash_finish(&mut self, arm: &mut ArmDebug<Swd>) {
+        on_family!(self, f => f.flash_finish(arm))
+    }
+    fn reset_flash_state(&mut self) {
+        on_family!(self, f => f.reset_flash_state())
+    }
+    fn in_flash_mode(&self) -> bool {
+        on_family!(self, f => f.in_flash_mode())
+    }
+}
 
 // --- RP2040 family --------------------------------------------------------
 
@@ -567,7 +705,7 @@ impl RpTarget {
         self.running = [false; MAX_CORES];
         for attempt in 1u32..=4 {
             self.family.forget_core();
-            self.diag[2] = match self.family.connect(&mut self.arm) {
+            self.diag[2] = match self.family.connect_detect(&mut self.arm) {
                 Ok(dpidr) => {
                     self.diag[6] = dpidr;
                     DIAG_OK
@@ -588,7 +726,7 @@ impl RpTarget {
                 // start each session without leftover HW break/watchpoints.
                 let _ = self.arm.debug_units_clear();
                 // Bring the other cores to the same state, then return to 0.
-                for core in 1..Family::NUM_CORES {
+                for core in 1..self.family.num_cores() {
                     if self.select_core(core).is_ok() {
                         let _ = self.arm.halt();
                         let _ = self.arm.debug_units_clear();
@@ -677,7 +815,7 @@ impl RpTarget {
 
     /// Halt every core still marked running (all-stop semantics).
     fn halt_running(&mut self, except: Option<usize>) {
-        for core in 0..Family::NUM_CORES {
+        for core in 0..self.family.num_cores() {
             if Some(core) != except && self.running[core] && self.select_core(core).is_ok() {
                 let _ = self.arm.halt();
             }
@@ -702,7 +840,7 @@ impl RpTarget {
             });
         }
         let mut stopped = None;
-        for core in 0..Family::NUM_CORES {
+        for core in 0..self.family.num_cores() {
             if !self.running[core] {
                 continue;
             }
@@ -786,10 +924,12 @@ impl RpTarget {
         let id = rtt_id();
         let mut found = 0usize;
         let mut buf = [0u8; 1024 + 15];
-        let mut addr = Family::RAM_START;
-        while addr < Family::RAM_END && found < RTT_MAX_FOUND {
-            let n = 1024.min((Family::RAM_END - addr) as usize) + 15;
-            let n = n.min(buf.len()).min((Family::RAM_END - addr) as usize);
+        let ram_start = self.family.ram_start();
+        let ram_end = self.family.ram_end();
+        let mut addr = ram_start;
+        while addr < ram_end && found < RTT_MAX_FOUND {
+            let n = 1024.min((ram_end - addr) as usize) + 15;
+            let n = n.min(buf.len()).min((ram_end - addr) as usize);
             if self.arm.read_mem(addr, &mut buf[..n]).is_err() {
                 outputln!(out, "rtt: RAM read failed at 0x{:08x}", addr);
                 return;
@@ -827,7 +967,7 @@ impl RpTarget {
             Ok((_, pbuf, size, wr, rd)) => {
                 size > 0
                     && size <= 0x10000
-                    && (Family::RAM_START..Family::RAM_END).contains(&pbuf)
+                    && (self.family.ram_start()..self.family.ram_end()).contains(&pbuf)
                     && wr < size
                     && rd < size
             }
@@ -991,7 +1131,7 @@ impl MonitorCmd for RpTarget {
                 Err(e) => outputln!(out, "reset halt failed: 0x{:x}", err_code(&e)),
             },
             #[cfg(feature = "gdb-target-nrf52")]
-            b"approtect" => match self.arm.nrf52_approtect_status() {
+            b"approtect" if self.family.is_nrf52() => match self.arm.nrf52_approtect_status() {
                 Ok((open, _)) => outputln!(
                     out,
                     "approtect: {}",
@@ -1004,7 +1144,7 @@ impl MonitorCmd for RpTarget {
                 Err(e) => outputln!(out, "approtect read failed: 0x{:x}", err_code(&e)),
             },
             #[cfg(feature = "gdb-target-nrf52")]
-            b"erase_all" => {
+            b"erase_all" if self.family.is_nrf52() => {
                 // CTRL-AP ERASEALL: wipes flash+UICR+RAM, the only APPROTECT
                 // unlock. Follow with a reconnect so the session is usable.
                 outputln!(out, "erasing entire chip (flash+UICR+RAM)...");
@@ -1117,7 +1257,7 @@ impl MultiThreadBase for RpTarget {
         &mut self,
         thread_is_active: &mut dyn FnMut(Tid),
     ) -> Result<(), Self::Error> {
-        for core in 0..Family::NUM_CORES {
+        for core in 0..self.family.num_cores() {
             thread_is_active(core_tid(core));
         }
         Ok(())
@@ -1141,8 +1281,8 @@ impl MultiThreadBase for RpTarget {
         }
         // Reading the flash window requires leaving flash-command mode.
         if self.family.in_flash_mode()
-            && start >= Family::FLASH_BASE
-            && start < Family::FLASH_BASE + Family::FLASH_SIZE
+            && start >= self.family.flash_base()
+            && start < self.family.flash_base() + self.family.flash_size()
         {
             let _ = self.select_core(0);
             self.family.flash_finish(&mut self.arm);
@@ -1157,7 +1297,9 @@ impl MultiThreadBase for RpTarget {
             return Ok(());
         }
         // Writes into the flash window are programmed by the family.
-        if (Family::FLASH_BASE..Family::FLASH_BASE + Family::FLASH_SIZE).contains(&start) {
+        if (self.family.flash_base()..self.family.flash_base() + self.family.flash_size())
+            .contains(&start)
+        {
             let sel = self.select_core(0);
             let r = sel.and_then(|_| self.family.flash_write(&mut self.arm, start, data));
             return self.diag_err(r).map_err(Self::map_err);
@@ -1193,7 +1335,7 @@ impl MultiThreadResume for RpTarget {
         // Steps complete synchronously (arm.step waits for the re-halt), so
         // stepped cores are not marked running; the stop poll then reports
         // DoneStep.
-        for core in 0..Family::NUM_CORES {
+        for core in 0..self.family.num_cores() {
             let action = match self.actions[core] {
                 CoreAction::Default if self.sched_lock => continue, // stay halted
                 CoreAction::Default => CoreAction::Continue,
@@ -1291,7 +1433,7 @@ impl HwWatchpoint for RpTarget {
         kind: WatchKind,
     ) -> TargetResult<bool, Self> {
         // DWT comparators are per-core; arm both so either core traps.
-        for core in 0..Family::NUM_CORES {
+        for core in 0..self.family.num_cores() {
             self.select_core(core).map_err(Self::map_err)?;
             let ok = self
                 .arm
@@ -1315,7 +1457,7 @@ impl HwWatchpoint for RpTarget {
         kind: WatchKind,
     ) -> TargetResult<bool, Self> {
         let mut any = false;
-        for core in 0..Family::NUM_CORES {
+        for core in 0..self.family.num_cores() {
             self.select_core(core).map_err(Self::map_err)?;
             any |= self
                 .arm
@@ -1330,7 +1472,7 @@ impl RpTarget {
     /// Arm an FPB comparator for `addr` on both cores (rolls back on partial
     /// failure). Returns false when out of comparators / not breakable.
     fn fpb_set_both(&mut self, addr: u32) -> TargetResult<bool, Self> {
-        for core in 0..Family::NUM_CORES {
+        for core in 0..self.family.num_cores() {
             self.select_core(core).map_err(Self::map_err)?;
             if !self.arm.hw_breakpoint_set(addr).map_err(Self::map_err)? {
                 if core == 1 {
@@ -1345,7 +1487,7 @@ impl RpTarget {
 
     fn fpb_clear_both(&mut self, addr: u32) -> TargetResult<bool, Self> {
         let mut any = false;
-        for core in 0..Family::NUM_CORES {
+        for core in 0..self.family.num_cores() {
             self.select_core(core).map_err(Self::map_err)?;
             any |= self.arm.hw_breakpoint_clear(addr).map_err(Self::map_err)?;
         }
@@ -1622,7 +1764,7 @@ mod app {
         let target = RpTarget {
             arm,
             breakpoints: heapless::Vec::new(),
-            family: Family::new(),
+            family: Family::default_family(),
             actions: [CoreAction::Default; MAX_CORES],
             running: [false; MAX_CORES],
             stepped: None,

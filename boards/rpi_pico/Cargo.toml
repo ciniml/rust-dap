@@ -27,12 +27,17 @@ ram-exec = ["rust-dap-rp2040/ram-exec"] # Execute-in-SRAM support
 
 # --- Standalone GDB server (RSP over USB-CDC) ------------------------------
 # Stub core: gdbstub + the arm-debug ADIv5/Cortex-M stack. Target-chip
-# support is selected with a gdb-target-* feature (exactly one).
+# support is selected with one or more gdb-target-* features.
 gdbserver = ["dep:gdbstub", "dep:gdbstub_arch", "dep:arm-debug"]
 # RP2040 targets: SWD multidrop connect, dual-core threads, bootrom flashing.
 gdb-target-rp2040 = ["gdbserver"]
 # nRF52 targets: SW-DP connect, single core, NVMC flashing, CTRL-AP recovery.
 gdb-target-nrf52 = ["gdbserver"]
+# Auto-detect the target family (by DPIDR) among the enabled gdb-target-*
+# features, so one build debugs whichever single target is wired. Combine
+# with the families to include, e.g.
+#   --features gdb-target-auto,gdb-target-rp2040,gdb-target-nrf52
+gdb-target-auto = ["gdbserver"]
 # arm-debug hardware self-test firmware (m1_selftest).
 selftest = ["dep:arm-debug"]
 
