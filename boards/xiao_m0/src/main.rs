@@ -17,7 +17,7 @@
 #![no_std]
 #![no_main]
 
-use embedded_hal::digital::v2::ToggleableOutputPin;
+use embedded_hal::digital::StatefulOutputPin;
 use panic_halt as _;
 use rust_dap::bitbang::BitBangSwd;
 use rust_dap::{CmsisDap, DapConfig, DapIdentity, Delay};
@@ -25,7 +25,7 @@ use rust_dap::{USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON};
 
 use bsp::{entry, hal, pac};
 use hal::clock::GenericClockController;
-use hal::gpio::v2::{Output, Pin, PushPull};
+use hal::gpio::{Output, Pin, PushPull};
 use pac::{interrupt, CorePeripherals, Peripherals};
 use xiao_m0 as bsp;
 
@@ -42,7 +42,7 @@ mod swdio_pin;
 use swdio_pin::*;
 
 // Import pin types.
-use hal::gpio::v2::{PA02, PA05, PA07, PA18};
+use hal::gpio::{PA02, PA05, PA07, PA18};
 
 type SwdIoPin = PA05; // D9
 type SwClkPin = PA07; // D8
@@ -111,14 +111,19 @@ fn main() -> ! {
         ));
         USB_BUS = Some(
             UsbDeviceBuilder::new(bus_allocator, UsbVidPid(0x6666, 0x4444))
-                .manufacturer("fugafuga.org")
-                .product("CMSIS-DAP")
-                .serial_number("test")
+                .strings(&[
+                    usb_device::device::StringDescriptors::new(usb_device::LangID::EN_US)
+                        .manufacturer("fugafuga.org")
+                        .product("CMSIS-DAP")
+                        .serial_number("test"),
+                ])
+                .unwrap()
                 .device_class(USB_CLASS_MISCELLANEOUS)
                 .device_class(USB_SUBCLASS_COMMON)
                 .device_protocol(USB_PROTOCOL_IAD)
                 .composite_with_iads()
                 .max_packet_size_0(64)
+                .unwrap()
                 .build(),
         );
         LED = Some(pins.led1.into_push_pull_output());
