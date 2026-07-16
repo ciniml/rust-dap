@@ -25,6 +25,42 @@ swd = []
 swj = ["bitbang"] # Combined SWD+JTAG with runtime DAP_Connect switching (bit-banging)
 ram-exec = ["rust-dap-rp2040/ram-exec"] # Execute-in-SRAM support
 
+# --- Standalone GDB server (RSP over USB-CDC) ------------------------------
+# Stub core: gdbstub + the arm-debug ADIv5/Cortex-M stack. Target-chip
+# support is selected with one or more gdb-target-* features.
+gdbserver = ["dep:gdbstub", "dep:gdbstub_arch", "dep:arm-debug"]
+# RP2040 targets: SWD multidrop connect, dual-core threads, bootrom flashing.
+gdb-target-rp2040 = ["gdbserver"]
+# nRF52 targets: SW-DP connect, single core, NVMC flashing, CTRL-AP recovery.
+gdb-target-nrf52 = ["gdbserver"]
+# Auto-detect the target family (by DPIDR) among the enabled gdb-target-*
+# features, so one build debugs whichever single target is wired. Combine
+# with the families to include, e.g.
+#   --features gdb-target-auto,gdb-target-rp2040,gdb-target-nrf52
+gdb-target-auto = ["gdbserver"]
+# arm-debug hardware self-test firmware (m1_selftest).
+selftest = ["dep:arm-debug"]
+
+# gdb_server / m1_selftest are feature-gated so plain CMSIS-DAP probe builds
+# don't pull in the debugger stack. blink_demo (a demo payload for the GDB
+# debugger's target) has no extra dependencies and stays ungated.
+[[bin]]
+name = "gdb_server"
+path = "src/bin/gdb_server.rs"
+# One target family must be selected (mutually exclusive). The default build
+# picks RP2040; nRF52 needs --no-default-features --features gdb-target-nrf52.
+required-features = ["gdbserver"]
+
+[[bin]]
+name = "m1_selftest"
+path = "src/bin/m1_selftest.rs"
+required-features = ["selftest"]
+
+[[bin]]
+name = "nrf52_probe"
+path = "src/bin/nrf52_probe.rs"
+required-features = ["selftest"]
+
 [dependencies.rp-pico]
 version = "0.7"
 # Below is to take out "boot2" from the set of features.
@@ -33,6 +69,9 @@ features = ["rt", "critical-section-impl"]
 
 [dependencies]
 rust-dap = { path = "../../rust-dap" }
+arm-debug = { path = "../../arm-debug", optional = true }
+gdbstub = { version = "0.7", default-features = false, optional = true }
+gdbstub_arch = { version = "0.3", optional = true }
 rust-dap-rp2040 = { path = "../../rust-dap-rp2040" }
 panic-halt = "0.2"
 cortex-m = { version = "0.7" }
@@ -48,3 +87,4 @@ embedded-hal = { version = "0.2", features = ["unproven"] }
 defmt = { version = "0.3", optional = true }
 defmt-rtt = { version = "0.4", optional = true }
 panic-probe = { version = "0.3", features = ["print-defmt"], optional = true }
+rtt-target = "0.5"
