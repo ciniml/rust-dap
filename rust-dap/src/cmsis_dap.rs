@@ -59,6 +59,10 @@ pub(crate) enum DapInfoId {
     CmsisDapVer = 4,
     DeviceVendor = 5,
     DeviceName = 6,
+    /// Product Firmware Version (0x09): the rust-dap build the firmware was
+    /// compiled from (git revision). Distinct from CmsisDapVer, which is the
+    /// CMSIS-DAP protocol version.
+    ProductFirmwareVersion = 9,
     Capabilities = 0xf0,
     TimeStampClock = 0xf1,
     SwoBufferSize = 0xf2,

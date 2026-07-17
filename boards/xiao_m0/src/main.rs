@@ -107,6 +107,7 @@ mod app {
             DapConfig::new(
                 DapIdentity {
                     serial_number: "xiao-m0",
+                    product_firmware_version: env!("GIT_REV"),
                     ..DapIdentity::default()
                 },
                 CORE_CLOCK_HZ,

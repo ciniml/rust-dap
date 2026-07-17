@@ -1903,6 +1903,7 @@ mod app {
         let config = DapConfig::new(
             DapIdentity {
                 serial_number: "raspberry-pi-pico-gdb",
+                product_firmware_version: env!("GIT_REV"),
                 ..DapIdentity::default()
             },
             clocks.system_clock.freq().to_Hz(),

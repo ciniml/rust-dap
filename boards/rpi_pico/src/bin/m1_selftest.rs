@@ -177,6 +177,7 @@ fn main() -> ! {
     let config = DapConfig::new(
         DapIdentity {
             serial_number: "raspberry-pi-pico-m1",
+            product_firmware_version: env!("GIT_REV"),
             ..DapIdentity::default()
         },
         clocks.system_clock.freq().to_Hz(),

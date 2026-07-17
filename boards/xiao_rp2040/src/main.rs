@@ -198,6 +198,7 @@ mod app {
                 DapConfig::new(
                     DapIdentity {
                         serial_number: "xiao-rp2040",
+                        product_firmware_version: env!("GIT_REV"),
                         ..DapIdentity::default()
                     },
                     clocks.system_clock.freq().to_Hz(),

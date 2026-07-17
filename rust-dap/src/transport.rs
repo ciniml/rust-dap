@@ -54,6 +54,10 @@ pub struct DapIdentity {
     pub product: &'static str,
     pub serial_number: &'static str,
     pub firmware_version: &'static str,
+    /// DAP_Info(0x09) Product Firmware Version: the rust-dap build (git
+    /// revision) the firmware was compiled from, so a flashed device's
+    /// version can be identified without reflashing. Empty = not reported.
+    pub product_firmware_version: &'static str,
     pub packet_count: u8,
 }
 
@@ -64,6 +68,7 @@ impl Default for DapIdentity {
             product: "CMSIS-DAP",
             serial_number: "rust-dap",
             firmware_version: "2.00",
+            product_firmware_version: "",
             packet_count: 1,
         }
     }

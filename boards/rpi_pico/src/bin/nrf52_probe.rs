@@ -177,6 +177,7 @@ fn main() -> ! {
     let config = DapConfig::new(
         DapIdentity {
             serial_number: "raspberry-pi-pico-nrf52",
+            product_firmware_version: env!("GIT_REV"),
             ..DapIdentity::default()
         },
         clocks.system_clock.freq().to_Hz(),
