@@ -704,6 +704,16 @@ impl RpTarget {
         self.family.reset_flash_state();
         self.running = [false; MAX_CORES];
         for attempt in 1u32..=4 {
+            // Attempts 1-2 connect non-destructively: a connect on a live SWD
+            // link has been seen to fail once and succeed on the next try
+            // without any reset, so a healthy running target must not be reset
+            // (it would destroy the state GDB is attaching to observe). Only
+            // if those also fail has the target's program genuinely wedged the
+            // debug port — attempts 3-4 pulse the hardware SRST line to force a
+            // fresh boot state before retrying.
+            if attempt >= 3 {
+                let _ = self.arm.reset_pulse(2_000);
+            }
             self.family.forget_core();
             self.diag[2] = match self.family.connect_detect(&mut self.arm) {
                 Ok(dpidr) => {
@@ -1588,23 +1598,6 @@ impl QueueConn {
         }
         self.rx.dequeue()
     }
-    /// Drop leading ack bytes ('+'/'-') left over from the previous session.
-    /// Anything else — e.g. the next session's opening '$' packet, which can
-    /// arrive while the SWD link is being re-established — is pushed back for
-    /// the state machine, NOT discarded (a blind purge here loses the new
-    /// session's qSupported and hangs that GDB).
-    fn drop_stray_acks(&mut self) {
-        for _ in 0..500_000 {
-            match self.read_byte() {
-                Some(b'+') | Some(b'-') => {}
-                Some(other) => {
-                    self.pushback = Some(other);
-                    return;
-                }
-                None => {}
-            }
-        }
-    }
     /// Flush pending TX (bounded, in case the host stopped reading), then
     /// drop any unread RX, so a new GDB session starts with a clean channel
     /// (stale detach responses desync the next session's RSP).
@@ -1625,13 +1618,18 @@ impl Connection for QueueConn {
     fn write(&mut self, byte: u8) -> Result<(), Self::Error> {
         // If the queue is full, keep nudging the USB task to make room (it
         // preempts this priority, so progress only stalls while the host
-        // isn't reading).
-        loop {
+        // isn't reading). Bounded: if the host has stopped reading entirely
+        // the queue never drains, so cap the spins and drop the byte rather
+        // than hang the RSP task forever. A dropped byte desyncs the current
+        // session's RSP framing, but the next GDB session rebuilds the stub
+        // and purges the channel — recoverable, unlike a permanent hang.
+        for _ in 0..1_000_000 {
             match self.tx.enqueue(byte) {
                 Ok(()) => return Ok(()),
                 Err(_) => Self::kick(),
             }
         }
+        Ok(())
     }
     fn flush(&mut self) -> Result<(), Self::Error> {
         Self::kick();
@@ -1897,6 +1895,10 @@ mod app {
         while !USB_CONFIGURED.load(core::sync::atomic::Ordering::Relaxed) {}
         boot_progress(2); // USB configured
         target.connect_and_halt();
+        // Discard anything a fast-attaching GDB piled up (retransmitted
+        // qSupported) while the initial connect ran, so the first session's
+        // stub answers a single clean packet.
+        conn.purge();
         boot_progress(3); // SWD connected
 
         // One iteration per GDB session: the gdbstub state machine holds
@@ -1973,14 +1975,16 @@ mod app {
             }
             target.diag[10] = target.diag[10].wrapping_add(1); // sessions ended
                                                                // GDB detached: the state machine (and its borrow of conn) is
-                                                               // dropped. Flush the detach response and drop stale RX,
-                                                               // re-establish the SWD link + halt so the next `target remote`
-                                                               // sees a clean target state, then swallow the detach ack — but
-                                                               // keep any packet bytes: a new session may attach while the SWD
-                                                               // link is still being re-established.
+                                                               // dropped. Drop the ended session's stale RX, re-establish the
+                                                               // SWD link + halt (may be slow — it can pulse SRST to recover a
+                                                               // wedged target), then purge AGAIN: a new GDB that attached
+                                                               // during the slow reconnect will have retransmitted its opening
+                                                               // qSupported several times, and processing those stale copies
+                                                               // desyncs the RSP framing. Discarding them lets the fresh stub
+                                                               // answer GDB's next (clean) retransmit exactly once.
             conn.purge();
             target.connect_and_halt();
-            conn.drop_stray_acks();
+            conn.purge();
         }
     }
 }

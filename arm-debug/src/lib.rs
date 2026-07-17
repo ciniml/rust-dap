@@ -26,7 +26,8 @@
 #![cfg_attr(not(test), no_std)]
 
 use rust_dap::{
-    ActivePort, ConnectPort, DapConfig, DapError, DapTransport, SwdRequest, DAP_TRANSFER_WAIT,
+    ActivePort, ConnectPort, DapConfig, DapError, DapTransport, SwdRequest, SwjPins,
+    DAP_TRANSFER_WAIT,
 };
 
 /// Errors from the ARM debug layer.
@@ -333,6 +334,20 @@ impl<T: DapTransport> ArmDebug<T> {
         self.select = 0;
         self.power_up()?;
         Ok(dpidr)
+    }
+
+    /// Drive nRESET low for `wait_us`, then release it high — a hardware
+    /// reset pulse on the SRST line. Recovers a target whose running program
+    /// has wedged the debug port (SWD stops acking) by forcing it back to a
+    /// fresh boot state before the link is re-established. `swj_pins` holds
+    /// the line low for the wait, then floats it (target pull-up brings it
+    /// high). Best-effort: swj_pins failures are not fatal to the caller.
+    pub fn reset_pulse(&mut self, wait_us: u32) -> Result<(), ArmError> {
+        // output has N_RESET clear (drive low); select N_RESET so only that
+        // pin is touched.
+        self.transport
+            .swj_pins(&self.config, SwjPins::empty(), SwjPins::N_RESET, wait_us)?;
+        Ok(())
     }
 
     /// JTAG-to-SWD select sequence: the 16-bit code 0xE79E (LSB-first).
