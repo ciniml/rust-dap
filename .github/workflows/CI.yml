@@ -12,7 +12,7 @@ jobs:
     strategy:
       max-parallel: 2
       matrix:
-        projects: ["rust-dap", "rust-dap-rp2040", "uart-test", "boards/rpi_pico", "boards/xiao_m0", "boards/xiao_rp2040"]
+        projects: ["rust-dap", "arm-debug", "rust-dap-rp2040", "uart-test", "boards/rpi_pico", "boards/xiao_m0", "boards/xiao_rp2040"]
     container:
       image: rust:1.90-slim-bookworm
     steps:
@@ -25,6 +25,9 @@ jobs:
       - name: install package dependencies
         run: apt-get update && apt-get -y install pkg-config libudev-dev
         if: ${{ matrix.projects == 'uart-test' }}
+      - name: install git (build.rs embeds the git revision into GIT_REV)
+        run: apt-get update && apt-get -y install git
+        if: ${{ startsWith(matrix.projects, 'boards') }}
       - name: cargo fmt for ${{ matrix.projects }}
         run: cargo fmt --all -- --check
         working-directory: ${{ matrix.projects }}
@@ -37,5 +40,12 @@ jobs:
           cargo clippy --features swd
           cargo clippy --features swd,bitbang
           cargo clippy --no-default-features --features jtag
+          cargo clippy --bin gdb_server --features gdb-target-auto,gdb-target-rp2040,gdb-target-nrf52,gdb-target-nrf54
+          cargo clippy --bin m1_selftest --features selftest
+          cargo clippy --bin nrf52_probe --features selftest
         working-directory: ${{ matrix.projects }}
         if: ${{ matrix.projects  == 'boards/rpi_pico' }}
+      - name: cargo test for ${{ matrix.projects }}
+        run: cargo test
+        working-directory: ${{ matrix.projects }}
+        if: ${{ matrix.projects == 'rust-dap' || matrix.projects == 'arm-debug' }}
