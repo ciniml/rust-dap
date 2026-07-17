@@ -636,6 +636,24 @@ RAM 0x20000000 読み OK)を再現。移行の機能は確定。ただし:
 connect 失敗が同一)。dep-bump のマージ可否とは切り離し、別途対応が妥当。
 RP2040 フル回帰は「ターゲットに安定プログラムを焼いた状態」で再実施が必要。
 
+**解決(connect-under-reset + RSP 堅牢化、commit ac6a53e)**: 上記の堅牢性課題を
+修正し、フル回帰を実機で完走:
+- `ArmDebug::reset_pulse()`(SRST を low→release)を追加。connect_and_halt の
+  attempt 3-4 で HW リセットパルスを打ち、program が debug port を wedge した
+  ターゲットを fresh boot に戻す(attempt 1-2 は非破壊のまま=healthy な稼働中
+  ターゲットはリセットしない)。**要 GPIO4↔ターゲット RUN 配線**(当初未配線
+  だったため機能せず、配線後に復旧を確認)。
+- 再接続経路で purge を connect_and_halt の**後**に移動。遅い再接続中に GDB が
+  再送した qSupported の重複が RSP framing を desync させていたのを、破棄して
+  fresh stub が次のクリーン再送に 1 回だけ応答するよう修正。boot 時も同様。
+- `QueueConn::write()` の満杯スピンを bounded 化(ホスト無読取時のハング防止)。
+実機結果(RP2040、dep-bump firmware): **reattach 0/5 → 3/3**、E2E(RAM 書込・
+レジスタ r/w・stepi・hbreak・continue)PASS、**GDB load**(5 セクション、
+compare-sections 全一致)PASS、monitor reset / reset halt PASS。
+残: RTT は RTT 制御ブロックを持つターゲットプログラムが必要(blink_demo には
+無いため未実施。nRF52 では別途確認済み)。この個体では resume 後の通常再接続が
+必ず失敗し reset を要する(attempts=3)ため reattach は毎回リセットを伴う。
+
 未対応: PIO `from_program` deprecation(shift 方向要確認のため据え置き)、
 xiao_m0 は entry ベースのまま(RTIC 版は branch xiao-m0-rtic、要統合)、
 RP2040 フル回帰(ターゲット復旧待ち)。
