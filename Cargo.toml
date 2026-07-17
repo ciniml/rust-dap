@@ -6,22 +6,17 @@ members = [
     "rust-dap-rp2040",
     "boards/rpi_pico",
     "boards/xiao_rp2040",
+    "boards/xiao_m0",
     "uart-test",
 ]
 # `cargo build`/`cargo test` at the workspace root operate on the host
 # testable crate only; boards are built from their own directories so that
 # their .cargo/config.toml (target, runner, rustflags) applies.
 default-members = ["rust-dap"]
-# boards/xiao_m0 cannot join the workspace: it needs cortex-m-rt 0.6 (via
-# the xiao_m0 0.11 BSP) while the RP2040 crates need 0.7, and cortex-m-rt's
-# `links` attribute allows only one version per workspace. It keeps its own
-# Cargo.lock until its BSP is updated.
-#
 # Untracked working directories (git worktrees etc.) that live inside the
 # repository root must be excluded, otherwise cargo refuses to build them
 # because they are not workspace members.
 exclude = [
-    "boards/xiao_m0",
     "14-rp2040_boards",
     "17-english",
     "18-pico-pins",
