@@ -720,3 +720,27 @@ nrf54-support / xiao-m0-rtic / dep-bump-usb-device-0.3 を単一 `integration`
 
 残: xiao_m0 / nRF54 の実機動作確認(実機入手/配線時)、RTT 連続ソースでの
 スループット実測。
+
+## 追記29: 全ボード RTIC 1.0 → 2.0 移行(2026-07-18)
+
+`cortex-m-rtic 1.0` → `rtic 2`(`thumbv6-backend`)を全 RTIC アプリに適用:
+rpi_pico(main + gdb_server)、xiao_rp2040、xiao_m0。
+
+**API 変更**:
+- `init` の戻り値が `(Shared, Local)`(Monotonics 廃止)。
+- software task(dap_process / process)は `async fn` 化。RTIC 2 では per-task
+  `capacity` が廃止(未実行タスクへの spawn は coalesce される)。
+- hardware(binds)task と `#[idle]` は変更なし。
+- thumbv6m は atomic CAS を持たないため RTIC 2 が portable-atomic を要求。
+  その `critical-section` feature を有効化(RP2040 は rp2040-hal の CS impl、
+  SAMD21 は cortex-m `critical-section-single-core` が実体)。
+
+**検証**:
+| # | 項目 | 結果 |
+|---|---|---|
+| 1 | host tests(arm-debug 28 / rust-dap 12) | 全パス |
+| 2 | rpi_pico 全 bin + xiao_rp2040 + xiao_m0 ビルド | OK |
+| 3 | cargo fmt --check | clean |
+| 4 | 実機(RP2040 gdb_server RTIC 2.0): デュアルコア attach + RAM write/readback | OK |
+
+これにより当初「1.0 維持」としていた方針を変更し、全ボードを RTIC 2.0 に統一。
