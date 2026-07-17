@@ -13,7 +13,10 @@ xiao_m0 = { version = "0.13", features = ["usb"] }
 panic-halt = "0.2"
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7"
-cortex-m-rtic = "1.0"
+rtic = { version = "2", features = ["thumbv6-backend"] }
+# thumbv6m has no atomic CAS; RTIC 2 relies on portable-atomic emulating it
+# through the cortex-m critical-section-single-core implementation above.
+portable-atomic = { version = "1", features = ["critical-section"] }
 
 usb-device = { version = "0.3", features = ["control-buffer-256"] }
 usbd-serial = "0.2"

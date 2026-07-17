@@ -1844,7 +1844,7 @@ mod app {
         rtt_rx_queue: heapless::spsc::Queue<u8, RTT_RX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
         USB_ALLOCATOR: Option<UsbBusAllocator<hal::usb::UsbBus>> = None,
     ])]
-    fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
+    fn init(ctx: init::Context) -> (Shared, Local) {
         let mut resets = ctx.device.RESETS;
         let mut watchdog = hal::Watchdog::new(ctx.device.WATCHDOG);
         let sio = hal::Sio::new(ctx.device.SIO);
@@ -1964,7 +1964,6 @@ mod app {
                 rtt_tx_prod,
                 rtt_rx_cons,
             },
-            init::Monotonics(),
         )
     }
 

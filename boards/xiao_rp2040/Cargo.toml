@@ -25,7 +25,10 @@ panic-halt = "0.2"
 cortex-m = "0.7"
 cortex-m-rt = "0.7"
 rp2040-boot2 = "0.2"
-cortex-m-rtic = "1.0"
+rtic = { version = "2", features = ["thumbv6-backend"] }
+# thumbv6m has no atomic CAS; RTIC 2 relies on portable-atomic emulating it
+# through the critical-section implementation provided by rp2040-hal.
+portable-atomic = { version = "1", features = ["critical-section"] }
 
 usb-device = { version = "0.3", features = ["control-buffer-256"]}
 usbd-serial = "0.2"

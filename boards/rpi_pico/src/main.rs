@@ -160,7 +160,7 @@ mod app {
         uart_tx_queue: heapless::spsc::Queue<u8, UART_TX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
         USB_ALLOCATOR: Option<UsbBusAllocator<UsbBus>> = None,
         ])]
-    fn init(c: init::Context) -> (Shared, Local, init::Monotonics) {
+    fn init(c: init::Context) -> (Shared, Local) {
         let mut resets = c.device.RESETS;
         let sio = hal::Sio::new(c.device.SIO);
         let pins = rp_pico::Pins::new(
@@ -425,7 +425,6 @@ mod app {
                 debug_irq_out,
                 debug_usb_irq_out,
             },
-            init::Monotonics(),
         )
     }
 
@@ -482,8 +481,8 @@ mod app {
     /// Processes CMSIS-DAP commands outside of the USB interrupt so that long
     /// SWD/JTAG transfers (transfer retries, DAP_SWJ_Pins waits, etc.) cannot
     /// block the UART interrupt.
-    #[task(priority = 1, capacity = 2, shared = [usb_dap])]
-    fn dap_process(mut c: dap_process::Context) {
+    #[task(priority = 1, shared = [usb_dap])]
+    async fn dap_process(mut c: dap_process::Context) {
         c.shared.usb_dap.lock(|usb_dap| {
             usb_dap.process().ok();
         });

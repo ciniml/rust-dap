@@ -74,7 +74,7 @@ mod app {
     }
 
     #[init(local = [usb_allocator: Option<UsbBusAllocator<UsbBus>> = None])]
-    fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
+    fn init(ctx: init::Context) -> (Shared, Local) {
         let mut peripherals = ctx.device;
         let mut clocks = GenericClockController::with_internal_32kosc(
             peripherals.GCLK,
@@ -137,7 +137,6 @@ mod app {
                 usb_dap,
             },
             Local { led },
-            init::Monotonics(),
         )
     }
 
@@ -165,9 +164,10 @@ mod app {
         process::spawn().ok();
     }
 
-    /// Execute a pending DAP command outside the USB interrupt.
+    /// Execute a pending DAP command outside the USB interrupt. RTIC 2
+    /// software tasks are async; this one has no await points.
     #[task(priority = 1, shared = [usb_dap])]
-    fn process(mut ctx: process::Context) {
+    async fn process(mut ctx: process::Context) {
         ctx.shared.usb_dap.lock(|dap| {
             let _ = dap.process();
         });
