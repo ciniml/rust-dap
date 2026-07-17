@@ -691,3 +691,32 @@ compare-sections 全一致)PASS、monitor reset / reset halt PASS。
 未対応: PIO `from_program` deprecation(shift 方向要確認のため据え置き)、
 xiao_m0 は entry ベースのまま(RTIC 版は branch xiao-m0-rtic、要統合)、
 RP2040 フル回帰(ターゲット復旧待ち)。
+
+## 追記28: 3ブランチ統合(integration ブランチ)(2026-07-17)
+
+nrf54-support / xiao-m0-rtic / dep-bump-usb-device-0.3 を単一 `integration`
+ブランチへ統合。全て同一 merge-base(main 2ea3b28)からの独立ブランチ。
+
+**統合順序と衝突**:
+1. ベース = dep-bump(依存 bump + connect-under-reset 堅牢化、最も広範)。
+2. nrf54-support をマージ: **コードは全て auto-merge**(nRF54 の追加は
+   family/arm-debug 層にあり e-hal 移行部と非干渉)。衝突は doc のみ(追記26/27
+   を番号順に union)。
+3. xiao-m0-rtic をマージ: `boards/xiao_m0/{Cargo.toml,src/main.rs}` が衝突。
+   RTIC 再構成を BSP 0.13 / usb-device 0.3 / e-hal 1.0 の上に手動再適用
+   (gpio v2→flat、strings API、StatefulOutputPin、cortex-m-rtic 1.0 追加)。
+   xiao_m0 は BSP 0.13 で cortex-m-rt 0.7 になりワークスペースに再統合可能
+   (xiao-m0-rtic の workspace 参加 + build.rs + 統合 Cargo.lock を採用)。
+
+**統合後の検証**:
+| # | 項目 | 結果 |
+|---|---|---|
+| 1 | host tests(arm-debug 28 / rust-dap 12) | 全パス |
+| 2 | gdb_server 全 family(auto/rp2040/nrf52/nrf54) | ビルド OK |
+| 3 | rpi_pico 全 bin(gdb_server/blink_demo/m1_selftest/nrf52_probe) | ビルド OK |
+| 4 | xiao_rp2040 / xiao_m0(RTIC+BSP0.13) | ビルド OK |
+| 5 | cargo fmt --check(ワークスペース) | clean |
+| 6 | 統合 firmware 実機 attach(RP2040 デュアルコア検出) | OK |
+
+残: xiao_m0 / nRF54 の実機動作確認(実機入手/配線時)、RTT 連続ソースでの
+スループット実測。
