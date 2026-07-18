@@ -194,7 +194,7 @@ where
         // Initialize and start PIO
         let (mut pio, sm0, _, _, _) = pio0.split(resets);
         let installed = pio.install(&program).unwrap();
-        let (sm, rx, tx) = hal::pio::PIOBuilder::from_program(installed)
+        let (sm, rx, tx) = hal::pio::PIOBuilder::from_installed_program(installed)
             .set_pins(tms_pin_id, 1)
             .side_set_pin_base(tck_pin_id)
             .out_pins(tdi_pin_id, 1)
@@ -251,7 +251,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
         core::mem::swap(&mut self.context, &mut context);
         let context = context.unwrap();
         let (sm0, installed) = context.running_sm.uninit(context.rx_fifo, context.tx_fifo);
-        let (sm, rx, tx) = hal::pio::PIOBuilder::from_program(installed)
+        let (sm, rx, tx) = hal::pio::PIOBuilder::from_installed_program(installed)
             .set_pins(self.tms_pin_id, 1)
             .side_set_pin_base(self.tck_pin_id)
             .out_pins(self.tdi_pin_id, 1)
@@ -291,7 +291,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
         let mut pio = context.pio;
         pio.uninstall(installed);
         let installed = pio.install(&swj_pins_program()).unwrap();
-        let (sm, rx_fifo, tx_fifo) = hal::pio::PIOBuilder::from_program(installed)
+        let (sm, rx_fifo, tx_fifo) = hal::pio::PIOBuilder::from_installed_program(installed)
             .set_pins(0, 1)
             .side_set_pin_base(0)
             .out_pins(0, 32)
@@ -320,7 +320,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
         pio.uninstall(installed);
         let installed = pio.install(&jtag_pin_set()).unwrap();
         let divisor = crate::pio::DEFAULT_PIO_DIVISOR;
-        let (sm, rx_fifo, tx_fifo) = hal::pio::PIOBuilder::from_program(installed)
+        let (sm, rx_fifo, tx_fifo) = hal::pio::PIOBuilder::from_installed_program(installed)
             .set_pins(0, 1)
             .side_set_pin_base(0)
             .out_pins(0, 32)
@@ -349,7 +349,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
         pio.uninstall(installed);
         let installed = pio.install(&jtag_sequence_program()).unwrap();
         let divisor = self.divisor;
-        let (sm, rx_fifo, tx_fifo) = hal::pio::PIOBuilder::from_program(installed)
+        let (sm, rx_fifo, tx_fifo) = hal::pio::PIOBuilder::from_installed_program(installed)
             .set_pins(self.tms_pin_id, 1)
             .side_set_pin_base(self.tck_pin_id)
             .out_pins(self.tdi_pin_id, 1)
