@@ -744,3 +744,30 @@ rpi_pico(main + gdb_server)、xiao_rp2040、xiao_m0。
 | 4 | 実機(RP2040 gdb_server RTIC 2.0): デュアルコア attach + RAM write/readback | OK |
 
 これにより当初「1.0 維持」としていた方針を変更し、全ボードを RTIC 2.0 に統一。
+
+## 追記30: RTT スループット実測 + PIO from_program + DAP_Info(0x09)(2026-07-18)
+
+**PIO `from_program` → `from_installed_program`**: rp2040-hal 0.10 の deprecation を
+swd/jtag の 6 箇所で解消。両経路とも `out/in_shift_direction(Right)` を明示設定済み
+のため rename のみで挙動不変。DAP_Info(0x09) が pyocd で応答することで PIO SWD
+firmware + CMSIS-DAP レイヤの動作を確認。
+
+**Issue #63 DAP_Info(0x09) Product Firmware Version**: 実機検証。probe に main
+CMSIS-DAP firmware(PIO SWD)を焼き、pyocd の `PRODUCT_FW_VERSION`(0x09)問い合わせで
+`f8f16b5-dirty`(ビルド時の git rev)を取得。build.rs は commit 毎に GIT_REV を更新
+(`.git/logs/HEAD` 監視)、未追跡ファイルは dirty 判定から除外。
+
+**RTT アップストリーム スループット実測**: 連続 RTT 出力ターゲット(rtt_blast、
+4KB up-buffer BlockIfFull、`_SEGGER_RTT` @ 0x20000000)を gdb_server の `load` で
+ターゲットへ書込。`UpChannel::write` に hbreak → CB 書込確定 → `monitor rtt attach
+0x20000000` → `continue` 中に第2 CDC(RTT ポート)のバイト毎秒を計測(bitbang SWD、
+default clock、RP2040)。
+
+| チャンクサイズ | スループット |
+|---|---|
+| 64 B(旧) | 18.6 KiB/s |
+| **256 B(現・追記26 の最適化)** | **45.9 KiB/s** |
+
+→ **2.47 倍**。nrf54-support の 64→256B チャンク拡大(記述子読み+RdOff 書戻しの固定
+往復をより多くのペイロードで償却)が実機で有効であることを定量確認。3 サンプルとも
+±0.1 KiB/s で安定。
