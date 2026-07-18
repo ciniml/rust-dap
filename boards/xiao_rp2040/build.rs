@@ -8,6 +8,15 @@ use std::process::Command;
 /// changes) as `GIT_REV`, so the firmware can report it via DAP_Info(0x09)
 /// Product Firmware Version. Falls back to "unknown" outside a git checkout.
 fn emit_git_rev() {
+    // An explicit override (e.g. a CI release passing the tag name) wins over
+    // the git lookup — a container checkout may have no .git directory.
+    println!("cargo:rerun-if-env-changed=RUST_DAP_VERSION");
+    if let Ok(v) = env::var("RUST_DAP_VERSION") {
+        if !v.is_empty() {
+            println!("cargo:rustc-env=GIT_REV={v}");
+            return;
+        }
+    }
     let rev = Command::new("git")
         .args(["rev-parse", "--short=7", "HEAD"])
         .output()
