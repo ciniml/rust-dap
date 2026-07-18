@@ -33,16 +33,20 @@ fn emit_git_rev() {
         None => "unknown".to_string(),
     };
     println!("cargo:rustc-env=GIT_REV={git_rev}");
-    // Re-run when the checked-out commit moves.
-    if let Some(head) = Command::new("git")
-        .args(["rev-parse", "--git-path", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
-        println!("cargo:rerun-if-changed={head}");
+    // Re-run when the checked-out commit moves. `.git/HEAD` only changes on a
+    // branch switch, so also watch `.git/logs/HEAD`, which the reflog updates
+    // on every commit/reset — otherwise GIT_REV stays cached across commits.
+    for path in ["HEAD", "logs/HEAD"] {
+        if let Some(p) = Command::new("git")
+            .args(["rev-parse", "--git-path", path])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|s| !s.is_empty())
+        {
+            println!("cargo:rerun-if-changed={p}");
+        }
     }
 }
 
