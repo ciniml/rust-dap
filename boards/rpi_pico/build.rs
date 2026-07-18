@@ -18,7 +18,7 @@ fn emit_git_rev() {
     let git_rev = match rev {
         Some(rev) => {
             let dirty = Command::new("git")
-                .args(["status", "--porcelain"])
+                .args(["status", "--porcelain", "--untracked-files=no"])
                 .output()
                 .ok()
                 .filter(|o| o.status.success())
