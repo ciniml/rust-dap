@@ -1,0 +1,58 @@
+name: Release
+
+# Push a version tag (e.g. `v1.2.3`) to build every firmware and attach the
+# ELF/UF2 artifacts to a GitHub Release. The tag name is embedded into the
+# firmware (DAP_Info 0x09 Product Firmware Version) via RUST_DAP_VERSION.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.90-slim-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      - name: install build dependencies
+        run: |
+          apt-get update && apt-get -y install git
+          rustup target add thumbv6m-none-eabi
+          cargo install elf2uf2-rs --locked
+      - name: build firmwares
+        env:
+          # Reported by the firmware via DAP_Info(0x09); the container checkout
+          # may lack a .git dir, so pass the tag explicitly.
+          RUST_DAP_VERSION: ${{ github.ref_name }}
+        run: |
+          (cd boards/rpi_pico && cargo build --release --bin rust-dap-raspberrypi-pico)
+          (cd boards/rpi_pico && cargo build --release --bin gdb_server \
+             --features gdb-target-auto,gdb-target-rp2040,gdb-target-nrf52,gdb-target-nrf54)
+          (cd boards/xiao_rp2040 && cargo build --release)
+          (cd boards/xiao_m0 && cargo build --release)
+      - name: package artifacts
+        run: |
+          set -eu
+          mkdir -p dist
+          T=target/thumbv6m-none-eabi/release
+          V=${GITHUB_REF_NAME}
+          # RP2040 boards: ELF (debug/flash-via-probe) + UF2 (drag-and-drop).
+          cp "$T/rust-dap-raspberrypi-pico" "dist/rust-dap-cmsis-dap-rpi-pico-$V.elf"
+          elf2uf2-rs "$T/rust-dap-raspberrypi-pico" "dist/rust-dap-cmsis-dap-rpi-pico-$V.uf2"
+          cp "$T/gdb_server" "dist/rust-dap-gdb-server-rpi-pico-$V.elf"
+          elf2uf2-rs "$T/gdb_server" "dist/rust-dap-gdb-server-rpi-pico-$V.uf2"
+          cp "$T/rust-dap-xiao-rp2040" "dist/rust-dap-cmsis-dap-xiao-rp2040-$V.elf"
+          elf2uf2-rs "$T/rust-dap-xiao-rp2040" "dist/rust-dap-cmsis-dap-xiao-rp2040-$V.uf2"
+          # SAMD21 (xiao_m0): ELF only — UF2 uses a different family id.
+          cp "$T/rust-dap-xiao" "dist/rust-dap-cmsis-dap-xiao-m0-$V.elf"
+          ls -la dist
+      - name: create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
