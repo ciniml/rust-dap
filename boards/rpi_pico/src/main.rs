@@ -47,7 +47,7 @@ mod app {
     use {defmt_rtt as _, panic_probe as _};
 
     use hal::clocks::Clock;
-    use hal::gpio::{Output, Pin, PushPull};
+    use hal::gpio::{FunctionSioOutput, FunctionUart, Pin, PullDown};
     use hal::pac;
     use rp_pico::hal;
 
@@ -57,7 +57,7 @@ mod app {
     use usb_device::prelude::*;
     use usbd_serial::SerialPort;
 
-    use embedded_hal::digital::v2::{OutputPin, ToggleableOutputPin};
+    use embedded_hal::digital::{OutputPin, StatefulOutputPin};
 
     use rust_dap_rp2040::line_coding::*;
     use rust_dap_rp2040::util::UartConfigAndClock;
@@ -127,8 +127,8 @@ mod app {
     const UART_TX_QUEUE_SIZE: usize = 128;
     // UART Shared context
     type UartPins = (
-        hal::gpio::Pin<GpioUartTx, hal::gpio::Function<hal::gpio::Uart>>,
-        hal::gpio::Pin<GpioUartRx, hal::gpio::Function<hal::gpio::Uart>>,
+        hal::gpio::Pin<GpioUartTx, FunctionUart, PullDown>,
+        hal::gpio::Pin<GpioUartRx, FunctionUart, PullDown>,
     );
     use rust_dap_rp2040::bridge::{self, UartReader, UartWriter};
 
@@ -148,11 +148,11 @@ mod app {
         uart_config: UartConfigAndClock,
         uart_rx_producer: heapless::spsc::Producer<'static, u8, UART_RX_QUEUE_SIZE>,
         usb_bus: UsbDevice<'static, UsbBus>,
-        usb_led: Pin<GpioUsbLed, Output<PushPull>>,
-        idle_led: Pin<GpioIdleLed, Output<PushPull>>,
-        debug_out: Pin<GpioDebugOut, Output<PushPull>>,
-        debug_irq_out: Pin<GpioDebugIrqOut, Output<PushPull>>,
-        debug_usb_irq_out: Pin<GpioDebugUsbIrqOut, Output<PushPull>>,
+        usb_led: Pin<GpioUsbLed, FunctionSioOutput, PullDown>,
+        idle_led: Pin<GpioIdleLed, FunctionSioOutput, PullDown>,
+        debug_out: Pin<GpioDebugOut, FunctionSioOutput, PullDown>,
+        debug_irq_out: Pin<GpioDebugIrqOut, FunctionSioOutput, PullDown>,
+        debug_usb_irq_out: Pin<GpioDebugUsbIrqOut, FunctionSioOutput, PullDown>,
     }
 
     #[init(local = [
@@ -160,7 +160,7 @@ mod app {
         uart_tx_queue: heapless::spsc::Queue<u8, UART_TX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
         USB_ALLOCATOR: Option<UsbBusAllocator<UsbBus>> = None,
         ])]
-    fn init(c: init::Context) -> (Shared, Local, init::Monotonics) {
+    fn init(c: init::Context) -> (Shared, Local) {
         let mut resets = c.device.RESETS;
         let sio = hal::Sio::new(c.device.SIO);
         let pins = rp_pico::Pins::new(
@@ -184,8 +184,8 @@ mod app {
         .unwrap();
 
         let uart_pins = (
-            pins.gpio0.into_mode::<hal::gpio::FunctionUart>(), // TxD
-            pins.gpio1.into_mode::<hal::gpio::FunctionUart>(), // RxD
+            pins.gpio0.into_function::<hal::gpio::FunctionUart>(), // TxD
+            pins.gpio1.into_function::<hal::gpio::FunctionUart>(), // RxD
         );
         let uart_config = UartConfigAndClock {
             config: UartConfig::from(hal::uart::UartConfig::default()),
@@ -231,6 +231,7 @@ mod app {
                 DapConfig::new(
                     DapIdentity {
                         serial_number: "raspberry-pi-pico-swd",
+                        product_firmware_version: env!("GIT_REV"),
                         ..DapIdentity::default()
                     },
                     clocks.system_clock.freq().to_Hz(),
@@ -245,11 +246,9 @@ mod app {
             // Initialize MCU reset pin.
             // RESET pin of Cortex Debug 10-pin connector is negative logic
             // https://developer.arm.com/documentation/101453/0100/CoreSight-Technology/Connectors
-            let reset_pin = pins.gpio4.into_floating_input();
-
-            let mut swclk_pin = pins.gpio2.into_mode();
-            let mut swdio_pin = pins.gpio3.into_mode();
-            let mut reset_pin = reset_pin.into_mode();
+            let mut swclk_pin = pins.gpio2.into_function::<hal::gpio::FunctionPio0>();
+            let mut swdio_pin = pins.gpio3.into_function::<hal::gpio::FunctionPio0>();
+            let mut reset_pin = pins.gpio4.into_function::<hal::gpio::FunctionPio0>();
             swclk_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
             swdio_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
             reset_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
@@ -265,6 +264,7 @@ mod app {
                 DapConfig::new(
                     DapIdentity {
                         serial_number: "raspberry-pi-pico-swd",
+                        product_firmware_version: env!("GIT_REV"),
                         ..DapIdentity::default()
                     },
                     clocks.system_clock.freq().to_Hz(),
@@ -302,6 +302,7 @@ mod app {
                 DapConfig::new(
                     DapIdentity {
                         serial_number: "raspberry-pi-pico-jtag",
+                        product_firmware_version: env!("GIT_REV"),
                         ..DapIdentity::default()
                     },
                     clocks.system_clock.freq().to_Hz(),
@@ -314,12 +315,12 @@ mod app {
             use rust_dap::{DapConfig, DapIdentity};
             use rust_dap_rp2040::util::UsbIdentity;
             // PIO
-            let mut tck_pin = pins.gpio2.into_mode();
-            let mut tms_pin = pins.gpio3.into_mode();
-            let mut tdo_pin = pins.gpio5.into_mode();
-            let mut tdi_pin = pins.gpio6.into_mode();
-            let mut trst_pin = pins.gpio7.into_mode();
-            let mut srst_pin = pins.gpio4.into_mode();
+            let mut tck_pin = pins.gpio2.into_function::<hal::gpio::FunctionPio0>();
+            let mut tms_pin = pins.gpio3.into_function::<hal::gpio::FunctionPio0>();
+            let mut tdo_pin = pins.gpio5.into_function::<hal::gpio::FunctionPio0>();
+            let mut tdi_pin = pins.gpio6.into_function::<hal::gpio::FunctionPio0>();
+            let mut trst_pin = pins.gpio7.into_function::<hal::gpio::FunctionPio0>();
+            let mut srst_pin = pins.gpio4.into_function::<hal::gpio::FunctionPio0>();
             tck_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
             tms_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
             tdo_pin.set_slew_rate(hal::gpio::OutputSlewRate::Fast);
@@ -346,6 +347,7 @@ mod app {
                 DapConfig::new(
                     DapIdentity {
                         serial_number: "raspberry-pi-pico-jtag",
+                        product_firmware_version: env!("GIT_REV"),
                         ..DapIdentity::default()
                     },
                     clocks.system_clock.freq().to_Hz(),
@@ -386,6 +388,7 @@ mod app {
                 DapConfig::new(
                     DapIdentity {
                         serial_number: "raspberry-pi-pico-swj",
+                        product_firmware_version: env!("GIT_REV"),
                         ..DapIdentity::default()
                     },
                     clocks.system_clock.freq().to_Hz(),
@@ -427,7 +430,6 @@ mod app {
                 debug_irq_out,
                 debug_usb_irq_out,
             },
-            init::Monotonics(),
         )
     }
 
@@ -484,8 +486,8 @@ mod app {
     /// Processes CMSIS-DAP commands outside of the USB interrupt so that long
     /// SWD/JTAG transfers (transfer retries, DAP_SWJ_Pins waits, etc.) cannot
     /// block the UART interrupt.
-    #[task(priority = 1, capacity = 2, shared = [usb_dap])]
-    fn dap_process(mut c: dap_process::Context) {
+    #[task(priority = 1, shared = [usb_dap])]
+    async fn dap_process(mut c: dap_process::Context) {
         c.shared.usb_dap.lock(|usb_dap| {
             usb_dap.process().ok();
         });

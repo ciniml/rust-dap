@@ -114,6 +114,9 @@ impl Dispatcher {
                 DapInfoId::Product => write_str(buffer, identity.product)?,
                 DapInfoId::SerialNumber => write_str(buffer, identity.serial_number)?,
                 DapInfoId::CmsisDapVer => write_str(buffer, identity.firmware_version)?,
+                DapInfoId::ProductFirmwareVersion => {
+                    write_str(buffer, identity.product_firmware_version)?
+                }
                 DapInfoId::Capabilities => {
                     let capabilities = transport.capabilities();
                     let bits = capabilities.bits().to_le_bytes();
@@ -898,6 +901,7 @@ mod test {
         let mut d = Dispatcher::new(DapConfig {
             identity: crate::transport::DapIdentity {
                 vendor: "TestVendor",
+                product_firmware_version: "abc1234",
                 ..Default::default()
             },
             ..Default::default()
@@ -909,6 +913,12 @@ mod test {
             .unwrap();
         assert_eq!((req, len), (1, 1 + 10));
         assert_eq!(&resp[1..11], b"TestVendor");
+        // Product Firmware Version (0x09): git revision string
+        let (_, len) = d
+            .execute(&mut t, 64, DapCommandId::Info, &[0x09], &mut resp)
+            .unwrap();
+        assert_eq!(len, 1 + 7);
+        assert_eq!(&resp[1..8], b"abc1234");
         // PacketSize reflects MAX_PACKET_SIZE
         let (_, len) = d
             .execute(&mut t, 512, DapCommandId::Info, &[0xff], &mut resp)

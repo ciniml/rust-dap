@@ -159,9 +159,13 @@ fn main() -> ! {
     ));
     let mut serial = SerialPort::new(&usb_allocator);
     let mut usb_dev = UsbDeviceBuilder::new(&usb_allocator, UsbVidPid(0x6666, 0x4444))
-        .manufacturer("fugafuga.org")
-        .product("rust-dap M1 self-test")
-        .serial_number("raspberry-pi-pico-m1")
+        .strings(&[
+            usb_device::device::StringDescriptors::new(usb_device::LangID::EN_US)
+                .manufacturer("fugafuga.org")
+                .product("rust-dap M1 self-test")
+                .serial_number("raspberry-pi-pico-m1"),
+        ])
+        .unwrap()
         .device_class(usbd_serial::USB_CLASS_CDC)
         .build();
 
@@ -173,6 +177,7 @@ fn main() -> ! {
     let config = DapConfig::new(
         DapIdentity {
             serial_number: "raspberry-pi-pico-m1",
+            product_firmware_version: env!("GIT_REV"),
             ..DapIdentity::default()
         },
         clocks.system_clock.freq().to_Hz(),

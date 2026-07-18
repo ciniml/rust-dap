@@ -1,5 +1,5 @@
 use rust_dap::bitbang::BidirPin;
-use xiao_m0::hal::gpio::v2::pin::{Floating, Input, Output, Pin, PinId, PushPull};
+use xiao_m0::hal::gpio::{Floating, Input, Output, Pin, PinId, PushPull};
 
 /// Bidirectional pin backed by the atsamd-hal type-state GPIO API.
 /// Holds the pin as an enum of its two mode states, so one type covers
@@ -22,7 +22,7 @@ impl<I: PinId> BidirPin for XiaoBidirPin<I> {
         *self = match core::mem::replace(self, Self::Invalid) {
             Self::Input(pin) => {
                 let mut pin = pin.into_push_pull_output();
-                use embedded_hal::digital::v2::OutputPin;
+                use embedded_hal::digital::OutputPin;
                 if high {
                     pin.set_high().ok();
                 } else {
@@ -31,7 +31,7 @@ impl<I: PinId> BidirPin for XiaoBidirPin<I> {
                 Self::Output(pin)
             }
             Self::Output(mut pin) => {
-                use embedded_hal::digital::v2::OutputPin;
+                use embedded_hal::digital::OutputPin;
                 if high {
                     pin.set_high().ok();
                 } else {
@@ -53,7 +53,7 @@ impl<I: PinId> BidirPin for XiaoBidirPin<I> {
 
     fn write(&mut self, high: bool) {
         if let Self::Output(pin) = self {
-            use embedded_hal::digital::v2::OutputPin;
+            use embedded_hal::digital::OutputPin;
             if high {
                 pin.set_high().ok();
             } else {
@@ -63,7 +63,7 @@ impl<I: PinId> BidirPin for XiaoBidirPin<I> {
     }
 
     fn read(&mut self) -> bool {
-        use embedded_hal::digital::v2::InputPin;
+        use embedded_hal::digital::InputPin;
         match self {
             Self::Input(pin) => pin.is_high().unwrap_or(false),
             _ => false,

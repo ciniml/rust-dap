@@ -248,7 +248,8 @@ trait TargetFamily {
 
     fn new() -> Self;
     /// Raw SWD connect to core 0; returns DPIDR. Retry/halt/diagnostics are
-    /// handled by RpTarget.
+    /// handled by RpTarget. (Only the non-auto path calls this directly.)
+    #[cfg_attr(feature = "gdb-target-auto", allow(dead_code))]
     fn connect(&mut self, arm: &mut ArmDebug<Swd>) -> Result<u32, arm_debug::ArmError>;
     /// Point the link at `core`'s DP (cheap no-op when already there or when
     /// single-core). Owns the current-core cache.
@@ -282,6 +283,8 @@ enum Family {
     Rp2040(Rp2040Family),
     #[cfg(feature = "gdb-target-nrf52")]
     Nrf52(Nrf52Family),
+    #[cfg(feature = "gdb-target-nrf54")]
+    Nrf54(Nrf54Family),
 }
 
 /// Run `$body` (which references the bound inner family `$f`) on whichever
@@ -294,13 +297,15 @@ macro_rules! on_family {
             Family::Rp2040($f) => $body,
             #[cfg(feature = "gdb-target-nrf52")]
             Family::Nrf52($f) => $body,
+            #[cfg(feature = "gdb-target-nrf54")]
+            Family::Nrf54($f) => $body,
         }
     };
 }
 
 impl Family {
     /// Family used before the first connect / when auto-detection is off:
-    /// the first compiled-in variant (RP2040 takes priority).
+    /// the first compiled-in variant (RP2040 > nRF52 > nRF54).
     fn default_family() -> Self {
         #[cfg(feature = "gdb-target-rp2040")]
         {
@@ -310,23 +315,49 @@ impl Family {
         {
             Family::Nrf52(Nrf52Family::new())
         }
+        #[cfg(all(
+            not(feature = "gdb-target-rp2040"),
+            not(feature = "gdb-target-nrf52"),
+            feature = "gdb-target-nrf54"
+        ))]
+        {
+            Family::Nrf54(Nrf54Family::new())
+        }
     }
 
-    /// Whether the active family is nRF52 (gates nRF-only monitor commands).
+    /// Whether the active family is nRF52 (gates nRF52-only monitor commands).
     #[cfg(feature = "gdb-target-nrf52")]
     fn is_nrf52(&self) -> bool {
         matches!(self, Family::Nrf52(_))
     }
 
+    /// Whether the active family is nRF54 (gates nRF54-only monitor commands).
+    #[cfg(feature = "gdb-target-nrf54")]
+    fn is_nrf54(&self) -> bool {
+        matches!(self, Family::Nrf54(_))
+    }
+
     /// Connect, auto-detecting the target when `gdb-target-auto` is set. On
-    /// success `*self` becomes the detected family. Detection order: nRF over
-    /// plain SW-DP (matched by exact DPIDR), then RP2040 over multidrop.
+    /// success `*self` becomes the detected family. Detection order: the nRF
+    /// parts over plain SW-DP (matched by exact DPIDR), then RP2040 over
+    /// multidrop.
     fn connect_detect(&mut self, arm: &mut ArmDebug<Swd>) -> Result<u32, arm_debug::ArmError> {
-        #[cfg(all(feature = "gdb-target-auto", feature = "gdb-target-nrf52"))]
+        #[cfg(all(
+            feature = "gdb-target-auto",
+            any(feature = "gdb-target-nrf52", feature = "gdb-target-nrf54")
+        ))]
         {
+            // One plain SW-DP bring-up serves both nRF families; dispatch on
+            // the returned DPIDR.
             if let Ok(id) = arm.connect_swd() {
+                #[cfg(feature = "gdb-target-nrf52")]
                 if id == arm_debug::nrf52::DPIDR {
                     *self = Family::Nrf52(Nrf52Family::new());
+                    return Ok(id);
+                }
+                #[cfg(feature = "gdb-target-nrf54")]
+                if id == arm_debug::nrf54::DPIDR {
+                    *self = Family::Nrf54(Nrf54Family::new());
                     return Ok(id);
                 }
             }
@@ -367,6 +398,7 @@ impl Family {
     fn ram_end(&self) -> u32 {
         on_family!(self, f => f.ram_end())
     }
+    #[cfg_attr(feature = "gdb-target-auto", allow(dead_code))]
     fn connect(&mut self, arm: &mut ArmDebug<Swd>) -> Result<u32, arm_debug::ArmError> {
         on_family!(self, f => f.connect(arm))
     }
@@ -674,6 +706,92 @@ impl TargetFamily for Nrf52Family {
     }
 }
 
+// --- nRF54L family (Cortex-M33 / RRAM) ------------------------------------
+
+#[cfg(feature = "gdb-target-nrf54")]
+struct Nrf54Family;
+
+#[cfg(feature = "gdb-target-nrf54")]
+impl TargetFamily for Nrf54Family {
+    const NUM_CORES: usize = 1; // the M33 application core
+    const FLASH_BASE: u32 = arm_debug::nrf54::RRAM_BASE;
+    const FLASH_SIZE: u32 = arm_debug::nrf54::RRAM_SIZE;
+    const RAM_START: u32 = 0x2000_0000;
+    const RAM_END: u32 = 0x2003_C000; // nRF54L15: 240 KiB SRAM
+
+    fn new() -> Self {
+        Self
+    }
+
+    fn connect(&mut self, arm: &mut ArmDebug<Swd>) -> Result<u32, arm_debug::ArmError> {
+        // nRF54L is DPv2 single-drop; the plain SW-DP bring-up works.
+        arm.connect_swd()
+    }
+
+    fn select_core(
+        &mut self,
+        _arm: &mut ArmDebug<Swd>,
+        _core: usize,
+    ) -> Result<(), arm_debug::ArmError> {
+        Ok(())
+    }
+
+    fn forget_core(&mut self) {}
+
+    fn flash_write(
+        &mut self,
+        arm: &mut ArmDebug<Swd>,
+        addr: u32,
+        data: &[u8],
+    ) -> Result<(), arm_debug::ArmError> {
+        let end = addr + data.len() as u32;
+        if end > Self::FLASH_SIZE {
+            return Err(arm_debug::ArmError::Internal);
+        }
+        // RRAM is resistive: no erase, direct overwrite. Program word-aligned
+        // batches; edges read the existing word so partial writes preserve
+        // neighbours (RRAM can set bits either way, unlike NOR flash).
+        let span = addr & !3;
+        let span_end = (end + 3) & !3;
+        let mut base = span;
+        while base < span_end {
+            let mut words: heapless::Vec<u32, 256> = heapless::Vec::new();
+            let mut a = base;
+            while a < span_end && !words.is_full() {
+                let word = if a >= addr && a + 4 <= end {
+                    u32::from_le_bytes([
+                        data[(a - addr) as usize],
+                        data[(a - addr + 1) as usize],
+                        data[(a - addr + 2) as usize],
+                        data[(a - addr + 3) as usize],
+                    ])
+                } else {
+                    // Ragged edge: read-modify-write to keep the other bytes.
+                    let mut bytes = arm.read_word(a)?.to_le_bytes();
+                    for (i, b) in bytes.iter_mut().enumerate() {
+                        let ba = a + i as u32;
+                        if ba >= addr && ba < end {
+                            *b = data[(ba - addr) as usize];
+                        }
+                    }
+                    u32::from_le_bytes(bytes)
+                };
+                let _ = words.push(word);
+                a += 4;
+            }
+            arm.nrf54_program(base, &words, POLLS_ERASE)?;
+            base = a;
+        }
+        Ok(())
+    }
+
+    fn flash_finish(&mut self, _arm: &mut ArmDebug<Swd>) {}
+    fn reset_flash_state(&mut self) {}
+    fn in_flash_mode(&self) -> bool {
+        false
+    }
+}
+
 impl RpTarget {
     fn map_err<E>(_e: E) -> TargetError<Infallible> {
         // arm-debug errors surface to GDB as a generic non-fatal error.
@@ -704,6 +822,16 @@ impl RpTarget {
         self.family.reset_flash_state();
         self.running = [false; MAX_CORES];
         for attempt in 1u32..=4 {
+            // Attempts 1-2 connect non-destructively: a connect on a live SWD
+            // link has been seen to fail once and succeed on the next try
+            // without any reset, so a healthy running target must not be reset
+            // (it would destroy the state GDB is attaching to observe). Only
+            // if those also fail has the target's program genuinely wedged the
+            // debug port — attempts 3-4 pulse the hardware SRST line to force a
+            // fresh boot state before retrying.
+            if attempt >= 3 {
+                let _ = self.arm.reset_pulse(2_000);
+            }
             self.family.forget_core();
             self.diag[2] = match self.family.connect_detect(&mut self.arm) {
                 Ok(dpidr) => {
@@ -1066,14 +1194,18 @@ impl RpTarget {
             return false; // don't interleave with flash programming
         }
         let mut moved = false;
-        // Up: target -> host CDC.
+        // Up: target -> host CDC. Read as large a contiguous run as fits the
+        // TX queue in one bulk MEM-AP transfer (256 B), so the per-poll SWD
+        // round-trips — descriptor read + RdOff write-back — are amortised
+        // over many more bytes than a 64 B chunk, lifting throughput.
         if let Some(desc) = self.rtt.up_desc {
-            if tx.capacity() - tx.len() >= 64 {
+            let room = tx.capacity() - tx.len();
+            if room >= 64 {
                 if let Ok((_, pbuf, size, wr, rd)) = self.rtt_desc(desc) {
                     if size > 0 && wr < size && rd < size && wr != rd {
                         let run = if wr > rd { wr - rd } else { size - rd };
-                        let mut chunk = [0u8; 64];
-                        let n = (run as usize).min(chunk.len());
+                        let mut chunk = [0u8; 256];
+                        let n = (run as usize).min(chunk.len()).min(room);
                         if self.arm.read_mem(pbuf + rd, &mut chunk[..n]).is_ok() {
                             for &b in &chunk[..n] {
                                 let _ = tx.enqueue(b);
@@ -1149,6 +1281,30 @@ impl MonitorCmd for RpTarget {
                 // unlock. Follow with a reconnect so the session is usable.
                 outputln!(out, "erasing entire chip (flash+UICR+RAM)...");
                 match self.arm.nrf52_erase_all(2_000_000) {
+                    Ok(()) => {
+                        self.connect_and_halt();
+                        outputln!(out, "erase_all done; reconnected + halted");
+                    }
+                    Err(e) => outputln!(out, "erase_all failed: 0x{:x}", err_code(&e)),
+                }
+            }
+            #[cfg(feature = "gdb-target-nrf54")]
+            b"approtect" if self.family.is_nrf54() => match self.arm.nrf54_approtect_status() {
+                Ok(open) => outputln!(
+                    out,
+                    "approtect: {}",
+                    if open {
+                        "OPEN (debug enabled)"
+                    } else {
+                        "CLOSED (locked)"
+                    }
+                ),
+                Err(e) => outputln!(out, "approtect read failed: 0x{:x}", err_code(&e)),
+            },
+            #[cfg(feature = "gdb-target-nrf54")]
+            b"erase_all" if self.family.is_nrf54() => {
+                outputln!(out, "erasing entire chip (RRAM+RAM)...");
+                match self.arm.nrf54_erase_all(2_000_000) {
                     Ok(()) => {
                         self.connect_and_halt();
                         outputln!(out, "erase_all done; reconnected + halted");
@@ -1588,23 +1744,6 @@ impl QueueConn {
         }
         self.rx.dequeue()
     }
-    /// Drop leading ack bytes ('+'/'-') left over from the previous session.
-    /// Anything else — e.g. the next session's opening '$' packet, which can
-    /// arrive while the SWD link is being re-established — is pushed back for
-    /// the state machine, NOT discarded (a blind purge here loses the new
-    /// session's qSupported and hangs that GDB).
-    fn drop_stray_acks(&mut self) {
-        for _ in 0..500_000 {
-            match self.read_byte() {
-                Some(b'+') | Some(b'-') => {}
-                Some(other) => {
-                    self.pushback = Some(other);
-                    return;
-                }
-                None => {}
-            }
-        }
-    }
     /// Flush pending TX (bounded, in case the host stopped reading), then
     /// drop any unread RX, so a new GDB session starts with a clean channel
     /// (stale detach responses desync the next session's RSP).
@@ -1625,13 +1764,18 @@ impl Connection for QueueConn {
     fn write(&mut self, byte: u8) -> Result<(), Self::Error> {
         // If the queue is full, keep nudging the USB task to make room (it
         // preempts this priority, so progress only stalls while the host
-        // isn't reading).
-        loop {
+        // isn't reading). Bounded: if the host has stopped reading entirely
+        // the queue never drains, so cap the spins and drop the byte rather
+        // than hang the RSP task forever. A dropped byte desyncs the current
+        // session's RSP framing, but the next GDB session rebuilds the stub
+        // and purges the channel — recoverable, unlike a permanent hang.
+        for _ in 0..1_000_000 {
             match self.tx.enqueue(byte) {
                 Ok(()) => return Ok(()),
                 Err(_) => Self::kick(),
             }
         }
+        Ok(())
     }
     fn flush(&mut self) -> Result<(), Self::Error> {
         Self::kick();
@@ -1700,7 +1844,7 @@ mod app {
         rtt_rx_queue: heapless::spsc::Queue<u8, RTT_RX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
         USB_ALLOCATOR: Option<UsbBusAllocator<hal::usb::UsbBus>> = None,
     ])]
-    fn init(ctx: init::Context) -> (Shared, Local, init::Monotonics) {
+    fn init(ctx: init::Context) -> (Shared, Local) {
         let mut resets = ctx.device.RESETS;
         let mut watchdog = hal::Watchdog::new(ctx.device.WATCHDOG);
         let sio = hal::Sio::new(ctx.device.SIO);
@@ -1738,9 +1882,13 @@ mod app {
         let serial = SerialPort::new(usb_allocator);
         let rtt_serial = SerialPort::new(usb_allocator);
         let usb_dev = UsbDeviceBuilder::new(usb_allocator, UsbVidPid(0x6666, 0x4444))
-            .manufacturer("fugafuga.org")
-            .product("rust-dap GDB server")
-            .serial_number("raspberry-pi-pico-gdb")
+            .strings(&[
+                usb_device::device::StringDescriptors::new(usb_device::LangID::EN_US)
+                    .manufacturer("fugafuga.org")
+                    .product("rust-dap GDB server")
+                    .serial_number("raspberry-pi-pico-gdb"),
+            ])
+            .unwrap()
             // Two CDC-ACM functions -> IAD composite device.
             .device_class(USB_CLASS_MISCELLANEOUS)
             .device_sub_class(USB_SUBCLASS_COMMON)
@@ -1755,6 +1903,7 @@ mod app {
         let config = DapConfig::new(
             DapIdentity {
                 serial_number: "raspberry-pi-pico-gdb",
+                product_firmware_version: env!("GIT_REV"),
                 ..DapIdentity::default()
             },
             clocks.system_clock.freq().to_Hz(),
@@ -1816,7 +1965,6 @@ mod app {
                 rtt_tx_prod,
                 rtt_rx_cons,
             },
-            init::Monotonics(),
         )
     }
 
@@ -1893,6 +2041,10 @@ mod app {
         while !USB_CONFIGURED.load(core::sync::atomic::Ordering::Relaxed) {}
         boot_progress(2); // USB configured
         target.connect_and_halt();
+        // Discard anything a fast-attaching GDB piled up (retransmitted
+        // qSupported) while the initial connect ran, so the first session's
+        // stub answers a single clean packet.
+        conn.purge();
         boot_progress(3); // SWD connected
 
         // One iteration per GDB session: the gdbstub state machine holds
@@ -1969,14 +2121,16 @@ mod app {
             }
             target.diag[10] = target.diag[10].wrapping_add(1); // sessions ended
                                                                // GDB detached: the state machine (and its borrow of conn) is
-                                                               // dropped. Flush the detach response and drop stale RX,
-                                                               // re-establish the SWD link + halt so the next `target remote`
-                                                               // sees a clean target state, then swallow the detach ack — but
-                                                               // keep any packet bytes: a new session may attach while the SWD
-                                                               // link is still being re-established.
+                                                               // dropped. Drop the ended session's stale RX, re-establish the
+                                                               // SWD link + halt (may be slow — it can pulse SRST to recover a
+                                                               // wedged target), then purge AGAIN: a new GDB that attached
+                                                               // during the slow reconnect will have retransmitted its opening
+                                                               // qSupported several times, and processing those stale copies
+                                                               // desyncs the RSP framing. Discarding them lets the fresh stub
+                                                               // answer GDB's next (clean) retransmit exactly once.
             conn.purge();
             target.connect_and_halt();
-            conn.drop_stray_acks();
+            conn.purge();
         }
     }
 }

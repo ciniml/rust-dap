@@ -521,7 +521,8 @@ impl MemMock {
                 v
             }
             cm::DCRDR => self.dcrdr,
-            nrf52::NVMC_READY => 1, // NVMC always ready in the mock
+            nrf52::NVMC_READY => 1,  // NVMC always ready in the mock
+            nrf54::RRAMC_READY => 1, // RRAMC always ready in the mock
             other => *self.mem.get(&other).unwrap_or(&0),
         }
     }
@@ -766,6 +767,38 @@ fn arm_with_debug_units() -> ArmDebug<MemMock> {
     arm.write_word(fpb::FP_CTRL, 4 << 4).unwrap(); // NUM_CODE = 4
     arm.write_word(dwt::DWT_CTRL, 2 << 28).unwrap(); // NUMCOMP = 2
     arm
+}
+
+#[test]
+fn hw_breakpoint_encodes_fpb_v2_when_rev_is_1() {
+    // FPBv2 (Cortex-M7 / ARMv8-M, e.g. nRF54 M33): FP_CTRL.REV = 1, and any
+    // address is breakable as BPADDR[31:1] | BE.
+    let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());
+    arm.write_word(fpb::FP_CTRL, (1 << 28) | (2 << 4)).unwrap(); // REV=1, NUM_CODE=2
+                                                                 // A flash address that FPBv1 would reject (>= 0x2000_0000 in v1 terms is
+                                                                 // fine here; use one to prove the region check is bypassed).
+    assert!(arm.hw_breakpoint_set(0x2000_1236).unwrap());
+    assert_eq!(
+        arm.read_word(fpb::FP_COMP0).unwrap(),
+        (0x2000_1236 & 0xFFFF_FFFE) | fpb::COMP_ENABLE
+    );
+    assert!(arm.hw_breakpoint_at(0x2000_1236).unwrap());
+    assert!(arm.hw_breakpoint_clear(0x2000_1236).unwrap());
+    assert_eq!(arm.read_word(fpb::FP_COMP0).unwrap(), 0);
+}
+
+#[test]
+fn nrf54_rram_program_via_commit() {
+    let mut arm = ArmDebug::new(MemMock::new(), DapConfig::default());
+    let data = [0xaabb_ccddu32, 0x1122_3344];
+    arm.nrf54_program(0x0000_2000, &data, 16).unwrap();
+    // CONFIG left at 0 (write disabled) after commit.
+    assert_eq!(arm.read_word(nrf54::RRAMC_CONFIG).unwrap(), 0);
+    // Commit task was written.
+    assert_eq!(arm.read_word(nrf54::RRAMC_COMMIT).unwrap(), 1);
+    // Data landed in RRAM via the MEM-AP.
+    assert_eq!(arm.read_word(0x0000_2000).unwrap(), 0xaabb_ccdd);
+    assert_eq!(arm.read_word(0x0000_2004).unwrap(), 0x1122_3344);
 }
 
 #[test]

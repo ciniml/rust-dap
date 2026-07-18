@@ -168,7 +168,7 @@ where
     fn get_bos_descriptors(&self, writer: &mut BosWriter) -> Result<()> {
         self.inner.get_bos_descriptors(writer)
     }
-    fn get_string(&self, index: StringIndex, lang_id: u16) -> Option<&str> {
+    fn get_string(&self, index: StringIndex, lang_id: LangID) -> Option<&str> {
         self.inner.get_string(index, lang_id)
     }
     fn reset(&mut self) {

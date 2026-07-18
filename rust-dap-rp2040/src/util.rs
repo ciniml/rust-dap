@@ -23,7 +23,8 @@ use rust_dap::{
     USB_SUBCLASS_COMMON,
 };
 use usb_device::class_prelude::UsbBusAllocator;
-use usb_device::device::{UsbDevice, UsbDeviceBuilder, UsbVidPid};
+use usb_device::device::{StringDescriptors, UsbDevice, UsbDeviceBuilder, UsbVidPid};
+use usb_device::LangID;
 use usb_device::UsbError;
 use usbd_serial::SerialPort;
 
@@ -110,7 +111,7 @@ pub struct UartConfigAndClock {
 pub fn usb_detach_for_reset() {
     unsafe {
         let usb = &*hal::pac::USBCTRL_REGS::ptr();
-        usb.sie_ctrl.modify(|_, w| w.pullup_en().clear_bit());
+        usb.sie_ctrl().modify(|_, w| w.pullup_en().clear_bit());
     }
     // ~0.5 s at the 125 MHz default core clock (longer on slower clocks,
     // which is harmless — we are about to reboot anyway).
@@ -162,14 +163,17 @@ where
     let usb_serial = SerialPort::new(usb_allocator);
     let usb_dap = CmsisDap::new(usb_allocator, transport, config);
     let usb_bus = UsbDeviceBuilder::new(usb_allocator, usb_identity.vid_pid)
-        .manufacturer(usb_identity.manufacturer)
-        .product(usb_identity.product)
-        .serial_number(usb_identity.serial)
+        .strings(&[StringDescriptors::new(LangID::EN_US)
+            .manufacturer(usb_identity.manufacturer)
+            .product(usb_identity.product)
+            .serial_number(usb_identity.serial)])
+        .unwrap()
         .device_class(USB_CLASS_MISCELLANEOUS)
         .device_class(USB_SUBCLASS_COMMON)
         .device_protocol(USB_PROTOCOL_IAD)
         .composite_with_iads()
         .max_packet_size_0(64)
+        .unwrap()
         .build();
     (usb_serial, usb_dap, usb_bus)
 }

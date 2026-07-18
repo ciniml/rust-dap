@@ -26,7 +26,8 @@
 #![cfg_attr(not(test), no_std)]
 
 use rust_dap::{
-    ActivePort, ConnectPort, DapConfig, DapError, DapTransport, SwdRequest, DAP_TRANSFER_WAIT,
+    ActivePort, ConnectPort, DapConfig, DapError, DapTransport, SwdRequest, SwjPins,
+    DAP_TRANSFER_WAIT,
 };
 
 /// Errors from the ARM debug layer.
@@ -148,6 +149,36 @@ pub mod nrf52 {
     pub const FLASH_PAGE: u32 = 4096;
     /// Code flash base.
     pub const FLASH_BASE: u32 = 0x0000_0000;
+}
+
+/// Nordic nRF54L debug constants (Cortex-M33, ARMv8-M). Same CoreSight
+/// SW-DP family as nRF52 but DPv2 (DPIDR 0x6BA02477), CTRL-AP at APSEL 2,
+/// and RRAM (resistive, no erase) programmed via the RRAMC.
+pub mod nrf54 {
+    /// SW-DP IDCODE for nRF54L (DP architecture v2).
+    pub const DPIDR: u32 = 0x6BA0_2477;
+    /// CTRL-AP is at APSEL 2 on nRF54L (was 1 on nRF52).
+    pub const CTRL_AP: u8 = 2;
+    // CTRL-AP register offsets mirror the nRF52 layout.
+    pub const CTRLAP_RESET: u8 = 0x00;
+    pub const CTRLAP_ERASEALL: u8 = 0x04;
+    pub const CTRLAP_ERASEALLSTATUS: u8 = 0x08;
+    pub const CTRLAP_APPROTECTSTATUS: u8 = 0x0C;
+
+    // --- RRAMC: resistive-RAM controller (register-driven, erase-free) ---
+    // Non-secure alias 0x4004_B000; secure alias 0x5004_B000.
+    /// RRAMC.READY (0x400): bit0 1=ready.
+    pub const RRAMC_READY: u32 = 0x4004_B400;
+    /// RRAMC.READYNEXT (0x404): bit0 1=ready to accept the next write.
+    pub const RRAMC_READYNEXT: u32 = 0x4004_B404;
+    /// RRAMC.CONFIG (0x500): bit0 WEN (write enable).
+    pub const RRAMC_CONFIG: u32 = 0x4004_B500;
+    /// RRAMC.TASKS_COMMITWRITEBUF (0x008): write 1 to flush the write buffer.
+    pub const RRAMC_COMMIT: u32 = 0x4004_B008;
+    pub const RRAMC_CONFIG_WEN: u32 = 1;
+    /// RRAM base (code) and size on nRF54L15 (1.5 MiB).
+    pub const RRAM_BASE: u32 = 0x0000_0000;
+    pub const RRAM_SIZE: u32 = 1524 * 1024;
 }
 
 /// ADIv5 debug interface over a SWD [`DapTransport`].
@@ -335,6 +366,20 @@ impl<T: DapTransport> ArmDebug<T> {
         Ok(dpidr)
     }
 
+    /// Drive nRESET low for `wait_us`, then release it high — a hardware
+    /// reset pulse on the SRST line. Recovers a target whose running program
+    /// has wedged the debug port (SWD stops acking) by forcing it back to a
+    /// fresh boot state before the link is re-established. `swj_pins` holds
+    /// the line low for the wait, then floats it (target pull-up brings it
+    /// high). Best-effort: swj_pins failures are not fatal to the caller.
+    pub fn reset_pulse(&mut self, wait_us: u32) -> Result<(), ArmError> {
+        // output has N_RESET clear (drive low); select N_RESET so only that
+        // pin is touched.
+        self.transport
+            .swj_pins(&self.config, SwjPins::empty(), SwjPins::N_RESET, wait_us)?;
+        Ok(())
+    }
+
     /// JTAG-to-SWD select sequence: the 16-bit code 0xE79E (LSB-first).
     /// Switches a SWJ-DP that came up in JTAG mode over to SWD.
     fn jtag_to_swd(&mut self) -> Result<(), ArmError> {
@@ -437,6 +482,65 @@ impl<T: DapTransport> ArmDebug<T> {
             rest = &rest[run..];
         }
         self.write_word(nrf52::NVMC_CONFIG, nrf52::NVMC_CONFIG_REN)?;
+        Ok(())
+    }
+
+    // --- nRF54L (Cortex-M33 / RRAM) --------------------------------------
+
+    /// Read the nRF54 CTRL-AP (APSEL 2) APPROTECTSTATUS: `Ok(true)` = debug
+    /// access enabled. Uses the wider CTRL-AP index than nRF52.
+    pub fn nrf54_approtect_status(&mut self) -> Result<bool, ArmError> {
+        self.set_apsel(nrf54::CTRL_AP);
+        let status = self.ap_reg_read(nrf54::CTRLAP_APPROTECTSTATUS)?;
+        self.set_apsel(0);
+        Ok(status & 1 != 0)
+    }
+
+    /// nRF54 recovery via CTRL-AP ERASEALL + soft reset.
+    pub fn nrf54_erase_all(&mut self, polls: u32) -> Result<(), ArmError> {
+        self.set_apsel(nrf54::CTRL_AP);
+        self.ap_reg_write(nrf54::CTRLAP_ERASEALL, 1)?;
+        let mut ok = Err(ArmError::CoreTimeout);
+        for _ in 0..polls {
+            if self.ap_reg_read(nrf54::CTRLAP_ERASEALLSTATUS)? & 1 == 0 {
+                ok = Ok(());
+                break;
+            }
+        }
+        self.ap_reg_write(nrf54::CTRLAP_RESET, 1)?;
+        self.ap_reg_write(nrf54::CTRLAP_RESET, 0)?;
+        self.set_apsel(0);
+        ok
+    }
+
+    fn nrf54_rramc_wait(&mut self, polls: u32) -> Result<(), ArmError> {
+        for _ in 0..polls {
+            if self.read_word(nrf54::RRAMC_READY)? & 1 != 0 {
+                return Ok(());
+            }
+        }
+        Err(ArmError::CoreTimeout)
+    }
+
+    /// Program words to nRF54L RRAM. RRAM is resistive: no erase, direct
+    /// overwrite. Sequence: CONFIG.WEN=1, write words via MEM-AP (buffered),
+    /// TASKS_COMMITWRITEBUF, poll READY, CONFIG=0.
+    pub fn nrf54_program(&mut self, addr: u32, words: &[u32], polls: u32) -> Result<(), ArmError> {
+        if words.is_empty() {
+            return Ok(());
+        }
+        self.write_word(nrf54::RRAMC_CONFIG, nrf54::RRAMC_CONFIG_WEN)?;
+        let mut a = addr;
+        let mut rest = words;
+        while !rest.is_empty() {
+            let run = Self::tar_run(a, rest.len());
+            self.write_words(a, &rest[..run])?;
+            a += (run as u32) * 4;
+            rest = &rest[run..];
+        }
+        self.write_word(nrf54::RRAMC_COMMIT, 1)?;
+        self.nrf54_rramc_wait(polls)?;
+        self.write_word(nrf54::RRAMC_CONFIG, 0)?;
         Ok(())
     }
 
@@ -938,8 +1042,16 @@ impl<T: DapTransport> ArmDebug<T> {
     }
 
     /// FP_COMP value for a breakpoint at `addr`, or None if the address is
-    /// outside the FPB v1 code region (0x0000_0000..0x2000_0000).
-    fn fpb_comp_value(addr: u32) -> Option<u32> {
+    /// not breakable. `rev` is FP_CTRL.REV (0 = FPBv1 on M0+/M3/M4, 1 = FPBv2
+    /// on M7 and ARMv8-M).
+    ///
+    /// FPBv1: `REPLACE[31:30] | addr[28:2]`, code region < 0x2000_0000 only.
+    /// FPBv2: `BPADDR[31:1] | BE[0]`, any address (used by nRF54's M33).
+    fn fpb_comp_value(addr: u32, rev: u32) -> Option<u32> {
+        if rev >= 1 {
+            // FPBv2: breakpoint enable bit is bit0, address is [31:1].
+            return Some((addr & 0xFFFF_FFFE) | fpb::COMP_ENABLE);
+        }
         if addr >= 0x2000_0000 {
             return None;
         }
@@ -948,14 +1060,20 @@ impl<T: DapTransport> ArmDebug<T> {
         Some((replace << 30) | (addr & 0x1FFF_FFFC) | fpb::COMP_ENABLE)
     }
 
+    /// FP_CTRL.REV (bits[31:28]): 0 = FPBv1, 1 = FPBv2.
+    fn fpb_rev(&mut self) -> Result<u32, ArmError> {
+        Ok((self.read_word(fpb::FP_CTRL)? >> 28) & 0xF)
+    }
+
     /// Set a hardware breakpoint at `addr` (code region only). Returns false
     /// if the address is not breakable or no comparator is free. Comparator
     /// occupancy is read back from the hardware, so no host state is kept.
     pub fn hw_breakpoint_set(&mut self, addr: u32) -> Result<bool, ArmError> {
-        let Some(value) = Self::fpb_comp_value(addr) else {
+        let ctrl = self.read_word(fpb::FP_CTRL)?;
+        let rev = (ctrl >> 28) & 0xF;
+        let Some(value) = Self::fpb_comp_value(addr, rev) else {
             return Ok(false);
         };
-        let ctrl = self.read_word(fpb::FP_CTRL)?;
         let n = ((ctrl >> 12) & 0x7) << 4 | (ctrl >> 4) & 0xF;
         if n == 0 {
             return Ok(false);
@@ -984,7 +1102,8 @@ impl<T: DapTransport> ArmDebug<T> {
 
     /// Clear the hardware breakpoint at `addr`. Returns false if none is set.
     pub fn hw_breakpoint_clear(&mut self, addr: u32) -> Result<bool, ArmError> {
-        let Some(value) = Self::fpb_comp_value(addr) else {
+        let rev = self.fpb_rev()?;
+        let Some(value) = Self::fpb_comp_value(addr, rev) else {
             return Ok(false);
         };
         let n = self.fpb_num_comps()?;
@@ -1000,7 +1119,8 @@ impl<T: DapTransport> ArmDebug<T> {
     /// Whether an enabled FPB comparator covers `addr` (used to distinguish
     /// hardware from software breakpoints when reporting a stop).
     pub fn hw_breakpoint_at(&mut self, addr: u32) -> Result<bool, ArmError> {
-        let Some(value) = Self::fpb_comp_value(addr) else {
+        let rev = self.fpb_rev()?;
+        let Some(value) = Self::fpb_comp_value(addr, rev) else {
             return Ok(false);
         };
         let n = self.fpb_num_comps()?;
