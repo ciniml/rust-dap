@@ -2107,45 +2107,33 @@ mod app {
             }
         }
         // UART bridge (third CDC): target UART RX queue -> host, host -> UART TX.
+        // The bridge helpers honour queue readiness, so a burst larger than the
+        // UART can drain back-pressures the host CDC (NAK) instead of dropping.
         #[cfg(feature = "uart-bridge")]
         {
-            // UART RX (filled by UART0_IRQ) -> host CDC.
-            while let Some(&b) = ctx.local.uart_rx_cons.peek() {
-                match uart_serial.write(&[b]) {
-                    Ok(1) => {
-                        ctx.local.uart_rx_cons.dequeue();
-                    }
-                    _ => break,
-                }
-            }
-            let _ = uart_serial.flush();
-            // Host CDC -> UART TX queue.
-            while let Ok(n) = uart_serial.read(&mut buf) {
-                if n == 0 {
-                    break;
-                }
-                for &b in &buf[..n] {
-                    let _ = ctx.local.uart_tx_prod.enqueue(b);
-                }
-            }
-            // UART TX queue -> UART0.
-            rust_dap_rp2040::bridge::drain_uart_tx_queue(
-                ctx.local.uart_writer,
-                ctx.local.uart_tx_cons,
-            );
+            use rust_dap_rp2040::bridge;
+            bridge::drain_uart_rx_queue(uart_serial, ctx.local.uart_rx_cons);
+            bridge::drain_usb_to_uart_tx(uart_serial, ctx.local.uart_tx_prod);
+            bridge::drain_uart_tx_queue(ctx.local.uart_writer, ctx.local.uart_tx_cons);
         }
     }
 
-    /// UART bridge RX: drain the UART0 FIFO into the RX queue. The queue is
-    /// serviced by USBCTRL_IRQ; on overflow bytes are dropped (the RX
-    /// interrupt stays enabled so the bridge keeps flowing).
+    /// UART bridge RX: drain the UART0 FIFO into the RX queue, then pend
+    /// USBCTRL_IRQ so it flushes the queue to the host CDC promptly (nothing
+    /// else would trigger that task between host writes). On queue overflow
+    /// bytes are dropped and the RX interrupt stays enabled so flow resumes.
     #[cfg(feature = "uart-bridge")]
     #[task(binds = UART0_IRQ, priority = 3, local = [uart_reader, uart_rx_prod])]
     fn uart_irq(ctx: uart_irq::Context) {
         use embedded_hal_nb::serial::Read;
         let reader = ctx.local.uart_reader.as_mut().unwrap();
+        let mut received = false;
         while let Ok(b) = reader.0.read() {
             let _ = ctx.local.uart_rx_prod.enqueue(b);
+            received = true;
+        }
+        if received {
+            pac::NVIC::pend(pac::Interrupt::USBCTRL_IRQ);
         }
     }
 
