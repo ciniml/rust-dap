@@ -22,7 +22,10 @@ jobs:
         run: |
           apt-get update && apt-get -y install git
           rustup target add thumbv6m-none-eabi
-          cargo install elf2uf2-rs --locked
+          # --no-default-features drops elf2uf2-rs's auto-deploy feature, whose
+          # libudev-sys dependency needs pkg-config + libudev (absent in the
+          # slim container). The ELF->UF2 conversion itself needs neither.
+          cargo install elf2uf2-rs --locked --no-default-features
       - name: build firmwares
         env:
           # Reported by the firmware via DAP_Info(0x09); the container checkout
