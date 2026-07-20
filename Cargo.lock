@@ -1182,6 +1182,7 @@ dependencies = [
  "defmt 0.3.100",
  "defmt-rtt",
  "embedded-hal 1.0.0",
+ "embedded-hal-nb",
  "gdbstub",
  "gdbstub_arch",
  "heapless 0.7.17",
