@@ -53,6 +53,8 @@ use rust_dap::{
     DapConfig, DapIdentity, USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON,
 };
 use rust_dap_rp2040::bitbang::{CortexMDelay, PicoBidirPin, SwdIoSet};
+#[allow(unused_imports)]
+use rust_dap_rp2040::bridge::{UartReader, UartWriter};
 use usb_device::prelude::*;
 use usbd_serial::SerialPort;
 
@@ -1719,6 +1721,17 @@ const TX_QUEUE_SIZE: usize = 2048;
 const RTT_TX_QUEUE_SIZE: usize = 2048;
 const RTT_RX_QUEUE_SIZE: usize = 256;
 
+/// UART bridge (optional third CDC port <-> target UART0 on GPIO0/1).
+#[allow(dead_code)]
+const UART_RX_QUEUE_SIZE: usize = 256;
+#[allow(dead_code)]
+const UART_TX_QUEUE_SIZE: usize = 128;
+#[allow(dead_code)]
+type UartPins = (
+    hal::gpio::Pin<hal::gpio::bank0::Gpio0, hal::gpio::FunctionUart, hal::gpio::PullDown>,
+    hal::gpio::Pin<hal::gpio::bank0::Gpio1, hal::gpio::FunctionUart, hal::gpio::PullDown>,
+);
+
 /// The idle-side view of the USB connection: lock-free SPSC queues shared
 /// with the USBCTRL_IRQ task, which owns the USB device and services it at
 /// interrupt priority. This keeps USB responsive during long blocking SWD
@@ -1830,6 +1843,22 @@ mod app {
         tx_cons: heapless::spsc::Consumer<'static, u8, TX_QUEUE_SIZE>,
         rtt_tx_cons: heapless::spsc::Consumer<'static, u8, RTT_TX_QUEUE_SIZE>,
         rtt_rx_prod: heapless::spsc::Producer<'static, u8, RTT_RX_QUEUE_SIZE>,
+        // --- UART bridge: USBCTRL_IRQ side (third CDC <-> UART TX/RX queues) ---
+        #[cfg(feature = "uart-bridge")]
+        uart_serial: SerialPort<'static, hal::usb::UsbBus>,
+        #[cfg(feature = "uart-bridge")]
+        uart_writer: Option<UartWriter<pac::UART0, UartPins>>,
+        #[cfg(feature = "uart-bridge")]
+        uart_rx_cons: heapless::spsc::Consumer<'static, u8, UART_RX_QUEUE_SIZE>,
+        #[cfg(feature = "uart-bridge")]
+        uart_tx_prod: heapless::spsc::Producer<'static, u8, UART_TX_QUEUE_SIZE>,
+        #[cfg(feature = "uart-bridge")]
+        uart_tx_cons: heapless::spsc::Consumer<'static, u8, UART_TX_QUEUE_SIZE>,
+        // --- UART bridge: UART0_IRQ side (RX FIFO -> queue) ---
+        #[cfg(feature = "uart-bridge")]
+        uart_reader: Option<UartReader<pac::UART0, UartPins>>,
+        #[cfg(feature = "uart-bridge")]
+        uart_rx_prod: heapless::spsc::Producer<'static, u8, UART_RX_QUEUE_SIZE>,
         // --- idle (GDB session loop) ---
         conn: QueueConn,
         target: RpTarget,
@@ -1842,6 +1871,10 @@ mod app {
         tx_queue: heapless::spsc::Queue<u8, TX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
         rtt_tx_queue: heapless::spsc::Queue<u8, RTT_TX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
         rtt_rx_queue: heapless::spsc::Queue<u8, RTT_RX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
+        #[cfg(feature = "uart-bridge")]
+        uart_rx_queue: heapless::spsc::Queue<u8, UART_RX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
+        #[cfg(feature = "uart-bridge")]
+        uart_tx_queue: heapless::spsc::Queue<u8, UART_TX_QUEUE_SIZE> = heapless::spsc::Queue::new(),
         USB_ALLOCATOR: Option<UsbBusAllocator<hal::usb::UsbBus>> = None,
     ])]
     fn init(ctx: init::Context) -> (Shared, Local) {
@@ -1881,6 +1914,9 @@ mod app {
         // second CDC = RTT terminal.
         let serial = SerialPort::new(usb_allocator);
         let rtt_serial = SerialPort::new(usb_allocator);
+        // Third CDC (created before build() so it claims IF04): UART bridge.
+        #[cfg(feature = "uart-bridge")]
+        let uart_serial = SerialPort::new(usb_allocator);
         let usb_dev = UsbDeviceBuilder::new(usb_allocator, UsbVidPid(0x6666, 0x4444))
             .strings(&[
                 usb_device::device::StringDescriptors::new(usb_device::LangID::EN_US)
@@ -1909,6 +1945,25 @@ mod app {
             clocks.system_clock.freq().to_Hz(),
         );
         let arm = ArmDebug::new(swd, config);
+
+        // UART bridge: UART0 on GPIO0(TX)/GPIO1(RX), fixed 115200 8N1. RX is
+        // interrupt-driven (UART0_IRQ); TX drains from a queue in USBCTRL_IRQ.
+        #[cfg(feature = "uart-bridge")]
+        let (uart_reader, uart_writer) = {
+            let uart_pins = (
+                pins.gpio0.into_function::<hal::gpio::FunctionUart>(),
+                pins.gpio1.into_function::<hal::gpio::FunctionUart>(),
+            );
+            let mut uart = hal::uart::UartPeripheral::new(ctx.device.UART0, uart_pins, &mut resets)
+                .enable(
+                    hal::uart::UartConfig::default(),
+                    clocks.peripheral_clock.freq(),
+                )
+                .unwrap();
+            uart.enable_rx_interrupt();
+            let (reader, writer) = uart.split();
+            (Some(UartReader(reader)), Some(UartWriter(writer)))
+        };
 
         let target = RpTarget {
             arm,
@@ -1944,6 +1999,10 @@ mod app {
         let (tx_prod, tx_cons) = ctx.local.tx_queue.split();
         let (rtt_tx_prod, rtt_tx_cons) = ctx.local.rtt_tx_queue.split();
         let (rtt_rx_prod, rtt_rx_cons) = ctx.local.rtt_rx_queue.split();
+        #[cfg(feature = "uart-bridge")]
+        let (uart_rx_prod, uart_rx_cons) = ctx.local.uart_rx_queue.split();
+        #[cfg(feature = "uart-bridge")]
+        let (uart_tx_prod, uart_tx_cons) = ctx.local.uart_tx_queue.split();
         let conn = QueueConn {
             rx: rx_cons,
             tx: tx_prod,
@@ -1960,6 +2019,20 @@ mod app {
                 tx_cons,
                 rtt_tx_cons,
                 rtt_rx_prod,
+                #[cfg(feature = "uart-bridge")]
+                uart_serial,
+                #[cfg(feature = "uart-bridge")]
+                uart_writer,
+                #[cfg(feature = "uart-bridge")]
+                uart_rx_cons,
+                #[cfg(feature = "uart-bridge")]
+                uart_tx_prod,
+                #[cfg(feature = "uart-bridge")]
+                uart_tx_cons,
+                #[cfg(feature = "uart-bridge")]
+                uart_reader,
+                #[cfg(feature = "uart-bridge")]
+                uart_rx_prod,
                 conn,
                 target,
                 rtt_tx_prod,
@@ -1970,12 +2043,22 @@ mod app {
 
     /// Service USB at interrupt priority: enumeration and CDC transfers stay
     /// responsive while idle blocks in long SWD operations.
-    #[task(binds = USBCTRL_IRQ, priority = 2, local = [usb_dev, serial, rtt_serial, rx_prod, tx_cons, rtt_tx_cons, rtt_rx_prod])]
+    #[task(binds = USBCTRL_IRQ, priority = 2, local = [usb_dev, serial, rtt_serial, rx_prod, tx_cons, rtt_tx_cons, rtt_rx_prod,
+        #[cfg(feature = "uart-bridge")] uart_serial,
+        #[cfg(feature = "uart-bridge")] uart_writer,
+        #[cfg(feature = "uart-bridge")] uart_rx_cons,
+        #[cfg(feature = "uart-bridge")] uart_tx_prod,
+        #[cfg(feature = "uart-bridge")] uart_tx_cons])]
     fn usb_irq(ctx: usb_irq::Context) {
         let usb_dev = ctx.local.usb_dev;
         let serial = ctx.local.serial;
         let rtt_serial = ctx.local.rtt_serial;
+        #[cfg(feature = "uart-bridge")]
+        let uart_serial = ctx.local.uart_serial;
+        #[cfg(not(feature = "uart-bridge"))]
         usb_dev.poll(&mut [serial, rtt_serial]);
+        #[cfg(feature = "uart-bridge")]
+        usb_dev.poll(&mut [serial, rtt_serial, uart_serial]);
         // 1200 bps touch → reboot into the bootloader (reflash without BOOTSEL).
         rust_dap_rp2040::util::bootsel_on_1200bps_touch(serial);
         USB_CONFIGURED.store(
@@ -2022,6 +2105,35 @@ mod app {
             for &b in &buf[..n] {
                 let _ = ctx.local.rtt_rx_prod.enqueue(b);
             }
+        }
+        // UART bridge (third CDC): target UART RX queue -> host, host -> UART TX.
+        // The bridge helpers honour queue readiness, so a burst larger than the
+        // UART can drain back-pressures the host CDC (NAK) instead of dropping.
+        #[cfg(feature = "uart-bridge")]
+        {
+            use rust_dap_rp2040::bridge;
+            bridge::drain_uart_rx_queue(uart_serial, ctx.local.uart_rx_cons);
+            bridge::drain_usb_to_uart_tx(uart_serial, ctx.local.uart_tx_prod);
+            bridge::drain_uart_tx_queue(ctx.local.uart_writer, ctx.local.uart_tx_cons);
+        }
+    }
+
+    /// UART bridge RX: drain the UART0 FIFO into the RX queue, then pend
+    /// USBCTRL_IRQ so it flushes the queue to the host CDC promptly (nothing
+    /// else would trigger that task between host writes). On queue overflow
+    /// bytes are dropped and the RX interrupt stays enabled so flow resumes.
+    #[cfg(feature = "uart-bridge")]
+    #[task(binds = UART0_IRQ, priority = 3, local = [uart_reader, uart_rx_prod])]
+    fn uart_irq(ctx: uart_irq::Context) {
+        use embedded_hal_nb::serial::Read;
+        let reader = ctx.local.uart_reader.as_mut().unwrap();
+        let mut received = false;
+        while let Ok(b) = reader.0.read() {
+            let _ = ctx.local.uart_rx_prod.enqueue(b);
+            received = true;
+        }
+        if received {
+            pac::NVIC::pend(pac::Interrupt::USBCTRL_IRQ);
         }
     }
 

@@ -40,6 +40,10 @@ gdb-target-nrf54 = ["gdbserver"]
 # with the families to include, e.g.
 #   --features gdb-target-auto,gdb-target-rp2040,gdb-target-nrf52
 gdb-target-auto = ["gdbserver"]
+# Add a third CDC port to gdb_server that bridges the target UART (GPIO0=TX,
+# GPIO1=RX) to the host, fixed at 115200 8N1. Off by default to keep the lean
+# RSP+RTT build (and its USB endpoint budget) unchanged.
+uart-bridge = ["dep:embedded-hal-nb"]
 # arm-debug hardware self-test firmware (m1_selftest).
 selftest = ["dep:arm-debug"]
 
@@ -89,6 +93,7 @@ usbd-serial = "0.2"
 nb = "0.1"
 heapless = "0.7"
 embedded-hal = "1.0"
+embedded-hal-nb = { version = "1.0", optional = true }
 defmt = { version = "0.3", optional = true }
 defmt-rtt = { version = "0.4", optional = true }
 panic-probe = { version = "0.3", features = ["print-defmt"], optional = true }
