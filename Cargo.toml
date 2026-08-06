@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "rust-dap",
     "arm-debug",
+    "gdb-server-core",
     "rust-dap-rp",
     "boards/rpi_pico",
     "boards/rpi_pico2",
