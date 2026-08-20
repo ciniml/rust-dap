@@ -42,6 +42,7 @@ jobs:
         run: |
           cargo clippy --features swd
           cargo clippy --features swd,bitbang
+          cargo clippy --features swj
           cargo clippy --no-default-features --features jtag
           cargo clippy --bin gdb_server --features gdb-target-auto,gdb-target-rp2040,gdb-target-nrf52,gdb-target-nrf54
           cargo clippy --bin gdb_server --features gdb-target-rp2040,uart-bridge
@@ -56,6 +57,7 @@ jobs:
           cargo clippy --no-default-features --features jtag
           cargo clippy --no-default-features --features jtag,bitbang
           cargo clippy --no-default-features --features swj
+          cargo clippy --features swj
         working-directory: boards/rpi_pico2
         if: ${{ matrix.projects == 'boards/rpi_pico2' }}
       - name: cargo test for ${{ matrix.projects }}
