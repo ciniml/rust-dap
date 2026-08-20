@@ -2142,7 +2142,14 @@ mod app {
             use rust_dap_rp::bridge;
             let uart_writer = ctx.local.uart_writer;
             let uart_config = ctx.local.uart_config;
-            bridge::drain_uart_rx_queue(uart_serial, ctx.local.uart_rx_cons);
+            // Only forward UART->host while the host actually has the port open
+            // (DTR asserted); otherwise drop what the target sent so it doesn't
+            // leak into the next session that opens the port.
+            if uart_serial.dtr() {
+                bridge::drain_uart_rx_queue(uart_serial, ctx.local.uart_rx_cons);
+            } else {
+                bridge::discard_uart_rx_queue(ctx.local.uart_rx_cons);
+            }
             bridge::drain_usb_to_uart_tx(uart_serial, ctx.local.uart_tx_prod);
             bridge::drain_uart_tx_queue(uart_writer, ctx.local.uart_tx_cons);
             // Follow a host-requested line coding change (baud / parity / etc.).
