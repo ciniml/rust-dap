@@ -568,7 +568,11 @@ impl TargetFamily for Rp2040Family {
                 self.erased[word] |= 1 << bit;
             }
         }
-        let mut buf = [0xFFu8; 1024];
+        // Stage up to one flash sector per ROM call: each call_function round
+        // trip costs a dozen-plus SWD transactions regardless of size, so
+        // bigger chunks cut the per-call overhead (1 KiB -> 4 KiB: 29 KB image
+        // goes from 29 program calls to 8).
+        let mut buf = [0xFFu8; RP2040_FLASH_SECTOR as usize];
         let mut pos = off & !0xFF;
         let span_end = (end + 0xFF) & !0xFF;
         while pos < span_end {
