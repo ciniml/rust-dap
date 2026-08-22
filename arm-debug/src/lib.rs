@@ -702,7 +702,7 @@ impl<T: DapTransport> ArmDebug<T> {
             if start == 0 && remaining >= 4 {
                 // Bulk path: as many whole words as fit this TAR wrap run.
                 let n = Self::tar_run(addr, remaining / 4);
-                let mut words = [0u32; 16];
+                let mut words = [0u32; 64];
                 let n = n.min(words.len());
                 self.read_words(addr, &mut words[..n])?;
                 for w in &words[..n] {
@@ -734,7 +734,7 @@ impl<T: DapTransport> ArmDebug<T> {
             let start = (addr & 3) as usize;
             if start == 0 && buf.len() - i >= 4 {
                 let n = Self::tar_run(addr, (buf.len() - i) / 4);
-                let mut words = [0u32; 16];
+                let mut words = [0u32; 64];
                 let n = n.min(words.len());
                 for (k, w) in words[..n].iter_mut().enumerate() {
                     let j = i + 4 * k;
