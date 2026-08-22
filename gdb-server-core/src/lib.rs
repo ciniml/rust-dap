@@ -179,6 +179,25 @@ struct RttState {
     down_desc: Option<u32>,
 }
 
+
+/// Minimal fixed-size `fmt::Write` sink for transport diag reports (no_std/no alloc).
+mod heapless_fmt {
+    pub struct String { buf: [u8; 512], len: usize }
+    impl String {
+        pub fn new() -> Self { Self { buf: [0; 512], len: 0 } }
+        pub fn as_str(&self) -> &str { core::str::from_utf8(&self.buf[..self.len]).unwrap_or("") }
+    }
+    impl core::fmt::Write for String {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let b = s.as_bytes();
+            let n = b.len().min(self.buf.len() - self.len);
+            self.buf[self.len..self.len + n].copy_from_slice(&b[..n]);
+            self.len += n;
+            Ok(())
+        }
+    }
+}
+
 fn err_code(e: &arm_debug::ArmError) -> u32 {
     use arm_debug::ArmError::*;
     match e {
@@ -781,6 +800,17 @@ impl<T: DapTransport, D: Delay> GdbTarget<T, D> {
         TargetError::NonFatal
     }
 
+    /// Snapshot of the connect/session diagnostics (see `connect_and_halt`).
+    pub fn diag(&self) -> [u32; 11] {
+        self.diag
+    }
+
+    /// Mutable access to the underlying transport (e.g. for transport-specific
+    /// diagnostics at startup).
+    pub fn transport_mut(&mut self) -> &mut T {
+        self.arm.transport()
+    }
+
     /// Count a failed session operation (diag[5]).
     fn diag_err<R, E>(&mut self, r: Result<R, E>) -> Result<R, E> {
         if r.is_err() {
@@ -1341,8 +1371,22 @@ impl<T: DapTransport, D: Delay> MonitorCmd for GdbTarget<T, D> {
                     _ => outputln!(out, "rtt: bad channel"),
                 }
             }
+            b"diag" => {
+                // Connect/session diagnostics kept by connect_and_halt(), plus
+                // whatever the transport wants to report about itself.
+                let d = self.diag;
+                outputln!(out, "connect: attempts={} ok_attempt={:#x} detect={:#x} halt={:#x} dhcsr={:#x}",
+                    d[0], d[1], d[2], d[3], d[4]);
+                outputln!(out, "session: failed_ops={} dpidr={:#010x} (DIAG_OK={:#x})", d[5], d[6], DIAG_OK);
+                let mut buf = heapless_fmt::String::new();
+                self.arm.transport().diag_report(&mut buf);
+                for line in buf.as_str().lines() {
+                    outputln!(out, "{}", line);
+                }
+            }
             _ => {
                 outputln!(out, "unknown command; available:");
+                outputln!(out, "  monitor diag");
                 outputln!(out, "  monitor reset / reset halt");
                 #[cfg(feature = "gdb-target-nrf52")]
                 outputln!(out, "  monitor approtect / erase_all");
