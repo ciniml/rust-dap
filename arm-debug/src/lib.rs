@@ -955,6 +955,20 @@ impl<T: DapTransport> ArmDebug<T> {
         let masked = cortex_m::DBGKEY | cortex_m::C_DEBUGEN | cortex_m::C_MASKINTS;
         self.write_word(cortex_m::DHCSR, masked | cortex_m::C_HALT)?;
         self.write_word(cortex_m::DHCSR, masked)?;
+        // The core was halted before the release; S_HALT can still read as set
+        // for a moment after C_HALT is cleared. Waiting for S_HALT straight away
+        // therefore risks a false "function finished" on a fast transport (it
+        // never ran). Wait until the core is observed running first; a very
+        // short function may already have hit the trampoline BKPT, in which
+        // case S_HALT stays set and we fall through to the halt wait below.
+        // Bounded tightly: a short ROM function can complete (and re-halt at
+        // the trampoline) before S_HALT is ever observed clear, and spinning
+        // the full `polls` budget here would cost seconds per call.
+        for _ in 0..64 {
+            if self.read_word(cortex_m::DHCSR)? & cortex_m::S_HALT == 0 {
+                break;
+            }
+        }
         let waited = self.wait_status_n(cortex_m::S_HALT, polls);
         // Re-halt and clear C_MASKINTS (again: only changeable while halted).
         self.write_word(cortex_m::DHCSR, masked | cortex_m::C_HALT)?;
