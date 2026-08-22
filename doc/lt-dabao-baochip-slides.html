@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bao Chipでデバッガつくってみた</title>
+<style>
+  :root {
+    --bg: #10141c;
+    --surface: #1a2130;
+    --surface2: #232c40;
+    --text: #e8ecf4;
+    --muted: #8b96ac;
+    --accent: #ffb454;      /* amber: bao/BIO */
+    --accent2: #5cc8ff;     /* cyan: rust-dap/SWD */
+    --accent3: #7ee787;     /* green: OK/結果 */
+    --warn: #ff7b72;
+    --border: #333f58;
+    --mono: "Cascadia Code", "JetBrains Mono", Consolas, "Noto Sans Mono CJK JP", monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; background: var(--bg); overflow: hidden; }
+  body {
+    font-family: "Hiragino Sans", "Noto Sans CJK JP", "Yu Gothic UI", "Meiryo", sans-serif;
+    color: var(--text);
+  }
+  #stage {
+    position: absolute; left: 50%; top: 50%;
+    width: 1920px; height: 1080px;
+    transform-origin: center center;
+  }
+  .slide {
+    position: absolute; inset: 0;
+    width: 1920px; height: 1080px;
+    padding: 90px 120px;
+    display: none;
+    flex-direction: column;
+    background:
+      radial-gradient(1200px 600px at 85% -10%, rgba(255,180,84,0.07), transparent 60%),
+      radial-gradient(1000px 500px at -5% 110%, rgba(92,200,255,0.06), transparent 60%),
+      var(--bg);
+  }
+  .slide.active { display: flex; }
+
+  /* ---------- 共通パーツ ---------- */
+  h1 { font-size: 72px; font-weight: 800; line-height: 1.25; }
+  h2 {
+    font-size: 56px; font-weight: 800; margin-bottom: 48px;
+    padding-bottom: 20px; border-bottom: 4px solid var(--accent);
+    align-self: flex-start; padding-right: 60px;
+  }
+  h2 .no { color: var(--accent); font-family: var(--mono); font-size: 40px; margin-right: 24px; }
+  ul.big { font-size: 40px; line-height: 1.7; list-style: none; }
+  ul.big > li { padding-left: 52px; position: relative; margin-bottom: 26px; }
+  ul.big > li::before {
+    content: "▸"; position: absolute; left: 8px; color: var(--accent);
+  }
+  ul.big ul { list-style: none; font-size: 34px; margin-top: 12px; color: var(--muted); }
+  ul.big ul li { padding-left: 44px; position: relative; margin-bottom: 10px; }
+  ul.big ul li::before { content: "–"; position: absolute; left: 12px; color: var(--border); }
+  strong { color: var(--accent); font-weight: 800; }
+  .cyan { color: var(--accent2); }
+  .green { color: var(--accent3); }
+  .warn { color: var(--warn); }
+  code {
+    font-family: var(--mono); font-size: 0.92em;
+    background: var(--surface2); padding: 2px 14px; border-radius: 8px;
+  }
+  .cols { display: flex; gap: 60px; flex: 1; min-height: 0; }
+  .col { flex: 1; min-width: 0; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 20px; padding: 40px 48px;
+  }
+  .placeholder {
+    border: 3px dashed var(--border); border-radius: 20px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--muted); font-size: 34px; text-align: center; line-height: 1.6;
+    background: rgba(255,255,255,0.02);
+  }
+  .foot {
+    position: absolute; bottom: 36px; left: 120px; right: 120px;
+    display: flex; justify-content: space-between;
+    color: var(--muted); font-size: 24px; font-family: var(--mono);
+  }
+  .callout {
+    margin-top: auto; background: var(--surface); border-left: 10px solid var(--accent);
+    border-radius: 0 16px 16px 0; padding: 30px 44px; font-size: 36px;
+  }
+
+  /* ---------- 表 ---------- */
+  table.spec { border-collapse: collapse; width: 100%; font-size: 34px; }
+  table.spec th, table.spec td { padding: 18px 28px; text-align: left; border-bottom: 1px solid var(--border); }
+  table.spec th { color: var(--muted); font-weight: 600; white-space: nowrap; width: 320px; }
+  table.spec td strong { font-size: 1.05em; }
+
+  /* ---------- アーキテクチャ図 ---------- */
+  .arch { display: flex; flex-direction: column; align-items: center; gap: 0; font-size: 30px; }
+  .arch .node {
+    width: 660px; text-align: center; padding: 18px 30px;
+    background: var(--surface2); border: 2px solid var(--border); border-radius: 14px;
+  }
+  .arch .node small { display: block; color: var(--muted); font-size: 24px; margin-top: 4px; }
+  .arch .node.hw { background: var(--surface); border-style: dashed; }
+  .arch .node.board { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(255,180,84,0.25); }
+  .arch .node.core  { border-color: var(--accent2); }
+  .arch .link { color: var(--muted); font-family: var(--mono); font-size: 26px; padding: 8px 0; }
+  .legend { display: flex; gap: 48px; font-size: 26px; margin-top: 14px; justify-content: center; }
+  .legend span { display: inline-flex; align-items: center; gap: 14px; }
+  .swatch { width: 44px; height: 28px; border-radius: 8px; border: 2px solid; display: inline-block; }
+
+  /* ---------- Before/After ---------- */
+  .vs { display: flex; align-items: center; gap: 50px; justify-content: center; flex: 1; }
+  .vs .metric { text-align: center; padding: 50px 44px; flex: 1 1 0; max-width: 800px; }
+  .vs .metric .num { font-size: 110px; font-weight: 800; font-family: var(--mono); }
+  .vs .metric .label { font-size: 34px; color: var(--muted); margin-top: 16px; }
+  .vs .arrow { font-size: 90px; color: var(--accent); }
+
+  /* ---------- タイトル ---------- */
+  .title-slide { justify-content: center; gap: 48px; }
+  .title-slide .chip { font-family: var(--mono); font-size: 30px; color: var(--accent); letter-spacing: 2px; }
+  .title-slide h1 span { color: var(--accent2); }
+  .title-slide .who { font-size: 36px; color: var(--muted); margin-top: 30px; }
+
+  ul.refs > li { margin-bottom: 14px; }
+  ul.refs ul { font-size: 26px; margin-top: 4px; }
+  ul.refs ul li { margin-bottom: 4px; }
+  #pageno {
+    position: fixed; right: 28px; bottom: 20px; z-index: 10;
+    color: var(--muted); font-family: var(--mono); font-size: 16px;
+  }
+
+  /* ---------- 印刷(PDF 化): 1 スライド = 1 ページ、1920×1080 ---------- */
+  @page { size: 1920px 1080px; margin: 0; }
+  @media print {
+    html, body { height: auto; overflow: visible; background: var(--bg);
+                 -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    #stage { position: static; transform: none !important; width: 1920px; height: auto; }
+    .slide { display: flex !important; position: relative; overflow: hidden; break-after: page; page-break-after: always; }
+    .slide:last-child { break-after: auto; page-break-after: auto; }
+    #pageno { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="stage">
+
+  <!-- 1: タイトル (15秒) -->
+  <section class="slide title-slide active">
+    <div class="chip">Kernel/VM探検隊@東京 No19 — 5min LT</div>
+    <h1><span>Bao Chip</span>でデバッガつくってみた</h1>
+    <div style="font-size:36px; color:var(--muted);">Rust製デバッグプローブ rust-dap を Baochip に移植する</div>
+    <div class="who">井田 健太 / <span style="color:var(--accent2);">@ciniml</span></div>
+  </section>
+
+  <!-- 2: Dabao board とは -->
+  <section class="slide">
+    <h2><span class="no">01</span>Dabao board / Baochip とは</h2>
+    <div class="cols">
+      <div class="col" style="display:flex; flex-direction:column; gap:20px;">
+        <ul class="big" style="font-size:34px; line-height:1.55;">
+          <li><strong>Baochip-1x</strong> SoC の評価ボード <strong>Dabao</strong>($12)</li>
+          <li>作者は <strong>bunnie</strong>(Andrew "bunnie" Huang)<ul>
+            <li>著書『<strong>ハードウェアハッカー</strong>』(技術評論社)で知られるハードウェアハッカー</li>
+          </ul></li>
+          <li>セキュリティ設計で特徴的な部分<ul>
+            <li><strong>RTL がほぼオープン</strong>(Mostly open RTL)</li>
+            <li><strong>裏面から赤外線で回路を透視できる</strong>: 実チップが公開 RTL 通りか<br>非破壊で検証できる(バックドア混入の検出)</li>
+            <li>グリッチセンサ、ECC 保護 RAM、セキュアメッシュ、一方向カウンタ</li>
+          </ul></li>
+        </ul>
+        <div class="callout" style="font-size:30px; padding:22px 36px;">「OSS で検査可能」= <strong>設計(RTL)が読める</strong> × <strong>実物が設計通りか自分で確かめられる</strong></div>
+      </div>
+      <div class="col" style="flex:0 0 auto; display:flex; flex-direction:column; align-items:center; justify-content:center;">
+        <img src="figure/dabao_board_baochip.drawio.svg" alt="Dabao board(Baochip-1x / リセットボタン / USB Type-C)"
+             style="height:740px; width:auto;">
+      </div>
+    </div>
+    <div class="foot"><span>01 / Baochip</span><span>Kernel/VM探検隊@東京 No19</span></div>
+  </section>
+
+  <!-- 3: Baochip-1x の特徴的な構成 -->
+  <section class="slide">
+    <h2><span class="no">02</span>Baochip-1x の特徴的な構成</h2>
+    <div class="cols">
+      <div class="col">
+        <table class="spec">
+          <tr><th>CPU コア</th><td><strong>VexRiscv</strong> RV32IMAC + MMU <strong>@ 350MHz</strong></td></tr>
+          <tr><th>メモリ保護</th><td>MPU ではなく <strong>MMU</strong>(仮想メモリ)</td></tr>
+          <tr><th>I/O エンジン</th><td><strong>BIO</strong>: PicoRV コア <strong>×4 @ 700MHz</strong></td></tr>
+          <tr><th>GPIO 速度</th><td>BIO トグルレート <strong>最大 25MHz</strong></td></tr>
+          <tr><th>メモリ</th><td>4MiB RRAM + 2MiB SRAM(オンチップ)</td></tr>
+        </table>
+      </div>
+      <div class="col" style="flex: 0.85; display:flex; flex-direction:column; gap:40px;">
+        <div class="card" style="border-left: 10px solid var(--accent2);">
+          <div style="font-size:38px; font-weight:800;" class="cyan">MCU としては珍しい MMU 搭載</div>
+          <div style="font-size:32px; margin-top:14px; line-height:1.6;">全プロセスが独立した仮想メモリ空間。<br>Rust の所有権・借用のルールを、<br>プロセス間でも MMU で強制</div>
+        </div>
+        <div class="card" style="border-left: 10px solid var(--accent);">
+          <div style="font-size:38px; font-weight:800;"><strong>BIO = I/O コプロセッサ</strong></div>
+          <div style="font-size:32px; margin-top:14px; line-height:1.6;">RP2040 の PIO 相当。ただし専用SMではなく<br><strong>普通の RISC-V 命令</strong>で書ける</div>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span>02 / Baochip</span><span>Kernel/VM探検隊@東京 No19</span></div>
+  </section>
+
+  <!-- 4: Xous -->
+  <section class="slide">
+    <h2><span class="no">03</span>OS は Xous — Pure Rust マイクロカーネル</h2>
+    <ul class="big" style="margin-top: 10px;">
+      <li>Pure Rust のマイクロカーネル OS<ul>
+        <li>元は秘匿通信端末 Precursor 用に開発</li>
+      </ul></li>
+      <li>すべてが<strong>プロセス分離+メッセージパッシング</strong><ul>
+        <li>ドライバもユーザ空間の「サービス」</li>
+        <li>アプリは IPC 経由でペリフェラルを触る</li>
+      </ul></li>
+    </ul>
+    <div class="callout" style="border-left-color: var(--warn);">
+      つまり <strong class="warn">GPIO を 1 回叩くたびに IPC が発生する</strong>
+    </div>
+    <div class="foot"><span>03 / Baochip</span><span>Kernel/VM探検隊@東京 No19</span></div>
+  </section>
+
+  <!-- 5: rust-dap とは -->
+  <section class="slide">
+    <h2><span class="no">04</span>rust-dap とは</h2>
+    <div class="cols">
+      <div class="col">
+        <ul class="big">
+          <li>Rust 製の <span class="cyan">CMSIS-DAP</span> デバッグプローブ<br>ファームウェア</li>
+          <li>Raspberry Pi Pico / XIAO RP2040 /<br>XIAO M0 などに対応</li>
+          <li>最近の発展: プローブ単体で GDB RSP を喋る<br><strong>スタンドアロン GDB サーバ</strong><ul>
+            <li>Black Magic Probe 相当</li>
+            <li>PC 側にデバッグソフト不要、GDB 直結</li>
+          </ul></li>
+        </ul>
+      </div>
+      <div class="col" style="flex:0.9;">
+        <div class="arch">
+          <div class="node hw">GDB (host PC)</div>
+          <div class="link">│ RSP over USB CDC-ACM ▼</div>
+          <div class="node board">Connection / セッションループ<small>ボード固有</small></div>
+          <div class="node core">gdbstub + GdbTarget<small>gdb-server-core(ボード非依存)</small></div>
+          <div class="node core">ArmDebug(ADIv5 / Cortex-M)<small>arm-debug(ボード非依存)</small></div>
+          <div class="node board">DapTransport<small>ボード固有</small></div>
+          <div class="link">│ SWD / JTAG ▼</div>
+          <div class="node hw">ターゲット MCU</div>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span>04 / rust-dap</span><span>Kernel/VM探検隊@東京 No19</span></div>
+  </section>
+
+  <!-- 6: 移植 = 3つだけ -->
+  <section class="slide">
+    <h2><span class="no">05</span>Baochip への移植</h2>
+    <div class="cols">
+      <div class="col" style="flex:0.9;">
+        <div class="arch">
+          <div class="node hw">GDB (host PC)</div>
+          <div class="link">│ RSP over USB CDC-ACM ▼</div>
+          <div class="node board">① Connection + ② セッションループ<small>usb-bao1x シリアル + 受信スレッド</small></div>
+          <div class="node core">gdb-server-core<small>そのまま(移植不要)</small></div>
+          <div class="node core">arm-debug<small>そのまま(移植不要)</small></div>
+          <div class="node board">③ DapTransport<small>IoxHal 経由のビットバング SWD</small></div>
+          <div class="link">│ SWD ▼</div>
+          <div class="node hw">ターゲット MCU(Cortex-M)</div>
+        </div>
+      </div>
+      <div class="col" style="display:flex; flex-direction:column; gap:36px; justify-content:center;">
+        <ul class="big">
+          <li>コアはボード非依存クレートに<br>切り出し済み</li>
+          <li>Xous アプリとして実装<br>(<code>apps-dabao/dabao-gdb</code>)</li>
+        </ul>
+        <div class="legend" style="justify-content:flex-start; flex-direction:column; gap:16px; margin-top:30px; font-size:28px;">
+          <span><span class="swatch" style="border-color:var(--accent); box-shadow:0 0 0 3px rgba(255,180,84,0.25);"></span>今回書いた部分</span>
+          <span><span class="swatch" style="border-color:var(--accent2);"></span>ボード非依存(そのまま再利用)</span>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span>05 / 移植</span><span>Kernel/VM探検隊@東京 No19</span></div>
+  </section>
+
+  <!-- 7: ハマりどころ -->
+  <section class="slide">
+    <h2><span class="no">06</span>Xous アプリならではのハマりどころ</h2>
+    <div class="cols" style="align-items:stretch;">
+      <div class="col card">
+        <div style="font-size:38px; font-weight:800; margin-bottom:24px;" class="cyan">USB シリアルは Xous のサービス</div>
+        <div style="font-size:33px; line-height:1.7;">
+          USB シリアルはすでに Xous の<strong>サービス(別プロセス)</strong>として動いており、
+          アプリからの送受信は<strong>そのサービスとの IPC</strong> になる。
+          読みはブロックするが、gdbstub は非ブロック読みを要求(Idle 中にターゲットをポーリングするため)
+          <div style="margin-top:24px; color:var(--accent3);">→ 受信専用スレッドが別コネクションで IPC 待ちし、キューに積む構成に</div>
+        </div>
+      </div>
+      <div class="col card">
+        <div style="font-size:38px; font-weight:800; margin-bottom:24px;" class="cyan">GPIO 操作はマイクロカーネルなので IPC が必要</div>
+        <div style="font-size:33px; line-height:1.7;">
+          GPIO は hal-service が所有し、アプリからは <strong>1 操作 = 1 IPC</strong>。<br>
+          ビットバングのような細かい I/O は BIO に任せる設計思想
+          <div style="margin-top:24px; color:var(--accent3);">→ まずは IPC 越しのビットバング SWD で動かす</div>
+        </div>
+      </div>
+    </div>
+    <div class="foot"><span>06 / 移植</span><span>Kernel/VM探検隊@東京 No19</span></div>
+  </section>
+
+  <!-- 8: 動いた画面 -->
+  <section class="slide">
+    <h2><span class="no">07</span>動かしてみる</h2>
+    <div class="cols">
+      <div class="col" style="flex:0 0 auto; display:flex; flex-direction:column; align-items:center; gap:18px;">
+        <img src="figure/dabao_board.drawio.svg" alt="Dabao Board と RPi Pico の接続"
+             style="height:600px; width:auto; border-radius:16px; background:#fff; border:1px solid var(--border);">
+        <div style="font-size:26px; color:var(--muted);">Dabao(プローブ)→ SWD → RPi Pico(ターゲット)/ FT232H はログ用 UART</div>
+      </div>
+      <div class="col" style="display:flex; flex-direction:column; gap:18px; min-width:0;">
+        <div style="font-size:30px; color:var(--muted);">GDB から接続して計測(IPC 越しビットバング SWD)</div>
+        <table class="spec" style="font-size:25px;">
+          <tr><th style="width:auto; padding:11px 16px; white-space:nowrap;">コマンド</th><th style="width:auto; padding:11px 16px; white-space:nowrap;">内容</th><th style="width:auto; padding:11px 16px; white-space:nowrap; text-align:right;">時間</th></tr>
+          <tr><td style="padding:11px 16px; white-space:nowrap;"><code>x/1wx ADDR</code></td><td style="padding:11px 16px; white-space:nowrap;">1 ワード読み</td><td style="padding:11px 16px; white-space:nowrap; text-align:right; font-family:var(--mono);">9.1 ms</td></tr>
+          <tr><td style="padding:11px 16px; white-space:nowrap;"><code>dump binary memory …</code></td><td style="padding:11px 16px; white-space:nowrap;">1 KiB 読み</td><td style="padding:11px 16px; white-space:nowrap; text-align:right; font-family:var(--mono);">815 ms <span style="color:var(--muted);">(1.23 KiB/s)</span></td></tr>
+          <tr><td style="padding:11px 16px; white-space:nowrap;"><code>dump binary memory …</code></td><td style="padding:11px 16px; white-space:nowrap;">16 KiB 読み</td><td style="padding:11px 16px; white-space:nowrap; text-align:right; font-family:var(--mono);">13026 ms <span style="color:var(--muted);">(1.23 KiB/s)</span></td></tr>
+          <tr><td style="padding:11px 16px; white-space:nowrap;"><code>set {int}ADDR = 0xdeadbeef</code></td><td style="padding:11px 16px; white-space:nowrap;">1 ワード書き</td><td style="padding:11px 16px; white-space:nowrap; text-align:right; font-family:var(--mono);">618 ms</td></tr>
+          <tr><td style="padding:11px 16px; white-space:nowrap;"><code>restore … binary ADDR</code></td><td style="padding:11px 16px; white-space:nowrap;">4 KiB RAM 書き</td><td style="padding:11px 16px; white-space:nowrap; text-align:right; font-family:var(--mono);">3274 ms <span style="color:var(--muted);">(1.22 KiB/s)</span></td></tr>
+          <tr><td style="padding:11px 16px; white-space:nowrap;"><code>stepi</code></td><td style="padding:11px 16px; white-space:nowrap;">ステップ実行</td><td style="padding:11px 16px; white-space:nowrap; text-align:right; font-family:var(--mono);">1.1〜1.3 s</td></tr>
+        </table>
+        <div style="font-size:27px; color:var(--accent3);">✅ 接続・halt・レジスタ/メモリ R/W・BP・ステップ、ひと通り動作</div>
+      </div>
+    </div>
+    <div class="foot"><span>07 / 移植</span><span>Kernel/VM探検隊@東京 No19</span></div>
+  </section>
+
+  <!-- 9: 課題と BIO オフロード -->
+  <section class="slide">
+    <h2><span class="no">08</span>実測結果と今後</h2>
+    <div class="vs">
+      <div class="metric card" style="border-color: var(--warn);">
+        <div class="num warn">1.23 KiB/s</div>
+        <div class="label" style="font-size:30px;">メモリ読み出し(IPC 越しビットバング SWD)<br>ワード毎 ~3.2ms ≒ SWCLK 実効 ~30kHz<br>サイズ非依存 → IPC コストが支配的</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="metric card" style="border-color: var(--accent);">
+        <div class="num" style="color: var(--accent); font-size:72px;">BIO オフロード</div>
+        <div class="label" style="text-align:left; font-size:29px; line-height:1.6;">
+          ✅ BIO 版 SWD を実装、出力動作は確認済み<br>
+          ⏳ ターゲットからの入力がまだ読めない
+        </div>
+      </div>
+    </div>
+    <div class="callout">
+      <div style="font-size:34px; font-weight:800; margin-bottom:14px;">SWD における BIO の利点</div>
+      <div style="font-size:32px; line-height:1.6;">
+        ▸ <strong>RV32E</strong> なので PIO より複雑な処理(ACK 判定、パリティ計算)が可能<br>
+        ▸ ハードウェア制御機構による細かいタイミング制御
+      </div>
+    </div>
+    <div class="foot"><span>08 / BIO</span><span>Kernel/VM探検隊@東京 No19</span></div>
+  </section>
+
+  <!-- 10: まとめ -->
+  <section class="slide">
+    <h2><span class="no">09</span>まとめ</h2>
+    <ul class="big" style="margin-top:10px;">
+      <li>Baochip = <strong>MMU 付き RISC-V + BIO</strong> という面白い構成<ul>
+        <li>硬さ(セキュリティ)と速い I/O の両立</li>
+      </ul></li>
+      <li>rust-dap は層分離のおかげで<span class="cyan">移植コストが小さい</span><ul>
+        <li>書いたのは Connection / DapTransport / セッションループの3つだけ</li>
+      </ul></li>
+      <li>IPC の遅さは <strong>BIO オフロード</strong>で解決する(BIO 側は動作、入力側を調査中)</li>
+      <li><strong>BIO はいいぞ!</strong> — RV32E で書ける PIO。SWD に限らず「ちょっと賢い I/O」全般に効く</li>
+    </ul>
+    <div class="callout" style="display:flex; flex-direction:column; gap:12px;">
+      <div>Dabao は Crowd Supply で予約受付中: <code>crowdsupply.com/baochip/dabao</code></div>
+      <div style="font-size:30px; color:var(--muted);">$12 / 枚(送料 US $10・海外 $18)、現在の予約分は 2026-10-09 出荷予定</div>
+      <div>rust-dap のリポジトリ: <code>github.com/ciniml/rust-dap</code></div>
+    </div>
+    <div class="foot"><span>09 / まとめ</span><span>Kernel/VM探検隊@東京 No19</span></div>
+  </section>
+
+  <!-- 11: 参考文献 -->
+  <section class="slide">
+    <h2><span class="no">10</span>参考文献</h2>
+    <ul class="big refs" style="font-size:30px; line-height:1.5;">
+      <li>Baochip / Dabao 紹介(開発者 bunnie 氏による一次情報)<ul>
+        <li><code>https://baochip.com/dabao-intro/</code></li>
+      </ul></li>
+      <li>Andrew "bunnie" Huang 著、高須正和 訳『ハードウェアハッカー 〜新しいモノをつくる破壊と創造の冒険』技術評論社、2018<ul>
+        <li><code>https://gihyo.jp/book/2018/978-4-297-10106-0</code></li>
+      </ul></li>
+      <li>Xous — The Xous Operating System(Xous Book)/ xous-core<ul>
+        <li><code>https://betrusted.io/xous-book/</code> / <code>https://github.com/betrusted-io/xous-core/</code></li>
+      </ul></li>
+      <li>Dabao ボード / BIO 関連ツール<ul>
+        <li><code>https://github.com/baochip/dabao</code></li>
+        <li><code>https://github.com/baochip/bio-sim</code> / <code>https://github.com/baochip/bio-loader</code> / <code>https://baochip.com/bio-surfer/</code></li>
+      </ul></li>
+      <li>rust-dap<ul>
+        <li><code>https://github.com/ciniml/rust-dap</code></li>
+      </ul></li>
+    </ul>
+    <div class="foot"><span>10 / 参考文献</span><span>Kernel/VM探検隊@東京 No19</span></div>
+  </section>
+
+</div>
+<div id="pageno"></div>
+<script>
+  const slides = [...document.querySelectorAll('.slide')];
+  let cur = 0;
+  const pageno = document.getElementById('pageno');
+  function show(i) {
+    cur = Math.max(0, Math.min(slides.length - 1, i));
+    slides.forEach((s, k) => s.classList.toggle('active', k === cur));
+    pageno.textContent = (cur + 1) + ' / ' + slides.length;
+    // URL にページ番号を反映(#3 など)。再読み込み・リンク共有でそのページに復帰できる
+    const h = '#' + (cur + 1);
+    if (location.hash !== h) history.replaceState(null, '', h);
+  }
+  function fromHash() {
+    const n = parseInt(location.hash.slice(1), 10);
+    return Number.isFinite(n) ? n - 1 : 0;
+  }
+  addEventListener('hashchange', () => show(fromHash()));
+  function fit() {
+    const s = Math.min(innerWidth / 1920, innerHeight / 1080);
+    document.getElementById('stage').style.transform =
+      'translate(-50%, -50%) scale(' + s + ')';
+  }
+  addEventListener('resize', fit);
+  addEventListener('keydown', e => {
+    if (['ArrowRight', 'ArrowDown', 'PageDown', ' ', 'Enter'].includes(e.key)) { show(cur + 1); e.preventDefault(); }
+    else if (['ArrowLeft', 'ArrowUp', 'PageUp', 'Backspace'].includes(e.key)) { show(cur - 1); e.preventDefault(); }
+    else if (e.key === 'Home') show(0);
+    else if (e.key === 'End') show(slides.length - 1);
+  });
+  addEventListener('click', e => show(cur + (e.clientX > innerWidth / 2 ? 1 : -1)));
+  fit(); show(fromHash());
+</script>
+</body>
+</html>
