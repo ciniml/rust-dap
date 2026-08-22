@@ -124,15 +124,40 @@ const RP2040_FLASH_BASE: u32 = rp2040::FLASH_BASE;
 const RP2040_FLASH_SIZE: u32 = 2 * 1024 * 1024; // Pico W25Q16 (2 MiB)
 #[cfg(feature = "gdb-target-rp2040")]
 const RP2040_FLASH_SECTOR: u32 = 4096;
-/// Staging buffer in target RAM for flash_range_program's source data.
-#[cfg(feature = "gdb-target-rp2040")]
-const TARGET_STAGE: u32 = 0x2001_0000;
 /// Stack for remote bootrom calls (grows down).
 #[cfg(feature = "gdb-target-rp2040")]
 const TARGET_CALL_SP: u32 = 0x2000_8000;
 /// BKPT return trampoline for remote calls.
 #[cfg(feature = "gdb-target-rp2040")]
 const TARGET_TRAMPOLINE: u32 = 0x2000_7000;
+/// Resident async flash loader (see `RP2040_LOADER`): code, descriptor and
+/// data ring in target RAM. The loader runs on core 0 while the host keeps
+/// streaming the next blocks into the ring through the AP, so erase/program
+/// time overlaps the SWD transfer instead of serialising with it.
+#[cfg(feature = "gdb-target-rp2040")]
+const LOADER_CODE: u32 = 0x2000_E000;
+#[cfg(feature = "gdb-target-rp2040")]
+const LOADER_DESC: u32 = 0x2000_F000;
+#[cfg(feature = "gdb-target-rp2040")]
+const LOADER_DATA: u32 = 0x2001_0000;
+#[cfg(feature = "gdb-target-rp2040")]
+const LOADER_SLOTS: u32 = 4;
+/// Descriptor layout (words): 0 wp (host), 1 rp (target), 2 stop (host),
+/// 3 status, 4 fn_erase, 5 fn_program, 6 data_base, 7 reserved,
+/// 8.. hdr[LOADER_SLOTS] = {flash_offset, len, flags(bit0 = erase sector), pad}.
+#[cfg(feature = "gdb-target-rp2040")]
+const LOADER_DESC_HDR: u32 = LOADER_DESC + 32;
+/// Thumb-1 machine code of the loader (assembled from `doc/rp2040-loader.s`):
+///   r7 = desc; loop { if wp == rp { if stop { bkpt } continue }
+///     hdr = &hdr[rp & 3]; if hdr.flags & 1 { fn_erase(hdr.off & ~0xfff, 4096, 1<<16, 0xD8) }
+///     fn_program(hdr.off, data_base + (rp & 3) * 4096, hdr.len); rp += 1 }
+#[cfg(feature = "gdb-target-rp2040")]
+const RP2040_LOADER: [u32; 22] = [
+    0x68384607, 0x42886879, 0x2203d020, 0x0113400a, 0x332019db, 0x68b0461e,
+    0xd00907c0, 0x0b006830, 0x21010300, 0x22010309, 0x23d80412, 0x47a0693c,
+    0x69b96830, 0x2303687a, 0x0312401a, 0x68721889, 0x47a0697c, 0x31016879,
+    0xe7da6079, 0x280068b8, 0xbe00d0d7, 0x0000e7fe,
+];
 /// DHCSR poll budgets: a 4 KiB sector erase takes tens of ms.
 #[cfg(feature = "gdb-target-rp2040")]
 const POLLS_CALL: u32 = 100_000;
@@ -445,6 +470,10 @@ struct Rp2040Family {
     flash_fns: Option<RomFlashFns>,
     flash_mode: bool,
     erased: [u32; (RP2040_FLASH_SIZE / RP2040_FLASH_SECTOR / 32) as usize],
+    /// Register frame of the running resident loader (`Some` while it runs).
+    loader: Option<arm_debug::CallFrame>,
+    /// Blocks queued to the loader so far (its `wp`).
+    loader_wp: u32,
 }
 
 #[cfg(feature = "gdb-target-rp2040")]
@@ -493,6 +522,81 @@ impl Rp2040Family {
         self.rom_call(arm, f.exit_xip, [0; 4], POLLS_CALL)?;
         self.erased = Default::default();
         self.flash_mode = true;
+        // Plant and start the resident loader; it idles until blocks arrive.
+        let mut code = [0u8; RP2040_LOADER.len() * 4];
+        for (chunk, w) in code.chunks_exact_mut(4).zip(RP2040_LOADER) {
+            chunk.copy_from_slice(&w.to_le_bytes());
+        }
+        arm.write_mem(LOADER_CODE, &code)?;
+        let desc = [0u32, 0, 0, 0, f.erase, f.program, LOADER_DATA, 0];
+        let mut desc_bytes = [0u8; 32];
+        for (chunk, w) in desc_bytes.chunks_exact_mut(4).zip(desc) {
+            chunk.copy_from_slice(&w.to_le_bytes());
+        }
+        arm.write_mem(LOADER_DESC, &desc_bytes)?;
+        self.loader_wp = 0;
+        let frame = arm.start_function(
+            LOADER_CODE | 1,
+            &[LOADER_DESC, 0, 0, 0],
+            TARGET_CALL_SP,
+            TARGET_TRAMPOLINE,
+        )?;
+        self.loader = Some(frame);
+        Ok(())
+    }
+
+    /// Queue one block (≤ 4 KiB, inside one sector) to the resident loader,
+    /// waiting for a free ring slot first. `off` is the flash offset.
+    fn loader_push<T: DapTransport>(
+        &mut self,
+        arm: &mut ArmDebug<T>,
+        off: u32,
+        data: &[u8],
+        erase: bool,
+    ) -> Result<(), arm_debug::ArmError> {
+        if self.loader.is_none() {
+            return Err(arm_debug::ArmError::Internal);
+        }
+        let mut polls = 0u32;
+        loop {
+            let rp = arm.read_word(LOADER_DESC + 4)?;
+            if self.loader_wp.wrapping_sub(rp) < LOADER_SLOTS {
+                break;
+            }
+            // The loader halting on its own means it faulted (or hit a stray
+            // breakpoint); a full ring that never drains is a dead loader.
+            if arm.is_halted()? {
+                return Err(arm_debug::ArmError::CoreTimeout);
+            }
+            polls += 1;
+            if polls > POLLS_ERASE {
+                return Err(arm_debug::ArmError::CoreTimeout);
+            }
+        }
+        let slot = self.loader_wp % LOADER_SLOTS;
+        arm.write_mem(LOADER_DATA + slot * RP2040_FLASH_SECTOR, data)?;
+        let hdr = LOADER_DESC_HDR + slot * 16;
+        arm.write_word(hdr, off)?;
+        arm.write_word(hdr + 4, data.len() as u32)?;
+        arm.write_word(hdr + 8, erase as u32)?;
+        self.loader_wp = self.loader_wp.wrapping_add(1);
+        arm.write_word(LOADER_DESC, self.loader_wp)?;
+        Ok(())
+    }
+
+    /// Tell the loader to finish the queue and exit, then wait for its BKPT.
+    fn loader_stop<T: DapTransport>(&mut self, arm: &mut ArmDebug<T>) -> Result<(), arm_debug::ArmError> {
+        let Some(frame) = self.loader.take() else { return Ok(()) };
+        arm.write_word(LOADER_DESC + 8, 1)?;
+        // Up to LOADER_SLOTS sector erase+program cycles may still be queued.
+        let res = arm.finish_function(frame, POLLS_ERASE.saturating_mul(LOADER_SLOTS));
+        if res.is_err() {
+            let _ = arm.halt();
+        }
+        res?;
+        if arm.read_word(LOADER_DESC + 4)? != self.loader_wp {
+            return Err(arm_debug::ArmError::Internal);
+        }
         Ok(())
     }
 }
@@ -511,6 +615,8 @@ impl TargetFamily for Rp2040Family {
             flash_fns: None,
             flash_mode: false,
             erased: Default::default(),
+            loader: None,
+            loader_wp: 0,
         }
     }
 
@@ -550,33 +656,17 @@ impl TargetFamily for Rp2040Family {
             return Err(arm_debug::ArmError::Internal);
         }
         self.flash_enter(arm)?;
-        let f = self.rom_flash_fns(arm)?;
-        for sector in off / RP2040_FLASH_SECTOR..=(end - 1) / RP2040_FLASH_SECTOR {
-            let (word, bit) = ((sector / 32) as usize, sector % 32);
-            if self.erased[word] & (1 << bit) == 0 {
-                self.rom_call(
-                    arm,
-                    f.erase,
-                    [
-                        sector * RP2040_FLASH_SECTOR,
-                        RP2040_FLASH_SECTOR,
-                        1 << 16,
-                        0xD8,
-                    ],
-                    POLLS_ERASE,
-                )?;
-                self.erased[word] |= 1 << bit;
-            }
-        }
-        // Stage up to one flash sector per ROM call: each call_function round
-        // trip costs a dozen-plus SWD transactions regardless of size, so
-        // bigger chunks cut the per-call overhead (1 KiB -> 4 KiB: 29 KB image
-        // goes from 29 program calls to 8).
-        let mut buf = [0xFFu8; RP2040_FLASH_SECTOR as usize];
+        // Split into 256 B-aligned spans that stay inside one 4 KiB sector and
+        // queue each to the resident loader, which erases the sector on its
+        // first touch and programs the span. Padding bytes are 0xFF, which
+        // programming leaves untouched, so adjacent spans written by separate
+        // calls (section boundaries inside a sector) compose correctly.
         let mut pos = off & !0xFF;
         let span_end = (end + 0xFF) & !0xFF;
+        let mut buf = [0xFFu8; RP2040_FLASH_SECTOR as usize];
         while pos < span_end {
-            let n = buf.len().min((span_end - pos) as usize);
+            let sector_end = (pos & !(RP2040_FLASH_SECTOR - 1)) + RP2040_FLASH_SECTOR;
+            let n = (span_end.min(sector_end) - pos) as usize;
             buf[..n].fill(0xFF);
             for (i, slot) in buf[..n].iter_mut().enumerate() {
                 let a = pos + i as u32;
@@ -584,13 +674,11 @@ impl TargetFamily for Rp2040Family {
                     *slot = data[(a - off) as usize];
                 }
             }
-            arm.write_mem(TARGET_STAGE, &buf[..n])?;
-            self.rom_call(
-                arm,
-                f.program,
-                [pos, TARGET_STAGE, n as u32, 0],
-                POLLS_ERASE,
-            )?;
+            let sector = pos / RP2040_FLASH_SECTOR;
+            let (word, bit) = ((sector / 32) as usize, sector % 32);
+            let erase = self.erased[word] & (1 << bit) == 0;
+            self.erased[word] |= 1 << bit;
+            self.loader_push(arm, pos, &buf[..n], erase)?;
             pos += n as u32;
         }
         Ok(())
@@ -604,6 +692,7 @@ impl TargetFamily for Rp2040Family {
             self.flash_mode = false;
             return;
         }
+        let _ = self.loader_stop(arm);
         if let Ok(f) = self.rom_flash_fns(arm) {
             let _ = self.rom_call(arm, f.flush, [0; 4], POLLS_CALL);
             let _ = self.rom_call(arm, f.enter_xip, [0; 4], POLLS_CALL);
@@ -613,6 +702,7 @@ impl TargetFamily for Rp2040Family {
 
     fn reset_flash_state(&mut self) {
         self.flash_mode = false;
+        self.loader = None;
     }
 
     fn in_flash_mode(&self) -> bool {
@@ -1270,6 +1360,7 @@ impl<T: DapTransport, D: Delay> MonitorCmd for GdbTarget<T, D> {
         cmd: &[u8],
         mut out: ConsoleOutput<'_>,
     ) -> Result<(), Self::Error> {
+        self.flash_finish(); // the resident flash loader may still be running
         match cmd {
             b"reset" => match self.target_reset(false) {
                 Ok(pc) => outputln!(out, "target reset; halted at pc=0x{:08x}", pc),
@@ -1406,6 +1497,7 @@ impl<T: DapTransport, D: Delay> MonitorCmd for GdbTarget<T, D> {
 
 impl<T: DapTransport, D: Delay> MultiThreadBase for GdbTarget<T, D> {
     fn read_registers(&mut self, regs: &mut ArmCoreRegs, tid: Tid) -> TargetResult<(), Self> {
+        self.flash_finish(); // the resident flash loader may still be running
         self.select_core(tid_core(tid)).map_err(Self::map_err)?;
         for (i, r) in regs.r.iter_mut().enumerate() {
             *r = self.arm.read_core_reg(i as u8).map_err(Self::map_err)?;
@@ -1418,6 +1510,7 @@ impl<T: DapTransport, D: Delay> MultiThreadBase for GdbTarget<T, D> {
     }
 
     fn write_registers(&mut self, regs: &ArmCoreRegs, tid: Tid) -> TargetResult<(), Self> {
+        self.flash_finish(); // the resident flash loader may still be running
         self.select_core(tid_core(tid)).map_err(Self::map_err)?;
         for (i, r) in regs.r.iter().enumerate() {
             self.arm
@@ -1455,6 +1548,9 @@ impl<T: DapTransport, D: Delay> MultiThreadBase for GdbTarget<T, D> {
     fn read_addrs(&mut self, start: u32, data: &mut [u8], _tid: Tid) -> TargetResult<usize, Self> {
         // Diagnostic window: serve reads of 0xF000_0000.. from `diag` instead
         // of the target, so internals are visible even with a dead SWD link.
+        if self.family.in_flash_mode() && !(start >= DIAG_BASE && start.wrapping_sub(DIAG_BASE) < 64) {
+            self.flash_finish(); // the resident flash loader may still be running
+        }
         let diag_len = (self.diag.len() * 4) as u32;
         if start >= DIAG_BASE && start.wrapping_sub(DIAG_BASE) < diag_len {
             let off = (start - DIAG_BASE) as usize;
@@ -1482,6 +1578,10 @@ impl<T: DapTransport, D: Delay> MultiThreadBase for GdbTarget<T, D> {
     fn write_addrs(&mut self, start: u32, data: &[u8], _tid: Tid) -> TargetResult<(), Self> {
         if data.is_empty() {
             return Ok(());
+        }
+        let flash_window = self.family.flash_base()..self.family.flash_base() + self.family.flash_size();
+        if !flash_window.contains(&start) {
+            self.flash_finish(); // the resident flash loader may still be running
         }
         // Writes into the flash window are programmed by the family.
         if (self.family.flash_base()..self.family.flash_base() + self.family.flash_size())
@@ -1568,6 +1668,7 @@ impl<T: DapTransport, D: Delay> MultiThreadSingleStep for GdbTarget<T, D> {
         tid: Tid,
         _signal: Option<Signal>,
     ) -> Result<(), Self::Error> {
+        self.flash_finish(); // the resident flash loader may still be running
         self.actions[tid_core(tid)] = CoreAction::Step;
         Ok(())
     }
@@ -1591,6 +1692,7 @@ impl<T: DapTransport, D: Delay> HwBreakpoint for GdbTarget<T, D> {
         addr: u32,
         _kind: ArmBreakpointKind,
     ) -> TargetResult<bool, Self> {
+        self.flash_finish(); // the resident flash loader may still be running
         // FPB comparators are per-core; arm both so either core traps.
         self.fpb_set_both(addr)
     }
@@ -1600,6 +1702,7 @@ impl<T: DapTransport, D: Delay> HwBreakpoint for GdbTarget<T, D> {
         addr: u32,
         _kind: ArmBreakpointKind,
     ) -> TargetResult<bool, Self> {
+        self.flash_finish(); // the resident flash loader may still be running
         self.fpb_clear_both(addr)
     }
 }
@@ -1619,6 +1722,7 @@ impl<T: DapTransport, D: Delay> HwWatchpoint for GdbTarget<T, D> {
         len: u32,
         kind: WatchKind,
     ) -> TargetResult<bool, Self> {
+        self.flash_finish(); // the resident flash loader may still be running
         // DWT comparators are per-core; arm both so either core traps.
         for core in 0..self.family.num_cores() {
             self.select_core(core).map_err(Self::map_err)?;
@@ -1696,6 +1800,7 @@ impl<T: DapTransport, D: Delay> SwBreakpoint for GdbTarget<T, D> {
         addr: u32,
         _kind: ArmBreakpointKind,
     ) -> TargetResult<bool, Self> {
+        self.flash_finish(); // the resident flash loader may still be running
         if self.breakpoints.is_full() {
             return Ok(false);
         }

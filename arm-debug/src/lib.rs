@@ -928,18 +928,25 @@ impl<T: DapTransport> ArmDebug<T> {
         trampoline: u32,
         polls: u32,
     ) -> Result<u32, ArmError> {
-        const CLOBBERED: [u8; 8] = [
-            cortex_m::R0,
-            1,
-            2,
-            3,
-            cortex_m::SP,
-            cortex_m::LR,
-            cortex_m::PC,
-            cortex_m::XPSR,
-        ];
+        let frame = self.start_function(fn_addr, args, sp, trampoline)?;
+        self.finish_function(frame, polls)
+    }
+
+    /// First half of [`call_function`]: set up the registers and release the
+    /// core, returning once it has been observed running (or has already
+    /// re-halted at the trampoline). The caller may then talk to target RAM
+    /// through the AP while the function runs — e.g. to feed a resident
+    /// loader — and must eventually call [`finish_function`] with the
+    /// returned frame to wait for the BKPT and restore the registers.
+    pub fn start_function(
+        &mut self,
+        fn_addr: u32,
+        args: &[u32; 4],
+        sp: u32,
+        trampoline: u32,
+    ) -> Result<CallFrame, ArmError> {
         let mut saved = [0u32; 8];
-        for (slot, reg) in saved.iter_mut().zip(CLOBBERED) {
+        for (slot, reg) in saved.iter_mut().zip(CallFrame::CLOBBERED) {
             *slot = self.read_core_reg(reg)?;
         }
 
@@ -969,6 +976,16 @@ impl<T: DapTransport> ArmDebug<T> {
                 break;
             }
         }
+        Ok(CallFrame { saved })
+    }
+
+    /// Second half of [`call_function`]: wait (bounded by `polls`) for the
+    /// function started by [`start_function`] to hit the trampoline BKPT,
+    /// re-halt with interrupts unmasked, restore the saved registers and
+    /// return r0. On timeout the core is still halted, but the registers are
+    /// restored only if the halt succeeded.
+    pub fn finish_function(&mut self, frame: CallFrame, polls: u32) -> Result<u32, ArmError> {
+        let masked = cortex_m::DBGKEY | cortex_m::C_DEBUGEN | cortex_m::C_MASKINTS;
         let waited = self.wait_status_n(cortex_m::S_HALT, polls);
         // Re-halt and clear C_MASKINTS (again: only changeable while halted).
         self.write_word(cortex_m::DHCSR, masked | cortex_m::C_HALT)?;
@@ -978,11 +995,30 @@ impl<T: DapTransport> ArmDebug<T> {
         )?;
         waited?;
         let result = self.read_core_reg(cortex_m::R0)?;
-        for (slot, reg) in saved.iter().zip(CLOBBERED) {
+        for (slot, reg) in frame.saved.iter().zip(CallFrame::CLOBBERED) {
             self.write_core_reg(reg, *slot)?;
         }
         Ok(result)
     }
+}
+
+/// Register state saved by [`ArmDebug::start_function`], restored by
+/// [`ArmDebug::finish_function`].
+pub struct CallFrame {
+    saved: [u32; 8],
+}
+
+impl CallFrame {
+    const CLOBBERED: [u8; 8] = [
+        cortex_m::R0,
+        1,
+        2,
+        3,
+        cortex_m::SP,
+        cortex_m::LR,
+        cortex_m::PC,
+        cortex_m::XPSR,
+    ];
 }
 
 /// Flash Patch and Breakpoint unit (ARMv6-M FPB v1) register addresses.
