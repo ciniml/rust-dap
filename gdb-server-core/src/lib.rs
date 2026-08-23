@@ -153,10 +153,9 @@ const LOADER_DESC_HDR: u32 = LOADER_DESC + 32;
 ///     fn_program(hdr.off, data_base + (rp & 3) * 4096, hdr.len); rp += 1 }
 #[cfg(feature = "gdb-target-rp2040")]
 const RP2040_LOADER: [u32; 22] = [
-    0x68384607, 0x42886879, 0x2203d020, 0x0113400a, 0x332019db, 0x68b0461e,
-    0xd00907c0, 0x0b006830, 0x21010300, 0x22010309, 0x23d80412, 0x47a0693c,
-    0x69b96830, 0x2303687a, 0x0312401a, 0x68721889, 0x47a0697c, 0x31016879,
-    0xe7da6079, 0x280068b8, 0xbe00d0d7, 0x0000e7fe,
+    0x68384607, 0x42886879, 0x2203d020, 0x0113400a, 0x332019db, 0x68b0461e, 0xd00907c0, 0x0b006830,
+    0x21010300, 0x22010309, 0x23d80412, 0x47a0693c, 0x69b96830, 0x2303687a, 0x0312401a, 0x68721889,
+    0x47a0697c, 0x31016879, 0xe7da6079, 0x280068b8, 0xbe00d0d7, 0x0000e7fe,
 ];
 /// DHCSR poll budgets: a 4 KiB sector erase takes tens of ms.
 #[cfg(feature = "gdb-target-rp2040")]
@@ -181,6 +180,8 @@ struct RomFlashFns {
 // buffers, then all down buffers: { pName, pBuffer, SizeOfBuffer, WrOff,
 // RdOff, Flags }. Up buffers: target writes WrOff, we consume via RdOff.
 
+const HEX: &[u8; 16] = b"0123456789abcdef";
+
 /// Max control blocks reported by an RTT scan.
 const RTT_MAX_FOUND: usize = 4;
 
@@ -204,13 +205,22 @@ struct RttState {
     down_desc: Option<u32>,
 }
 
-
 /// Minimal fixed-size `fmt::Write` sink for transport diag reports (no_std/no alloc).
 mod heapless_fmt {
-    pub struct String { buf: [u8; 512], len: usize }
+    pub struct String {
+        buf: [u8; 512],
+        len: usize,
+    }
     impl String {
-        pub fn new() -> Self { Self { buf: [0; 512], len: 0 } }
-        pub fn as_str(&self) -> &str { core::str::from_utf8(&self.buf[..self.len]).unwrap_or("") }
+        pub fn new() -> Self {
+            Self {
+                buf: [0; 512],
+                len: 0,
+            }
+        }
+        pub fn as_str(&self) -> &str {
+            core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+        }
     }
     impl core::fmt::Write for String {
         fn write_str(&mut self, s: &str) -> core::fmt::Result {
@@ -277,7 +287,10 @@ trait TargetFamily {
     /// Raw SWD connect to core 0; returns DPIDR. Retry/halt/diagnostics are
     /// handled by GdbTarget. (Only the non-auto path calls this directly.)
     #[cfg_attr(feature = "gdb-target-auto", allow(dead_code))]
-    fn connect<T: DapTransport>(&mut self, arm: &mut ArmDebug<T>) -> Result<u32, arm_debug::ArmError>;
+    fn connect<T: DapTransport>(
+        &mut self,
+        arm: &mut ArmDebug<T>,
+    ) -> Result<u32, arm_debug::ArmError>;
     /// Point the link at `core`'s DP (cheap no-op when already there or when
     /// single-core). Owns the current-core cache.
     fn select_core<T: DapTransport>(
@@ -368,7 +381,10 @@ impl Family {
     /// success `*self` becomes the detected family. Detection order: the nRF
     /// parts over plain SW-DP (matched by exact DPIDR), then RP2040 over
     /// multidrop.
-    fn connect_detect<T: DapTransport>(&mut self, arm: &mut ArmDebug<T>) -> Result<u32, arm_debug::ArmError> {
+    fn connect_detect<T: DapTransport>(
+        &mut self,
+        arm: &mut ArmDebug<T>,
+    ) -> Result<u32, arm_debug::ArmError> {
         #[cfg(all(
             feature = "gdb-target-auto",
             any(feature = "gdb-target-nrf52", feature = "gdb-target-nrf54")
@@ -426,7 +442,10 @@ impl Family {
         on_family!(self, f => f.ram_end())
     }
     #[cfg_attr(feature = "gdb-target-auto", allow(dead_code))]
-    fn connect<T: DapTransport>(&mut self, arm: &mut ArmDebug<T>) -> Result<u32, arm_debug::ArmError> {
+    fn connect<T: DapTransport>(
+        &mut self,
+        arm: &mut ArmDebug<T>,
+    ) -> Result<u32, arm_debug::ArmError> {
         on_family!(self, f => f.connect(arm))
     }
     fn select_core<T: DapTransport>(
@@ -512,7 +531,10 @@ impl Rp2040Family {
         arm.call_function(fn_addr, &args, TARGET_CALL_SP, TARGET_TRAMPOLINE, polls)
     }
 
-    fn flash_enter<T: DapTransport>(&mut self, arm: &mut ArmDebug<T>) -> Result<(), arm_debug::ArmError> {
+    fn flash_enter<T: DapTransport>(
+        &mut self,
+        arm: &mut ArmDebug<T>,
+    ) -> Result<(), arm_debug::ArmError> {
         if self.flash_mode {
             return Ok(());
         }
@@ -585,8 +607,13 @@ impl Rp2040Family {
     }
 
     /// Tell the loader to finish the queue and exit, then wait for its BKPT.
-    fn loader_stop<T: DapTransport>(&mut self, arm: &mut ArmDebug<T>) -> Result<(), arm_debug::ArmError> {
-        let Some(frame) = self.loader.take() else { return Ok(()) };
+    fn loader_stop<T: DapTransport>(
+        &mut self,
+        arm: &mut ArmDebug<T>,
+    ) -> Result<(), arm_debug::ArmError> {
+        let Some(frame) = self.loader.take() else {
+            return Ok(());
+        };
         arm.write_word(LOADER_DESC + 8, 1)?;
         // Up to LOADER_SLOTS sector erase+program cycles may still be queued.
         let res = arm.finish_function(frame, POLLS_ERASE.saturating_mul(LOADER_SLOTS));
@@ -620,7 +647,10 @@ impl TargetFamily for Rp2040Family {
         }
     }
 
-    fn connect<T: DapTransport>(&mut self, arm: &mut ArmDebug<T>) -> Result<u32, arm_debug::ArmError> {
+    fn connect<T: DapTransport>(
+        &mut self,
+        arm: &mut ArmDebug<T>,
+    ) -> Result<u32, arm_debug::ArmError> {
         let dpidr = arm.connect_multidrop(rp2040::CORE0_TARGETSEL)?;
         self.cur_core = Some(0);
         Ok(dpidr)
@@ -730,7 +760,10 @@ impl TargetFamily for Nrf52Family {
         Self { erased: [0; 4] }
     }
 
-    fn connect<T: DapTransport>(&mut self, arm: &mut ArmDebug<T>) -> Result<u32, arm_debug::ArmError> {
+    fn connect<T: DapTransport>(
+        &mut self,
+        arm: &mut ArmDebug<T>,
+    ) -> Result<u32, arm_debug::ArmError> {
         arm.connect_swd()
     }
 
@@ -819,7 +852,10 @@ impl TargetFamily for Nrf54Family {
         Self
     }
 
-    fn connect<T: DapTransport>(&mut self, arm: &mut ArmDebug<T>) -> Result<u32, arm_debug::ArmError> {
+    fn connect<T: DapTransport>(
+        &mut self,
+        arm: &mut ArmDebug<T>,
+    ) -> Result<u32, arm_debug::ArmError> {
         // nRF54L is DPv2 single-drop; the plain SW-DP bring-up works.
         arm.connect_swd()
     }
@@ -1289,6 +1325,68 @@ impl<T: DapTransport, D: Delay> GdbTarget<T, D> {
         self.rtt.down_desc = self.rtt_channel_desc(false).ok().flatten();
     }
 
+    /// Take up to `buf.len()` bytes from the attached RTT up channel (target ->
+    /// host) and advance the target's RdOff. One contiguous run per call, read
+    /// in a single bulk MEM-AP transfer so the per-poll SWD round-trips
+    /// (descriptor read + RdOff write-back) are amortised over many bytes.
+    /// Returns 0 when nothing is attached, the target ring is empty, or flash
+    /// programming is in progress.
+    pub fn rtt_read_up(&mut self, buf: &mut [u8]) -> usize {
+        if self.family.in_flash_mode() || buf.is_empty() {
+            return 0;
+        }
+        let Some(desc) = self.rtt.up_desc else {
+            return 0;
+        };
+        let Ok((_, pbuf, size, wr, rd)) = self.rtt_desc(desc) else {
+            return 0;
+        };
+        if !(size > 0 && wr < size && rd < size && wr != rd) {
+            return 0;
+        }
+        let run = if wr > rd { wr - rd } else { size - rd };
+        let n = (run as usize).min(buf.len());
+        if self.arm.read_mem(pbuf + rd, &mut buf[..n]).is_err() {
+            return 0;
+        }
+        let _ = self.arm.write_word(desc + 16, (rd + n as u32) % size);
+        n
+    }
+
+    /// Forward pending RTT up-channel text to GDB as console output (`O`
+    /// packets), for probes whose transport has no spare CDC port for an RTT
+    /// terminal. The RSP allows `O` packets at any time while the target is
+    /// running, so call this from the session loop in the Running state
+    /// (gdbstub ignores a stray ack in that state). Not valid while GDB is
+    /// waiting for a command reply — keep the halted case on `monitor rtt
+    /// dump`; data that accumulates in the target ring while halted is
+    /// forwarded on the next poll after `continue`.
+    /// Returns true if a packet was written.
+    pub fn rtt_emit_console<C: gdbstub::conn::Connection>(&mut self, conn: &mut C) -> bool {
+        const CHUNK: usize = 128;
+        let mut data = [0u8; CHUNK];
+        let n = self.rtt_read_up(&mut data);
+        if n == 0 {
+            return false;
+        }
+        // $O<hex>#<cs>: checksum covers the payload between '$' and '#'.
+        let mut pkt = [0u8; 2 + 2 * CHUNK + 3];
+        pkt[0] = b'$';
+        pkt[1] = b'O';
+        let mut len = 2;
+        for &b in &data[..n] {
+            pkt[len] = HEX[(b >> 4) as usize];
+            pkt[len + 1] = HEX[(b & 0xf) as usize];
+            len += 2;
+        }
+        let cs = pkt[1..len].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+        pkt[len] = b'#';
+        pkt[len + 1] = HEX[(cs >> 4) as usize];
+        pkt[len + 2] = HEX[(cs & 0xf) as usize];
+        len += 3;
+        conn.write_all(&pkt[..len]).is_ok() && conn.flush().is_ok()
+    }
+
     /// One bounded streaming step: move up-buffer bytes into `tx` and `rx`
     /// bytes into the down buffer. Called from the session loop while the
     /// target runs (RAM is readable via the MEM-AP regardless of core state).
@@ -1305,24 +1403,15 @@ impl<T: DapTransport, D: Delay> GdbTarget<T, D> {
         // TX queue in one bulk MEM-AP transfer (256 B), so the per-poll SWD
         // round-trips — descriptor read + RdOff write-back — are amortised
         // over many more bytes than a 64 B chunk, lifting throughput.
-        if let Some(desc) = self.rtt.up_desc {
-            let room = tx.capacity() - tx.len();
-            if room >= 64 {
-                if let Ok((_, pbuf, size, wr, rd)) = self.rtt_desc(desc) {
-                    if size > 0 && wr < size && rd < size && wr != rd {
-                        let run = if wr > rd { wr - rd } else { size - rd };
-                        let mut chunk = [0u8; 256];
-                        let n = (run as usize).min(chunk.len()).min(room);
-                        if self.arm.read_mem(pbuf + rd, &mut chunk[..n]).is_ok() {
-                            for &b in &chunk[..n] {
-                                let _ = tx.enqueue(b);
-                            }
-                            let _ = self.arm.write_word(desc + 16, (rd + n as u32) % size);
-                            moved = true;
-                        }
-                    }
-                }
+        let room = tx.capacity() - tx.len();
+        if room >= 64 {
+            let mut chunk = [0u8; 256];
+            let n = room.min(chunk.len());
+            let got = self.rtt_read_up(&mut chunk[..n]);
+            for &b in &chunk[..got] {
+                let _ = tx.enqueue(b);
             }
+            moved |= got > 0;
         }
         // Down: host CDC -> target.
         if let Some(desc) = self.rtt.down_desc {
@@ -1438,7 +1527,7 @@ impl<T: DapTransport, D: Delay> MonitorCmd for GdbTarget<T, D> {
                 outputln!(out, "rtt: detached");
             }
             _ if cmd.starts_with(b"rtt attach ") || cmd.starts_with(b"rtt setup ") => {
-                let arg = cmd.split(|&b| b == b' ').last().unwrap_or(b"");
+                let arg = cmd.split(|&b| b == b' ').next_back().unwrap_or(b"");
                 match parse_hex(arg) {
                     Some(addr) => {
                         // Verify the ID before accepting the address.
@@ -1456,7 +1545,7 @@ impl<T: DapTransport, D: Delay> MonitorCmd for GdbTarget<T, D> {
                 }
             }
             _ if cmd.starts_with(b"rtt channel ") => {
-                let arg = cmd.split(|&b| b == b' ').last().unwrap_or(b"");
+                let arg = cmd.split(|&b| b == b' ').next_back().unwrap_or(b"");
                 match parse_hex(arg) {
                     Some(ch) if ch < 16 => {
                         self.rtt.channel = ch;
@@ -1470,9 +1559,22 @@ impl<T: DapTransport, D: Delay> MonitorCmd for GdbTarget<T, D> {
                 // Connect/session diagnostics kept by connect_and_halt(), plus
                 // whatever the transport wants to report about itself.
                 let d = self.diag;
-                outputln!(out, "connect: attempts={} ok_attempt={:#x} detect={:#x} halt={:#x} dhcsr={:#x}",
-                    d[0], d[1], d[2], d[3], d[4]);
-                outputln!(out, "session: failed_ops={} dpidr={:#010x} (DIAG_OK={:#x})", d[5], d[6], DIAG_OK);
+                outputln!(
+                    out,
+                    "connect: attempts={} ok_attempt={:#x} detect={:#x} halt={:#x} dhcsr={:#x}",
+                    d[0],
+                    d[1],
+                    d[2],
+                    d[3],
+                    d[4]
+                );
+                outputln!(
+                    out,
+                    "session: failed_ops={} dpidr={:#010x} (DIAG_OK={:#x})",
+                    d[5],
+                    d[6],
+                    DIAG_OK
+                );
                 let mut buf = heapless_fmt::String::new();
                 self.arm.transport().diag_report(&mut buf);
                 for line in buf.as_str().lines() {
@@ -1548,7 +1650,9 @@ impl<T: DapTransport, D: Delay> MultiThreadBase for GdbTarget<T, D> {
     fn read_addrs(&mut self, start: u32, data: &mut [u8], _tid: Tid) -> TargetResult<usize, Self> {
         // Diagnostic window: serve reads of 0xF000_0000.. from `diag` instead
         // of the target, so internals are visible even with a dead SWD link.
-        if self.family.in_flash_mode() && !(start >= DIAG_BASE && start.wrapping_sub(DIAG_BASE) < 64) {
+        if self.family.in_flash_mode()
+            && !(start >= DIAG_BASE && start.wrapping_sub(DIAG_BASE) < 64)
+        {
             self.flash_finish(); // the resident flash loader may still be running
         }
         let diag_len = (self.diag.len() * 4) as u32;
@@ -1579,7 +1683,8 @@ impl<T: DapTransport, D: Delay> MultiThreadBase for GdbTarget<T, D> {
         if data.is_empty() {
             return Ok(());
         }
-        let flash_window = self.family.flash_base()..self.family.flash_base() + self.family.flash_size();
+        let flash_window =
+            self.family.flash_base()..self.family.flash_base() + self.family.flash_size();
         if !flash_window.contains(&start) {
             self.flash_finish(); // the resident flash loader may still be running
         }
@@ -1693,7 +1798,7 @@ impl<T: DapTransport, D: Delay> HwBreakpoint for GdbTarget<T, D> {
         _kind: ArmBreakpointKind,
     ) -> TargetResult<bool, Self> {
         self.flash_finish(); // the resident flash loader may still be running
-        // FPB comparators are per-core; arm both so either core traps.
+                             // FPB comparators are per-core; arm both so either core traps.
         self.fpb_set_both(addr)
     }
 
@@ -1723,7 +1828,7 @@ impl<T: DapTransport, D: Delay> HwWatchpoint for GdbTarget<T, D> {
         kind: WatchKind,
     ) -> TargetResult<bool, Self> {
         self.flash_finish(); // the resident flash loader may still be running
-        // DWT comparators are per-core; arm both so either core traps.
+                             // DWT comparators are per-core; arm both so either core traps.
         for core in 0..self.family.num_cores() {
             self.select_core(core).map_err(Self::map_err)?;
             let ok = self

@@ -595,14 +595,14 @@ mod app {
                 }
             }
             target.note_session_end();
-                                                               // GDB detached: the state machine (and its borrow of conn) is
-                                                               // dropped. Drop the ended session's stale RX, re-establish the
-                                                               // SWD link + halt (may be slow — it can pulse SRST to recover a
-                                                               // wedged target), then purge AGAIN: a new GDB that attached
-                                                               // during the slow reconnect will have retransmitted its opening
-                                                               // qSupported several times, and processing those stale copies
-                                                               // desyncs the RSP framing. Discarding them lets the fresh stub
-                                                               // answer GDB's next (clean) retransmit exactly once.
+            // GDB detached: the state machine (and its borrow of conn) is
+            // dropped. Drop the ended session's stale RX, re-establish the
+            // SWD link + halt (may be slow — it can pulse SRST to recover a
+            // wedged target), then purge AGAIN: a new GDB that attached
+            // during the slow reconnect will have retransmitted its opening
+            // qSupported several times, and processing those stale copies
+            // desyncs the RSP framing. Discarding them lets the fresh stub
+            // answer GDB's next (clean) retransmit exactly once.
             conn.purge();
             target.connect_and_halt();
             conn.purge();
