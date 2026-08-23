@@ -1,0 +1,63 @@
+name: Dabao Board firmware
+
+# Builds the Dabao Board GDB-server image (Xous app `dabao-gdb` from the
+# ciniml/xous-core fork, which consumes this repo's crates by relative path)
+# and uploads the UF2 images as a workflow artifact. See boards/dabao/README.md.
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'gdb-server-core/**'
+      - 'arm-debug/**'
+      - 'rust-dap/**'
+      - 'boards/dabao/**'
+      - '.github/workflows/dabao.yml'
+  pull_request:
+    # any base branch, so stacked PRs (e.g. onto gdb-server-core-extract) get
+    # the build too
+    paths:
+      - 'gdb-server-core/**'
+      - 'arm-debug/**'
+      - 'rust-dap/**'
+      - 'boards/dabao/**'
+      - '.github/workflows/dabao.yml'
+  workflow_dispatch:
+
+env:
+  # Must be a rustc version for which a Xous toolkit release exists
+  # (https://github.com/betrusted-io/rust/releases); bump together with it.
+  RUST_TOOLCHAIN: 1.97.1
+  XOUS_REPO: ciniml/xous-core
+  XOUS_REF: dabao-gdb-server
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # The two checkouts must be siblings: apps-dabao/dabao-gdb/Cargo.toml
+      # references ../../../rust-dap/{rust-dap,arm-debug,gdb-server-core}.
+      - uses: actions/checkout@v4
+        with:
+          path: rust-dap
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.XOUS_REPO }}
+          ref: ${{ env.XOUS_REF }}
+          path: xous-core
+          fetch-depth: 0   # xtask embeds `git describe`
+      - name: install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install ${RUST_TOOLCHAIN} --profile minimal
+          rustup default ${RUST_TOOLCHAIN}
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: xous-core
+      - name: build (installs the Xous toolkit on a cold cache)
+        run: ./boards/dabao/build.sh --no-clone --xous-core ../xous-core
+        working-directory: rust-dap
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dabao-firmware
+          path: rust-dap/boards/dabao/dist/*
+          if-no-files-found: error

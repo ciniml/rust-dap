@@ -19,6 +19,7 @@ Arm用のデバッグ・アダプタのプロトコルおよびファームウ�
 | Seeeduino XIAO    | CMSIS-DAP       | [./boards/xiao_m0](./boards/xiao_m0) | 
 | XIAO RP2040       | CMSIS-DAP, UART | [./boards/xiao_rp2040](./boards/xiao_rp2040) | 
 | Raspberry Pi Pico | CMSIS-DAP, UART | [./boards/rpi_pico](./boards/rpi_pico) | 
+| Dabao Board (Baochip-1x) | GDB サーバ(USB 上の RSP)、RTT | [./boards/dabao](./boards/dabao) |
 
 ## ライセンス
 
