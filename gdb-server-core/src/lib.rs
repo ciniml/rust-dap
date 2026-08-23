@@ -390,18 +390,32 @@ impl Family {
             any(feature = "gdb-target-nrf52", feature = "gdb-target-nrf54")
         ))]
         {
-            // One plain SW-DP bring-up serves both nRF families; dispatch on
-            // the returned DPIDR.
-            if let Ok(id) = arm.connect_swd() {
-                #[cfg(feature = "gdb-target-nrf52")]
-                if id == arm_debug::nrf52::DPIDR {
-                    *self = Family::Nrf52(Nrf52Family::new());
-                    return Ok(id);
-                }
-                #[cfg(feature = "gdb-target-nrf54")]
-                if id == arm_debug::nrf54::DPIDR {
-                    *self = Family::Nrf54(Nrf54Family::new());
-                    return Ok(id);
+            // Identify the DP with a read-only probe first and only bring
+            // up (ABORT/SELECT/power-up writes) a DP we recognise as nRF.
+            // Bringing up whatever answers is not safe: on a multidrop part
+            // such as the RP2040 every DP answers after a plain line reset,
+            // and the power-up request also reaches the Rescue DP, which
+            // resets the chip into a state only SRST recovers from. That is
+            // why a live RP2040 needed the SRST attempts of connect_and_halt
+            // (and so was reset on every GDB attach) before this check.
+            let probed = arm.probe_swd().ok();
+            let is_nrf = matches!(
+                probed,
+                Some(id) if (cfg!(feature = "gdb-target-nrf52") && id == arm_debug::nrf52::DPIDR)
+                    || (cfg!(feature = "gdb-target-nrf54") && id == arm_debug::nrf54::DPIDR)
+            );
+            if is_nrf {
+                if let Ok(id) = arm.connect_swd() {
+                    #[cfg(feature = "gdb-target-nrf52")]
+                    if id == arm_debug::nrf52::DPIDR {
+                        *self = Family::Nrf52(Nrf52Family::new());
+                        return Ok(id);
+                    }
+                    #[cfg(feature = "gdb-target-nrf54")]
+                    if id == arm_debug::nrf54::DPIDR {
+                        *self = Family::Nrf54(Nrf54Family::new());
+                        return Ok(id);
+                    }
                 }
             }
         }
