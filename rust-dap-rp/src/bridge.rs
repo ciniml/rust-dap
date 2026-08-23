@@ -136,6 +136,10 @@ pub fn on_uart_rx_irq<D: UartDevice, P: ValidUartPinout<D>, const N: usize>(
 }
 
 /// Re-configures the UART for a new CDC line coding.
+///
+/// `UartConfig::data_rate` is a `NonZeroU32`, so a zero baud rate (which hosts
+/// send on port close) is already rejected by `UartConfig::try_from` before it
+/// reaches here — `enable()` cannot see the divide-by-zero that would panic.
 pub fn reconfigure_uart<D: UartDevice + SplitUart, P: ValidUartPinout<D>>(
     uart_reader: &mut Option<UartReader<D, P>>,
     uart_writer: &mut Option<UartWriter<D, P>>,
