@@ -12,7 +12,41 @@ permissions:
   contents: write
 
 jobs:
+  # Dabao Board: the firmware is a Xous app in the ciniml/xous-core fork that
+  # consumes this repo's crates by relative path (see boards/dabao/README.md).
+  # Built in its own job (needs the Xous toolkit) and merged into the release.
+  dabao:
+    runs-on: ubuntu-latest
+    env:
+      RUST_TOOLCHAIN: 1.97.1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: rust-dap
+      - uses: actions/checkout@v4
+        with:
+          repository: ciniml/xous-core
+          ref: dabao-gdb-server
+          path: xous-core
+          fetch-depth: 0
+      - name: install Rust ${{ env.RUST_TOOLCHAIN }}
+        run: |
+          rustup toolchain install ${RUST_TOOLCHAIN} --profile minimal
+          rustup default ${RUST_TOOLCHAIN}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: xous-core
+      - name: build
+        run: ./boards/dabao/build.sh --no-clone --xous-core ../xous-core
+        working-directory: rust-dap
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dabao-firmware
+          path: rust-dap/boards/dabao/dist/*
+          if-no-files-found: error
+
   release:
+    needs: dabao
     runs-on: ubuntu-latest
     container:
       image: rust:1.90-slim-bookworm
@@ -39,6 +73,10 @@ jobs:
              --features gdb-target-auto,gdb-target-rp2040,gdb-target-nrf52,gdb-target-nrf54)
           (cd boards/xiao_rp2040 && cargo build --release)
           (cd boards/xiao_m0 && cargo build --release)
+      - uses: actions/download-artifact@v4
+        with:
+          name: dabao-firmware
+          path: dabao
       - name: package artifacts
         run: |
           set -eu
@@ -58,6 +96,11 @@ jobs:
           elf2uf2-rs "$T/rust-dap-xiao-rp2040" "dist/rust-dap-cmsis-dap-xiao-rp2040-$V.uf2"
           # SAMD21 (xiao_m0): ELF only — UF2 uses a different family id.
           cp "$T/rust-dap-xiao" "dist/rust-dap-cmsis-dap-xiao-m0-$V.elf"
+          # Dabao Board (built by the `dabao` job): loader/xous/apps UF2 set + app ELF.
+          for f in loader xous apps; do
+            cp "dabao/$f.uf2" "dist/rust-dap-gdb-server-dabao-$V-$f.uf2"
+          done
+          cp dabao/dabao-gdb "dist/rust-dap-gdb-server-dabao-$V.elf"
           ls -la dist
       - name: create GitHub Release
         uses: softprops/action-gh-release@v2
