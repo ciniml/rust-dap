@@ -539,6 +539,11 @@ mod app {
             c.local.debug_usb_irq_out.set_low().ok();
             return; // Nothing to do at this time...
         }
+        // 1200 bps touch on the CDC port → reboot into the bootloader
+        // (reflash without pressing BOOTSEL), same as gdb_server/nrf52_probe.
+        c.shared
+            .usb_serial
+            .lock(|usb_serial| rust_dap_rp::util::bootsel_on_1200bps_touch(usb_serial));
         // Defer DAP command processing to the low priority dap_process task.
         dap_process::spawn().ok();
 

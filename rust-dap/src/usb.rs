@@ -133,8 +133,15 @@ where
                 bytes_processed = self.pending_out_packet_size;
             }
 
-            if MAX_PACKET_SIZE <= (response_packet_length + response_size) {
-                // Flush when the accumulated responses exceed the packet size.
+            if response_packet_length > 0
+                && MAX_PACKET_SIZE < response_packet_length + response_size
+            {
+                // Flush the accumulated responses when the next one would not
+                // fit in the same packet. A response that fills the packet
+                // exactly (e.g. a 15-word DAP_TransferBlock read = 64 bytes)
+                // must NOT trigger a flush of the empty accumulator: that sent
+                // a zero-length packet ahead of the real reply, which pyocd
+                // takes as the (empty) response and probe-rs misreads.
                 self.next_in_packet_size = Some(response_packet_length);
                 self.send_next_packet().ok();
                 response_packet_length = 0;
