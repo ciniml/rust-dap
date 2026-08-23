@@ -175,6 +175,16 @@ where
 {
     #[rustfmt::skip]
     pub fn new(pio0: pac::PIO0, clk: pio0::Pin<C>, dat: pio0::Pin<D>, rst: pio0::Pin<E>, system_clock_hz: u32, resets: &mut pac::RESETS) -> Self {
+        // The HAL hands PIO-function pins over with the pad's reset-default
+        // pull-down still enabled. That is wrong for every SWD line: SWDIO
+        // fights the target's pull-up, and nRESET, which most targets only
+        // hold up with a weak internal pull-up (RP2040 RUN: ~50 kOhm), gets
+        // divided down to the input threshold and keeps the target in reset —
+        // the probe then sees no ACK on anything. Float the data/clock lines
+        // and pull nRESET up instead.
+        let clk = clk.into_pull_type::<hal::gpio::PullNone>();
+        let dat = dat.into_pull_type::<hal::gpio::PullNone>();
+        let rst = rst.into_pull_type::<hal::gpio::PullUp>();
         // rp2040-hal 0.12 uses an instance-level pin number; read it from
         // the (PIO-configured) pin instances. Forget them afterwards so their
         // Drop does not revert the pin function the PIO relies on.

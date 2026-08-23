@@ -101,13 +101,21 @@ impl Dispatcher {
         let identity = &self.config.identity;
         let length: usize = {
             let buffer = &mut response[1..];
+            // DAP_Info strings are NUL-terminated (CMSIS-DAP spec); hosts such
+            // as pyocd strip the last byte as the terminator, so sending the
+            // bare bytes loses the final character (e.g. "v0.2.0" -> "v0.2.").
+            // An empty string is reported as zero length (no terminator).
             let write_str = |buffer: &mut [u8], s: &str| -> Result<usize, DapError> {
                 let bytes = s.as_bytes();
-                if buffer.len() < bytes.len() {
+                if bytes.is_empty() {
+                    return Ok(0);
+                }
+                if buffer.len() < bytes.len() + 1 {
                     return Err(DapError::InternalError);
                 }
                 buffer[..bytes.len()].copy_from_slice(bytes);
-                Ok(bytes.len())
+                buffer[bytes.len()] = 0;
+                Ok(bytes.len() + 1)
             };
             match id {
                 DapInfoId::Vendor => write_str(buffer, identity.vendor)?,
@@ -911,14 +919,14 @@ mod test {
         let (req, len) = d
             .execute(&mut t, 64, DapCommandId::Info, &[0x01], &mut resp)
             .unwrap();
-        assert_eq!((req, len), (1, 1 + 10));
-        assert_eq!(&resp[1..11], b"TestVendor");
+        assert_eq!((req, len), (1, 1 + 10 + 1)); // + NUL terminator
+        assert_eq!(&resp[1..12], b"TestVendor\0");
         // Product Firmware Version (0x09): git revision string
         let (_, len) = d
             .execute(&mut t, 64, DapCommandId::Info, &[0x09], &mut resp)
             .unwrap();
-        assert_eq!(len, 1 + 7);
-        assert_eq!(&resp[1..8], b"abc1234");
+        assert_eq!(len, 1 + 7 + 1);
+        assert_eq!(&resp[1..9], b"abc1234\0");
         // PacketSize reflects MAX_PACKET_SIZE
         let (_, len) = d
             .execute(&mut t, 512, DapCommandId::Info, &[0xff], &mut resp)

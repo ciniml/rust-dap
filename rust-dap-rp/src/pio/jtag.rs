@@ -171,6 +171,14 @@ where
         system_clock_hz: u32,
         resets: &mut pac::RESETS,
     ) -> Self {
+        // Drop the pad's reset-default pull-down that the HAL leaves on PIO
+        // pins (see pio/swd.rs): float the signal lines, pull the resets up.
+        let tck = tck.into_pull_type::<hal::gpio::PullNone>();
+        let tms = tms.into_pull_type::<hal::gpio::PullNone>();
+        let tdi = tdi.into_pull_type::<hal::gpio::PullNone>();
+        let tdo = tdo.into_pull_type::<hal::gpio::PullNone>();
+        let trst = trst.map(|p| p.into_pull_type::<hal::gpio::PullUp>());
+        let srst = srst.map(|p| p.into_pull_type::<hal::gpio::PullUp>());
         // rp2040-hal 0.12: pin number is instance-level (`.id().num`), not a
         // type const. Forget the pins so Drop does not revert their PIO func.
         let tck_pin_id = tck.id().num;
@@ -178,16 +186,8 @@ where
         let tdi_pin_id = tdi.id().num;
         let tdo_pin_id = tdo.id().num;
         core::mem::forget((tck, tms, tdi, tdo));
-        let trst_pin_id = if let Some(p) = &trst {
-            Some(p.id().num)
-        } else {
-            None
-        };
-        let srst_pin_id: Option<u8> = if let Some(p) = &srst {
-            Some(p.id().num)
-        } else {
-            None
-        };
+        let trst_pin_id = trst.as_ref().map(|p| p.id().num);
+        let srst_pin_id: Option<u8> = srst.as_ref().map(|p| p.id().num);
 
         let program = jtag_pin_set();
         let divisor = DEFAULT_PIO_DIVISOR;
