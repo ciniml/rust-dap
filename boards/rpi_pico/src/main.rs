@@ -66,9 +66,9 @@ mod app {
     use rust_dap_rp::util::UartConfigAndClock;
     // util::SwdIoSet/JtagIoSet select the PIO or bit-banging transport via
     // the `bitbang` feature.
-    #[cfg(feature = "swd")]
+    #[cfg(all(feature = "swd", not(feature = "jtag"), not(feature = "swj")))]
     type SwdIoSet = rust_dap_rp::util::SwdIoSet<GpioSwClk, GpioSwdIo, GpioReset>;
-    #[cfg(feature = "jtag")]
+    #[cfg(all(feature = "jtag", not(feature = "swj")))]
     type JtagIoSet = rust_dap_rp::util::JtagIoSet<
         JtagTckPin,
         JtagTmsPin,
@@ -88,9 +88,11 @@ mod app {
         JtagTrstPin,
         GpioReset,
     >;
-    #[cfg(feature = "swd")]
+    // Transports are mutually exclusive; when several are enabled at once (e.g.
+    // `--features swj` keeps the default `swd`), swj wins, then jtag, then swd.
+    #[cfg(all(feature = "swd", not(feature = "jtag"), not(feature = "swj")))]
     type IoSet = SwdIoSet;
-    #[cfg(feature = "jtag")]
+    #[cfg(all(feature = "jtag", not(feature = "swj")))]
     type IoSet = JtagIoSet;
     #[cfg(feature = "swj")]
     type IoSet = SwjIoSet;
@@ -212,7 +214,12 @@ mod app {
         ));
         c.local.USB_ALLOCATOR.replace(usb_allocator);
         let usb_allocator = c.local.USB_ALLOCATOR.as_ref().unwrap();
-        #[cfg(all(feature = "swd", feature = "bitbang"))]
+        #[cfg(all(
+            feature = "swd",
+            feature = "bitbang",
+            not(feature = "jtag"),
+            not(feature = "swj")
+        ))]
         let (usb_serial, usb_dap, usb_bus) = {
             use rust_dap::{DapConfig, DapIdentity};
             use rust_dap_rp::bitbang::{CortexMDelay, PicoBidirPin};
@@ -242,7 +249,12 @@ mod app {
             )
         };
 
-        #[cfg(all(feature = "swd", not(feature = "bitbang")))]
+        #[cfg(all(
+            feature = "swd",
+            not(feature = "bitbang"),
+            not(feature = "jtag"),
+            not(feature = "swj")
+        ))]
         let (usb_serial, usb_dap, usb_bus) = {
             use rust_dap::{DapConfig, DapIdentity};
             use rust_dap_rp::util::UsbIdentity;
@@ -282,7 +294,7 @@ mod app {
             )
         };
 
-        #[cfg(all(feature = "jtag", feature = "bitbang"))]
+        #[cfg(all(feature = "jtag", feature = "bitbang", not(feature = "swj")))]
         let (usb_serial, usb_dap, usb_bus) = {
             use rust_dap::{DapConfig, DapIdentity};
             use rust_dap_rp::bitbang::{CortexMDelay, PicoBidirPin};
@@ -320,7 +332,7 @@ mod app {
             )
         };
 
-        #[cfg(all(feature = "jtag", not(feature = "bitbang")))]
+        #[cfg(all(feature = "jtag", not(feature = "bitbang"), not(feature = "swj")))]
         let (usb_serial, usb_dap, usb_bus) = {
             use rust_dap::{DapConfig, DapIdentity};
             use rust_dap_rp::util::UsbIdentity;
