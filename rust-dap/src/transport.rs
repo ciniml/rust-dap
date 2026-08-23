@@ -235,6 +235,11 @@ pub trait DapTransport {
         Err(DapError::NotSupported)
     }
 
+    /// Append transport-specific diagnostics (counters, last error, engine
+    /// state) for `monitor diag`. Default: nothing. Used to debug transports
+    /// whose internals aren't otherwise observable (e.g. offloaded engines).
+    fn diag_report(&self, _out: &mut dyn core::fmt::Write) {}
+
     // ---- JTAG ----
 
     /// Single DPACC/APACC transfer over JTAG. No retries.
