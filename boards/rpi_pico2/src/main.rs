@@ -460,7 +460,15 @@ mod app {
 
             let rx_dequeued = (&mut c.shared.usb_serial, &mut c.shared.uart_rx_consumer).lock(
                 |usb_serial, uart_rx_consumer| {
-                    bridge::drain_uart_rx_queue(usb_serial, uart_rx_consumer)
+                    // Forward only while the host has the port open (DTR); drop
+                    // otherwise so a closed session's tail doesn't leak to the
+                    // next open. Discarding leaves the queue empty (room again).
+                    if usb_serial.dtr() {
+                        bridge::drain_uart_rx_queue(usb_serial, uart_rx_consumer)
+                    } else {
+                        bridge::discard_uart_rx_queue(uart_rx_consumer);
+                        true
+                    }
                 },
             );
             if rx_dequeued {
@@ -530,7 +538,14 @@ mod app {
 
         let rx_dequeued = (&mut c.shared.usb_serial, &mut c.shared.uart_rx_consumer).lock(
             |usb_serial, uart_rx_consumer| {
-                bridge::drain_uart_rx_queue(usb_serial, uart_rx_consumer)
+                // See the USB-task drain: only forward while DTR is asserted,
+                // otherwise discard so a closed session's tail doesn't leak.
+                if usb_serial.dtr() {
+                    bridge::drain_uart_rx_queue(usb_serial, uart_rx_consumer)
+                } else {
+                    bridge::discard_uart_rx_queue(uart_rx_consumer);
+                    true
+                }
             },
         );
         if rx_dequeued {

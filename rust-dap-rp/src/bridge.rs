@@ -111,6 +111,14 @@ pub fn drain_uart_rx_queue<const N: usize>(
     dequeued
 }
 
+/// Drops any buffered UART->USB data without forwarding it. Call while the host
+/// has the CDC port closed (DTR deasserted): the UART keeps receiving after a
+/// close, and without this the queued bytes would be flushed to whoever opens
+/// the port next, leaking one session's tail into the following one.
+pub fn discard_uart_rx_queue<const N: usize>(uart_rx_consumer: &mut Consumer<u8, N>) {
+    while uart_rx_consumer.dequeue().is_some() {}
+}
+
 /// UART RX interrupt body: drains the RX FIFO into the queue, calling
 /// `on_byte` per received byte. When the queue is full the RX interrupt is
 /// disabled to avoid an interrupt storm; the queue drain sites re-enable it
