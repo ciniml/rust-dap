@@ -27,18 +27,18 @@ ram-exec = ["rust-dap-rp/ram-exec"] # Execute-in-SRAM support
 # --- Standalone GDB server (RSP over USB-CDC) ------------------------------
 # Stub core: gdbstub + the arm-debug ADIv5/Cortex-M stack. Target-chip
 # support is selected with one or more gdb-target-* features.
-gdbserver = ["dep:gdbstub", "dep:gdbstub_arch", "dep:arm-debug"]
+gdbserver = ["dep:gdbstub", "dep:gdbstub_arch", "dep:arm-debug", "dep:gdb-server-core"]
 # RP2040 targets: SWD multidrop connect, dual-core threads, bootrom flashing.
-gdb-target-rp2040 = ["gdbserver"]
+gdb-target-rp2040 = ["gdbserver", "gdb-server-core?/gdb-target-rp2040"]
 # nRF52 targets: SW-DP connect, single core, NVMC flashing, CTRL-AP recovery.
-gdb-target-nrf52 = ["gdbserver"]
+gdb-target-nrf52 = ["gdbserver", "gdb-server-core?/gdb-target-nrf52"]
 # nRF54L targets: DPv2 SW-DP, Cortex-M33, RRAM flashing, CTRL-AP #2.
-gdb-target-nrf54 = ["gdbserver"]
+gdb-target-nrf54 = ["gdbserver", "gdb-server-core?/gdb-target-nrf54"]
 # Auto-detect the target family (by DPIDR) among the enabled gdb-target-*
 # features, so one build debugs whichever single target is wired. Combine
 # with the families to include, e.g.
 #   --features gdb-target-auto,gdb-target-rp2040,gdb-target-nrf52
-gdb-target-auto = ["gdbserver"]
+gdb-target-auto = ["gdbserver", "gdb-server-core?/gdb-target-auto"]
 # Add a third CDC port to gdb_server that bridges the target UART (GPIO0=TX,
 # GPIO1=RX) to the host, fixed at 115200 8N1. Off by default to keep the lean
 # RSP+RTT build (and its USB endpoint budget) unchanged.
@@ -78,6 +78,7 @@ features = ["rp2040"]
 [dependencies]
 rust-dap = { path = "../../rust-dap" }
 arm-debug = { path = "../../arm-debug", optional = true }
+gdb-server-core = { path = "../../gdb-server-core", optional = true }
 gdbstub = { version = "0.7", default-features = false, optional = true }
 gdbstub_arch = { version = "0.3", optional = true }
 panic-halt = "0.2"

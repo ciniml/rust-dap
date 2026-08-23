@@ -1,0 +1,23 @@
+[package]
+name = "gdb-server-core"
+version = "0.1.0"
+authors = ["Kenta IDA <fuga@fugafuga.org>"]
+edition = "2021"
+license = "Apache-2.0"
+description = "Board-independent GDB Remote Serial Protocol target: gdbstub + arm-debug over any rust-dap DapTransport"
+
+[features]
+default = []
+# Target-chip families. Enable one or more; add gdb-target-auto to probe the
+# wire and pick the matching family at runtime.
+gdb-target-rp2040 = []
+gdb-target-nrf52 = []
+gdb-target-nrf54 = []
+gdb-target-auto = []
+
+[dependencies]
+rust-dap = { path = "../rust-dap" }
+arm-debug = { path = "../arm-debug" }
+gdbstub = { version = "0.7", default-features = false }
+gdbstub_arch = { version = "0.3" }
+heapless = "0.7"
