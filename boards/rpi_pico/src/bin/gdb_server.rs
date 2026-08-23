@@ -567,8 +567,24 @@ mod app {
                     }
                     GdbStubStateMachine::Running(mut inner) => {
                         if let Some(b) = inner.borrow_conn().0.read_byte() {
-                            // Typically a Ctrl-C (0x03) to interrupt.
-                            inner.incoming_data(target, b).ok()
+                            if b == b'$' {
+                                // A command packet while the target runs: an
+                                // all-stop GDB only sends Ctrl-C (0x03) or acks
+                                // here, so this is a *new* GDB whose previous
+                                // session went away without detaching (the
+                                // host closed the port while running). Feeding
+                                // it to this stub would answer its qSupported
+                                // in the old session's no-ack mode — no '+' —
+                                // which GDB ignores and retransmits until it
+                                // finally NACKs, ~80 s later. End the session
+                                // instead: the outer loop halts + reconnects
+                                // and purges, and GDB's retransmit (after
+                                // remotetimeout) meets a fresh stub.
+                                None
+                            } else {
+                                // Typically a Ctrl-C (0x03) to interrupt.
+                                inner.incoming_data(target, b).ok()
+                            }
                         } else if let Some(reason) = target.poll_stopped() {
                             // A core stopped on its own (breakpoint /
                             // watchpoint / step done); the others were

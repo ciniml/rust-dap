@@ -340,13 +340,18 @@ impl<T: DapTransport> ArmDebug<T> {
         Ok(dpidr)
     }
 
-    /// Connect over SWD to a plain (non-multidrop) SW-DP — nRF52 and most
-    /// single-core Cortex-M parts. Returns the DPIDR.
-    ///
-    /// Sequence: line reset, JTAG-to-SWD select (0xE79E), line reset,
-    /// read DPIDR, clear errors, SELECT=0, power up. No dormant/TARGETSEL:
-    /// SW-DPv1 has neither.
-    pub fn connect_swd(&mut self) -> Result<u32, ArmError> {
+    /// Read-only half of [`connect_swd`]: line reset, JTAG-to-SWD select
+    /// (0xE79E), line reset, read DPIDR. Returns the DPIDR without writing
+    /// anything to the DP, so it is safe to use as a target-type probe on a
+    /// part that turns out to be a multidrop (SWD v2) system: after a line
+    /// reset without TARGETSEL every DP on the bus answers, and the writes
+    /// `connect_swd` goes on to make (ABORT, SELECT, CTRL/STAT power-up)
+    /// would land on all of them. On an RP2040 that includes the Rescue DP,
+    /// whose CDBGPWRUPREQ is a chip-level rescue reset — the core DPs stop
+    /// answering until SRST. Observed on hardware: a `connect_swd` probe of a
+    /// live RP2040 succeeded (DPIDR read back fine) and left the target dead
+    /// for the multidrop connect that followed.
+    pub fn probe_swd(&mut self) -> Result<u32, ArmError> {
         self.transport.connect(ConnectPort::Swd, &self.config)?;
         self.swd_line_reset()?;
         self.jtag_to_swd()?;
@@ -356,6 +361,17 @@ impl<T: DapTransport> ArmDebug<T> {
         if dpidr == 0 || dpidr == 0xffff_ffff {
             return Err(ArmError::NoTarget);
         }
+        Ok(dpidr)
+    }
+
+    /// Connect over SWD to a plain (non-multidrop) SW-DP — nRF52 and most
+    /// single-core Cortex-M parts. Returns the DPIDR.
+    ///
+    /// Sequence: line reset, JTAG-to-SWD select (0xE79E), line reset,
+    /// read DPIDR, clear errors, SELECT=0, power up. No dormant/TARGETSEL:
+    /// SW-DPv1 has neither.
+    pub fn connect_swd(&mut self) -> Result<u32, ArmError> {
+        let dpidr = self.probe_swd()?;
         self.select = 0xffff_ffff;
         self.csw_valid = false;
         self.apsel = 0;
