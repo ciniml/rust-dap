@@ -167,6 +167,8 @@ mod app {
         .ok()
         .unwrap();
 
+        let serial_number = rust_dap_rp::unique_id::serial_number();
+
         let uart_pins = (
             pins.gpio0.into_function::<hal::gpio::FunctionUart>(), // TxD
             pins.gpio1.into_function::<hal::gpio::FunctionUart>(), // RxD
@@ -212,12 +214,12 @@ mod app {
                 swdio,
                 usb_allocator,
                 UsbIdentity {
-                    serial: "raspberry-pi-pico-2-swd",
+                    serial: serial_number,
                     ..UsbIdentity::default()
                 },
                 DapConfig::new(
                     DapIdentity {
-                        serial_number: "raspberry-pi-pico-2-swd",
+                        serial_number,
                         product_firmware_version: env!("GIT_REV"),
                         ..DapIdentity::default()
                     },
@@ -255,12 +257,12 @@ mod app {
                 swdio,
                 usb_allocator,
                 UsbIdentity {
-                    serial: "raspberry-pi-pico-2-swd",
+                    serial: serial_number,
                     ..UsbIdentity::default()
                 },
                 DapConfig::new(
                     DapIdentity {
-                        serial_number: "raspberry-pi-pico-2-swd",
+                        serial_number,
                         product_firmware_version: env!("GIT_REV"),
                         ..DapIdentity::default()
                     },
@@ -294,12 +296,12 @@ mod app {
                 jtagio,
                 usb_allocator,
                 UsbIdentity {
-                    serial: "raspberry-pi-pico-2-jtag",
+                    serial: serial_number,
                     ..UsbIdentity::default()
                 },
                 DapConfig::new(
                     DapIdentity {
-                        serial_number: "raspberry-pi-pico-2-jtag",
+                        serial_number,
                         product_firmware_version: env!("GIT_REV"),
                         ..DapIdentity::default()
                     },
@@ -341,12 +343,12 @@ mod app {
                 jtagio,
                 usb_allocator,
                 UsbIdentity {
-                    serial: "raspberry-pi-pico-2-jtag",
+                    serial: serial_number,
                     ..UsbIdentity::default()
                 },
                 DapConfig::new(
                     DapIdentity {
-                        serial_number: "raspberry-pi-pico-2-jtag",
+                        serial_number,
                         product_firmware_version: env!("GIT_REV"),
                         ..DapIdentity::default()
                     },
@@ -382,12 +384,12 @@ mod app {
                 swjio,
                 usb_allocator,
                 UsbIdentity {
-                    serial: "raspberry-pi-pico-2-swj",
+                    serial: serial_number,
                     ..UsbIdentity::default()
                 },
                 DapConfig::new(
                     DapIdentity {
-                        serial_number: "raspberry-pi-pico-2-swj",
+                        serial_number,
                         product_firmware_version: env!("GIT_REV"),
                         ..DapIdentity::default()
                     },

@@ -49,6 +49,7 @@ pub mod bridge;
 pub mod line_coding;
 #[cfg(not(feature = "bitbang"))]
 pub mod pio;
+pub mod unique_id;
 pub mod util;
 
 /// Releases all SIO spinlocks. `#[rp2040_hal::entry]` does this on startup,

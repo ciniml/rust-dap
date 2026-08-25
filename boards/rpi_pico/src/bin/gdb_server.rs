@@ -256,6 +256,8 @@ mod app {
         .ok()
         .unwrap();
 
+        let serial_number = rust_dap_rp::unique_id::serial_number();
+
         let usb_allocator =
             ctx.local
                 .USB_ALLOCATOR
@@ -278,7 +280,7 @@ mod app {
                 usb_device::device::StringDescriptors::new(usb_device::LangID::EN_US)
                     .manufacturer("fugafuga.org")
                     .product("rust-dap GDB server")
-                    .serial_number("raspberry-pi-pico-gdb"),
+                    .serial_number(serial_number),
             ])
             .unwrap()
             // Two CDC-ACM functions -> IAD composite device.
@@ -294,7 +296,7 @@ mod app {
         let swd = SwdIoSet::new(swclk, swdio, reset, CortexMDelay);
         let config = DapConfig::new(
             DapIdentity {
-                serial_number: "raspberry-pi-pico-gdb",
+                serial_number,
                 product_firmware_version: env!("GIT_REV"),
                 ..DapIdentity::default()
             },
