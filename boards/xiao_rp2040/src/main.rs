@@ -138,6 +138,8 @@ mod app {
         .ok()
         .unwrap();
 
+        let serial_number = rust_dap_rp::unique_id::serial_number();
+
         let uart_pins = (
             pins.gpio0.into_function::<hal::gpio::FunctionUart>(), // TxD
             pins.gpio1.into_function::<hal::gpio::FunctionUart>(), // RxD
@@ -202,12 +204,12 @@ mod app {
                 swdio,
                 usb_allocator,
                 UsbIdentity {
-                    serial: "xiao-rp2040",
+                    serial: serial_number,
                     ..UsbIdentity::default()
                 },
                 DapConfig::new(
                     DapIdentity {
-                        serial_number: "xiao-rp2040",
+                        serial_number,
                         product_firmware_version: env!("GIT_REV"),
                         ..DapIdentity::default()
                     },

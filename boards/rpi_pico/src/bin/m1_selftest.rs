@@ -152,6 +152,8 @@ fn main() -> ! {
     .ok()
     .unwrap();
 
+    let serial_number = rust_dap_rp::unique_id::serial_number();
+
     let usb_allocator = UsbBusAllocator::new(hal::usb::UsbBus::new(
         pac.USBCTRL_REGS,
         pac.USBCTRL_DPRAM,
@@ -165,7 +167,7 @@ fn main() -> ! {
             usb_device::device::StringDescriptors::new(usb_device::LangID::EN_US)
                 .manufacturer("fugafuga.org")
                 .product("rust-dap M1 self-test")
-                .serial_number("raspberry-pi-pico-m1"),
+                .serial_number(serial_number),
         ])
         .unwrap()
         .device_class(usbd_serial::USB_CLASS_CDC)
@@ -178,7 +180,7 @@ fn main() -> ! {
     let swd = SwdIoSet::new(swclk, swdio, reset, CortexMDelay);
     let config = DapConfig::new(
         DapIdentity {
-            serial_number: "raspberry-pi-pico-m1",
+            serial_number,
             product_firmware_version: env!("GIT_REV"),
             ..DapIdentity::default()
         },
