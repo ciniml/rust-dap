@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Bao Chipでデバッガつくってみた</title>
+<title>Dabaoボードであそんでみた</title>
 <style>
   :root {
     --bg: #10141c;
@@ -147,9 +147,9 @@
 
   <!-- 1: タイトル (15秒) -->
   <section class="slide title-slide active">
-    <div class="chip">Kernel/VM探検隊@東京 No19 — 5min LT</div>
-    <h1><span>Bao Chip</span>でデバッガつくってみた</h1>
-    <div style="font-size:36px; color:var(--muted);">Rust製デバッグプローブ rust-dap を Baochip に移植する</div>
+    <div class="chip">SWEST28 EmbLT — 2026/08/27</div>
+    <h1><span>Dabao</span>ボードであそんでみた</h1>
+    <div style="font-size:36px; color:var(--muted);">Rust製デバッグプローブ rust-dap を Baochip に移植して、単体で動く GDB デバッガにする</div>
     <div class="who">井田 健太 / <span style="color:var(--accent2);">@ciniml</span></div>
   </section>
 
@@ -176,7 +176,7 @@
              style="height:740px; width:auto;">
       </div>
     </div>
-    <div class="foot"><span>01 / Baochip</span><span>Kernel/VM探検隊@東京 No19</span></div>
+    <div class="foot"><span>01 / Baochip</span><span>SWEST28 EmbLT</span></div>
   </section>
 
   <!-- 3: Baochip-1x の特徴的な構成 -->
@@ -203,7 +203,7 @@
         </div>
       </div>
     </div>
-    <div class="foot"><span>02 / Baochip</span><span>Kernel/VM探検隊@東京 No19</span></div>
+    <div class="foot"><span>02 / Baochip</span><span>SWEST28 EmbLT</span></div>
   </section>
 
   <!-- 4: Xous -->
@@ -221,7 +221,7 @@
     <div class="callout" style="border-left-color: var(--warn);">
       つまり <strong class="warn">GPIO を 1 回叩くたびに IPC が発生する</strong>
     </div>
-    <div class="foot"><span>03 / Baochip</span><span>Kernel/VM探検隊@東京 No19</span></div>
+    <div class="foot"><span>03 / Baochip</span><span>SWEST28 EmbLT</span></div>
   </section>
 
   <!-- 5: rust-dap とは -->
@@ -251,7 +251,7 @@
         </div>
       </div>
     </div>
-    <div class="foot"><span>04 / rust-dap</span><span>Kernel/VM探検隊@東京 No19</span></div>
+    <div class="foot"><span>04 / rust-dap</span><span>SWEST28 EmbLT</span></div>
   </section>
 
   <!-- 6: 移植 = 3つだけ -->
@@ -281,7 +281,7 @@
         </div>
       </div>
     </div>
-    <div class="foot"><span>05 / 移植</span><span>Kernel/VM探検隊@東京 No19</span></div>
+    <div class="foot"><span>05 / 移植</span><span>SWEST28 EmbLT</span></div>
   </section>
 
   <!-- 7: ハマりどころ -->
@@ -306,7 +306,7 @@
         </div>
       </div>
     </div>
-    <div class="foot"><span>06 / 移植</span><span>Kernel/VM探検隊@東京 No19</span></div>
+    <div class="foot"><span>06 / 移植</span><span>SWEST28 EmbLT</span></div>
   </section>
 
   <!-- 8: 動いた画面 -->
@@ -332,39 +332,81 @@
         <div style="font-size:27px; color:var(--accent3);">✅ 接続・halt・レジスタ/メモリ R/W・BP・ステップ、ひと通り動作</div>
       </div>
     </div>
-    <div class="foot"><span>07 / 移植</span><span>Kernel/VM探検隊@東京 No19</span></div>
+    <div class="foot"><span>07 / 移植</span><span>SWEST28 EmbLT</span></div>
   </section>
 
-  <!-- 9: 課題と BIO オフロード -->
+  <!-- 9: BIO オフロードで解決 -->
   <section class="slide">
-    <h2><span class="no">08</span>実測結果と今後</h2>
-    <div class="vs">
-      <div class="metric card" style="border-color: var(--warn);">
-        <div class="num warn">1.23 KiB/s</div>
-        <div class="label" style="font-size:30px;">メモリ読み出し(IPC 越しビットバング SWD)<br>ワード毎 ~3.2ms ≒ SWCLK 実効 ~30kHz<br>サイズ非依存 → IPC コストが支配的</div>
+    <h2><span class="no">08</span>BIO オフロードで解決した</h2>
+    <div class="vs" style="flex:0 0 auto; margin-bottom:20px;">
+      <div class="metric card" style="border-color: var(--warn); padding:34px 40px;">
+        <div class="num warn" style="font-size:82px;">1.23 KiB/s</div>
+        <div class="label" style="font-size:28px;">IPC 越しビットバング SWD<br>ワード毎 ~3.2ms ≒ SWCLK 実効 ~30kHz</div>
       </div>
       <div class="arrow">→</div>
-      <div class="metric card" style="border-color: var(--accent);">
-        <div class="num" style="color: var(--accent); font-size:72px;">BIO オフロード</div>
-        <div class="label" style="text-align:left; font-size:29px; line-height:1.6;">
-          ✅ BIO 版 SWD を実装、出力動作は確認済み<br>
-          ⏳ ターゲットからの入力がまだ読めない
+      <div class="metric card" style="border-color: var(--accent3); padding:34px 40px;">
+        <div class="num green" style="font-size:82px;">225 KiB/s</div>
+        <div class="label" style="font-size:28px;">BIO 版 SWD(RAM 読み、SWCLK 8MHz)<br><strong class="green">約 180 倍</strong>・入力/ACK/パリティも BIO で完結</div>
+      </div>
+    </div>
+    <div class="cols" style="flex:1; gap:40px;">
+      <div class="col">
+        <table class="spec" style="font-size:29px;">
+          <tr><th style="width:auto;">項目</th><th style="width:auto;">IPC 版</th><th style="width:auto; text-align:right;">BIO 版</th></tr>
+          <tr><td>attach+detach</td><td style="color:var(--muted);">0.68 s</td><td style="text-align:right; font-family:var(--mono);" class="green">0.11 s</td></tr>
+          <tr><td>1 ワード読み</td><td style="color:var(--muted);">9.1 ms</td><td style="text-align:right; font-family:var(--mono);" class="green">0.8 ms</td></tr>
+          <tr><td>RAM 書き</td><td style="color:var(--muted);">1.22 KiB/s</td><td style="text-align:right; font-family:var(--mono);" class="green">207 KiB/s</td></tr>
+          <tr><td>stepi</td><td style="color:var(--muted);">1.2 s</td><td style="text-align:right; font-family:var(--mono);" class="green">55 ms</td></tr>
+        </table>
+      </div>
+      <div class="col callout" style="margin:0; align-self:stretch; display:flex; flex-direction:column; justify-content:center;">
+        <div style="font-size:32px; font-weight:800; margin-bottom:14px;">SWD における BIO の利点</div>
+        <div style="font-size:30px; line-height:1.6;">
+          ▸ <strong>RV32 コア</strong>なので PIO より複雑な処理<br>&nbsp;&nbsp;(ACK 判定・パリティ計算)を 1 コアに載せられる<br>
+          ▸ FIFO CSR を直マップし hot path から IPC を排除<br>
+          ▸ 標的からの入力読み・タイミング制御も自前で完結
         </div>
       </div>
     </div>
-    <div class="callout">
-      <div style="font-size:34px; font-weight:800; margin-bottom:14px;">SWD における BIO の利点</div>
-      <div style="font-size:32px; line-height:1.6;">
-        ▸ <strong>RV32E</strong> なので PIO より複雑な処理(ACK 判定、パリティ計算)が可能<br>
-        ▸ ハードウェア制御機構による細かいタイミング制御
+    <div class="foot"><span>08 / BIO</span><span>SWEST28 EmbLT</span></div>
+  </section>
+
+  <!-- 9b: デバッガとして一通り完成 -->
+  <section class="slide">
+    <h2><span class="no">09</span>デバッガとして一通り完成</h2>
+    <div class="cols" style="align-items:stretch;">
+      <div class="col card">
+        <div style="font-size:34px; font-weight:800; margin-bottom:20px;" class="cyan">フラッシュ書き込み・RTT まで</div>
+        <ul class="big" style="font-size:30px; line-height:1.5;">
+          <li>GDB <code>load</code> でフラッシュ書き込み<ul>
+            <li>非同期ローダで <strong class="green">58 KB/s</strong>(compare-sections 一致)</li>
+          </ul></li>
+          <li><strong>RTT</strong> 対応<ul>
+            <li>halt 中: <code>monitor rtt</code>、走行中: <code>O</code> パケットで<br>コンソール多重化 <strong class="green">83.8 KiB/s</strong></li>
+          </ul></li>
+          <li>Pico(PIO SWD)と比較して<span class="green">同等〜上回る</span></li>
+        </ul>
+      </div>
+      <div class="col card" style="border-left: 10px solid var(--accent3);">
+        <div style="font-size:34px; font-weight:800; margin-bottom:20px;" class="green">リリース済み(v0.2.1)</div>
+        <ul class="big" style="font-size:30px; line-height:1.5;">
+          <li>Dabao 版ファームを GitHub Release に添付<ul>
+            <li><code>loader / xous / apps.uf2</code> + ELF</li>
+          </ul></li>
+          <li><code>flash.py</code> 一発で書き込み→起動</li>
+          <li>コア(<code>gdb-server-core</code> / <code>arm-debug</code>)は<br>Pico と共通 — 両方に同じ修正が効く</li>
+        </ul>
+        <div class="callout" style="margin-top:24px; font-size:28px; padding:20px 32px; border-left-color:var(--accent3);">
+          <code>github.com/ciniml/rust-dap</code> → Releases
+        </div>
       </div>
     </div>
-    <div class="foot"><span>08 / BIO</span><span>Kernel/VM探検隊@東京 No19</span></div>
+    <div class="foot"><span>09 / 完成</span><span>SWEST28 EmbLT</span></div>
   </section>
 
   <!-- 10: まとめ -->
   <section class="slide">
-    <h2><span class="no">09</span>まとめ</h2>
+    <h2><span class="no">10</span>まとめ</h2>
     <ul class="big" style="margin-top:10px;">
       <li>Baochip = <strong>MMU 付き RISC-V + BIO</strong> という面白い構成<ul>
         <li>硬さ(セキュリティ)と速い I/O の両立</li>
@@ -372,20 +414,21 @@
       <li>rust-dap は層分離のおかげで<span class="cyan">移植コストが小さい</span><ul>
         <li>書いたのは Connection / DapTransport / セッションループの3つだけ</li>
       </ul></li>
-      <li>IPC の遅さは <strong>BIO オフロード</strong>で解決する(BIO 側は動作、入力側を調査中)</li>
-      <li><strong>BIO はいいぞ!</strong> — RV32E で書ける PIO。SWD に限らず「ちょっと賢い I/O」全般に効く</li>
+      <li>IPC の遅さは <strong>BIO オフロード</strong>で解決 → <span class="green">約 180 倍</span>、フラッシュ load・RTT まで動く<ul>
+        <li>Pico(PIO SWD)と同等〜上回る速度、v0.2.1 としてリリース済み</li>
+      </ul></li>
+      <li><strong>BIO はいいぞ!</strong> — RV32 で書ける PIO。SWD に限らず「ちょっと賢い I/O」全般に効く</li>
     </ul>
-    <div class="callout" style="display:flex; flex-direction:column; gap:12px;">
-      <div>Dabao は Crowd Supply で予約受付中: <code>crowdsupply.com/baochip/dabao</code></div>
-      <div style="font-size:30px; color:var(--muted);">$12 / 枚(送料 US $10・海外 $18)、現在の予約分は 2026-10-09 出荷予定</div>
+    <div class="callout" style="display:flex; flex-direction:column; gap:8px; font-size:32px; padding:24px 44px; margin-bottom:24px;">
+      <div>Dabao は Crowd Supply で予約受付中: <code>crowdsupply.com/baochip/dabao</code> <span style="font-size:26px; color:var(--muted);">($12 / 枚、2026-10-09 出荷予定)</span></div>
       <div>rust-dap のリポジトリ: <code>github.com/ciniml/rust-dap</code></div>
     </div>
-    <div class="foot"><span>09 / まとめ</span><span>Kernel/VM探検隊@東京 No19</span></div>
+    <div class="foot"><span>10 / まとめ</span><span>SWEST28 EmbLT</span></div>
   </section>
 
   <!-- 11: 参考文献 -->
   <section class="slide">
-    <h2><span class="no">10</span>参考文献</h2>
+    <h2><span class="no">11</span>参考文献</h2>
     <ul class="big refs" style="font-size:30px; line-height:1.5;">
       <li>Baochip / Dabao 紹介(開発者 bunnie 氏による一次情報)<ul>
         <li><code>https://baochip.com/dabao-intro/</code></li>
@@ -404,7 +447,7 @@
         <li><code>https://github.com/ciniml/rust-dap</code></li>
       </ul></li>
     </ul>
-    <div class="foot"><span>10 / 参考文献</span><span>Kernel/VM探検隊@東京 No19</span></div>
+    <div class="foot"><span>11 / 参考文献</span><span>SWEST28 EmbLT</span></div>
   </section>
 
 </div>
