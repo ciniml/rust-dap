@@ -113,6 +113,15 @@ pub struct GdbTarget<T: DapTransport, D: Delay> {
     reset_settle_cycles: u32,
 }
 
+/// CC13x2: RAM used for remote ROM calls (all inside the smallest part's
+/// 80 KiB SRAM). Stage one 8 KiB flash sector per FlashProgram call.
+#[cfg(feature = "gdb-target-cc13x2")]
+const CC13X2_TRAMPOLINE: u32 = 0x2000_7000;
+#[cfg(feature = "gdb-target-cc13x2")]
+const CC13X2_CALL_SP: u32 = 0x2000_8000;
+#[cfg(feature = "gdb-target-cc13x2")]
+const CC13X2_STAGE: u32 = 0x2000_8000;
+
 const DIAG_BASE: u32 = 0xF000_0000;
 const DIAG_OK: u32 = 0x0a11_600d;
 
@@ -325,6 +334,8 @@ enum Family {
     Nrf52(Nrf52Family),
     #[cfg(feature = "gdb-target-nrf54")]
     Nrf54(Nrf54Family),
+    #[cfg(feature = "gdb-target-cc13x2")]
+    Cc13x2(Cc13x2Family),
 }
 
 /// Run `$body` (which references the bound inner family `$f`) on whichever
@@ -339,6 +350,8 @@ macro_rules! on_family {
             Family::Nrf52($f) => $body,
             #[cfg(feature = "gdb-target-nrf54")]
             Family::Nrf54($f) => $body,
+            #[cfg(feature = "gdb-target-cc13x2")]
+            Family::Cc13x2($f) => $body,
         }
     };
 }
@@ -362,6 +375,15 @@ impl Family {
         ))]
         {
             Family::Nrf54(Nrf54Family::new())
+        }
+        #[cfg(all(
+            not(feature = "gdb-target-rp2040"),
+            not(feature = "gdb-target-nrf52"),
+            not(feature = "gdb-target-nrf54"),
+            feature = "gdb-target-cc13x2"
+        ))]
+        {
+            Family::Cc13x2(Cc13x2Family::new())
         }
     }
 
@@ -846,6 +868,243 @@ impl TargetFamily for Nrf52Family {
 
     fn in_flash_mode(&self) -> bool {
         false
+    }
+}
+
+// --- TI CC13x2 / CC26x2 family (Cortex-M4F over cJTAG + ICEPick) ---------
+
+/// The debug port comes up in 2-pin cJTAG (no SWD) with the CPU DAP hidden
+/// behind TI's ICEPick router. Connect = activate the transport (OScan1),
+/// read the ICEPick IDCODE, link the DAP into the chain, then bring up the
+/// JTAG-DP. Flash is programmed synchronously through the ROM API
+/// (FlashSectorErase / FlashProgram) with the VIMS cache off.
+#[cfg(feature = "gdb-target-cc13x2")]
+struct Cc13x2Family {
+    /// Sectors erased this session (1 bit per 8 KiB sector; 704 KiB max).
+    erased: [u32; 3],
+    /// True while VIMS is off for programming.
+    flash_mode: bool,
+    /// Saved VIMS:CTL to restore at flash_finish.
+    vims_ctl: u32,
+    /// ROM function addresses, resolved once per session.
+    rom_fns: Option<(u32, u32)>,
+    /// Actual flash / SRAM size read from the part (fallback: family max).
+    flash_size: u32,
+    ram_end: u32,
+}
+
+#[cfg(feature = "gdb-target-cc13x2")]
+impl TargetFamily for Cc13x2Family {
+    const NUM_CORES: usize = 1;
+    const FLASH_BASE: u32 = arm_debug::cc13x2::FLASH_BASE;
+    const FLASH_SIZE: u32 = arm_debug::cc13x2::FLASH_MAX;
+    const RAM_START: u32 = arm_debug::cc13x2::SRAM_BASE;
+    const RAM_END: u32 = arm_debug::cc13x2::SRAM_BASE + arm_debug::cc13x2::SRAM_MAX;
+
+    fn flash_size(&self) -> u32 {
+        self.flash_size
+    }
+    fn ram_end(&self) -> u32 {
+        self.ram_end
+    }
+
+    fn new() -> Self {
+        Self {
+            erased: [0; 3],
+            flash_mode: false,
+            vims_ctl: 0,
+            rom_fns: None,
+            flash_size: Self::FLASH_SIZE,
+            ram_end: Self::RAM_END,
+        }
+    }
+
+    fn connect<T: DapTransport>(
+        &mut self,
+        arm: &mut ArmDebug<T>,
+    ) -> Result<u32, arm_debug::ArmError> {
+        use arm_debug::cc13x2::*;
+        use rust_dap::ConnectPort;
+        arm.transport_connect(ConnectPort::Jtag)?;
+        // Only the ICEPick is visible after a TAP reset.
+        arm.jtag_chain(&[ICEPICK_IR_LEN], 0);
+        let mut ids = [0u32; 1];
+        arm.jtag_idcodes_after_reset(&mut ids)?;
+        if ids[0] & ICEPICK_IDCODE_MASK != ICEPICK_IDCODE & ICEPICK_IDCODE_MASK {
+            return Err(arm_debug::ArmError::NoTarget);
+        }
+        arm.icepick_enable_debug_tap(0)?;
+        let (ir_lengths, dap_index) = arm.jtag_probe_icepick_chain()?;
+        arm.jtag_chain(&ir_lengths, dap_index);
+        let dpidr = arm.connect_jtag()?;
+        self.rom_fns = None;
+        // Size the memory map from the part (best effort).
+        if let Ok(v) = arm.read_word(FLASH_SIZE_REG) {
+            let sectors = v & 0xff;
+            if sectors != 0 && sectors * FLASH_SECTOR <= FLASH_MAX {
+                self.flash_size = sectors * FLASH_SECTOR;
+            }
+        }
+        if let Ok(v) = arm.read_word(SRAM_SIZE_INFO_REG) {
+            // OpenOCD's reading of this word: 0..3 -> 32/64/80(?)/144 KiB is
+            // undocumented; only trust it to shrink the map, never to grow.
+            let kib = match v & 3 {
+                0 => 32,
+                1 => 64,
+                2 => 80,
+                _ => 144,
+            };
+            self.ram_end = SRAM_BASE + kib * 1024;
+        }
+        Ok(dpidr)
+    }
+
+    fn select_core<T: DapTransport>(
+        &mut self,
+        _arm: &mut ArmDebug<T>,
+        _core: usize,
+    ) -> Result<(), arm_debug::ArmError> {
+        Ok(())
+    }
+
+    fn forget_core(&mut self) {}
+
+    fn flash_write<T: DapTransport>(
+        &mut self,
+        arm: &mut ArmDebug<T>,
+        addr: u32,
+        data: &[u8],
+    ) -> Result<(), arm_debug::ArmError> {
+        use arm_debug::cc13x2::*;
+        let end = addr + data.len() as u32;
+        if end > self.flash_size {
+            return Err(arm_debug::ArmError::Internal);
+        }
+        self.flash_enter(arm)?;
+        let (erase, program) = self.rom_fns(arm)?;
+        // Erase every sector the write touches (once per session), then
+        // program in sector-sized, word-aligned spans padded with 0xFF
+        // (programming only clears bits, so padding is a no-op).
+        let mut pos = addr & !3;
+        let span_end = (end + 3) & !3;
+        let mut buf = [0xFFu8; FLASH_SECTOR as usize];
+        while pos < span_end {
+            let sector = pos / FLASH_SECTOR;
+            let (w, b) = ((sector / 32) as usize, sector % 32);
+            if self.erased[w] & (1 << b) == 0 {
+                let status = arm.call_function(
+                    erase,
+                    &[sector * FLASH_SECTOR, 0, 0, 0],
+                    CC13X2_CALL_SP,
+                    CC13X2_TRAMPOLINE,
+                    POLLS_ERASE,
+                )?;
+                if status != 0 {
+                    return Err(arm_debug::ArmError::Internal);
+                }
+                self.erased[w] |= 1 << b;
+            }
+            let sector_end = (sector + 1) * FLASH_SECTOR;
+            let n = (span_end.min(sector_end) - pos) as usize;
+            buf[..n].fill(0xFF);
+            for (i, slot) in buf[..n].iter_mut().enumerate() {
+                let a = pos + i as u32;
+                if a >= addr && a < end {
+                    *slot = data[(a - addr) as usize];
+                }
+            }
+            arm.write_mem(CC13X2_STAGE, &buf[..n])?;
+            let status = arm.call_function(
+                program,
+                &[CC13X2_STAGE, pos, n as u32, 0],
+                CC13X2_CALL_SP,
+                CC13X2_TRAMPOLINE,
+                POLLS_ERASE,
+            )?;
+            if status != 0 {
+                return Err(arm_debug::ArmError::Internal);
+            }
+            pos += n as u32;
+        }
+        Ok(())
+    }
+
+    fn flash_finish<T: DapTransport>(&mut self, arm: &mut ArmDebug<T>) {
+        use arm_debug::cc13x2::*;
+        if !self.flash_mode {
+            return;
+        }
+        // ROM flash calls leave standby disabled; re-enable, then restore
+        // the cache mode saved at flash_enter.
+        if let Ok(cfg) = arm.read_word(FLASH_CFG_REG) {
+            let _ = arm.write_word(FLASH_CFG_REG, cfg & !FLASH_CFG_DIS_STANDBY);
+        }
+        let _ = arm.write_word(VIMS_CTL, self.vims_ctl);
+        let _ = Self::vims_wait(arm);
+        self.flash_mode = false;
+    }
+
+    fn reset_flash_state(&mut self) {
+        self.erased = [0; 3];
+        self.flash_mode = false;
+        self.rom_fns = None;
+    }
+
+    fn in_flash_mode(&self) -> bool {
+        self.flash_mode
+    }
+}
+
+#[cfg(feature = "gdb-target-cc13x2")]
+impl Cc13x2Family {
+    /// Wait for VIMS to finish a mode change (bounded).
+    fn vims_wait<T: DapTransport>(arm: &mut ArmDebug<T>) -> Result<(), arm_debug::ArmError> {
+        use arm_debug::cc13x2::*;
+        for _ in 0..10_000 {
+            if arm.read_word(VIMS_STAT)? & VIMS_STAT_MODE_CHANGING == 0 {
+                return Ok(());
+            }
+        }
+        Err(arm_debug::ArmError::CoreTimeout)
+    }
+
+    /// Turn the flash cache off (as TI's loader does) before programming.
+    fn flash_enter<T: DapTransport>(
+        &mut self,
+        arm: &mut ArmDebug<T>,
+    ) -> Result<(), arm_debug::ArmError> {
+        use arm_debug::cc13x2::*;
+        if self.flash_mode {
+            return Ok(());
+        }
+        Self::vims_wait(arm)?;
+        self.vims_ctl = arm.read_word(VIMS_CTL)?;
+        arm.write_word(VIMS_CTL, self.vims_ctl | VIMS_CTL_OFF)?;
+        Self::vims_wait(arm)?;
+        self.flash_mode = true;
+        Ok(())
+    }
+
+    /// (FlashSectorErase, FlashProgram) from the ROM API table.
+    fn rom_fns<T: DapTransport>(
+        &mut self,
+        arm: &mut ArmDebug<T>,
+    ) -> Result<(u32, u32), arm_debug::ArmError> {
+        use arm_debug::cc13x2::*;
+        if let Some(f) = self.rom_fns {
+            return Ok(f);
+        }
+        let table = arm.read_word(ROM_API_TABLE + ROM_API_FLASH_TABLE_INDEX * 4)?;
+        if table == 0 || table == 0xffff_ffff {
+            return Err(arm_debug::ArmError::Internal);
+        }
+        let erase = arm.read_word(table + ROM_FLASH_SECTOR_ERASE_INDEX * 4)?;
+        let program = arm.read_word(table + ROM_FLASH_PROGRAM_INDEX * 4)?;
+        if erase & 1 == 0 || program & 1 == 0 {
+            return Err(arm_debug::ArmError::Internal); // must be Thumb addresses
+        }
+        self.rom_fns = Some((erase, program));
+        Ok((erase, program))
     }
 }
 

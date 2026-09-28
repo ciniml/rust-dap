@@ -126,3 +126,11 @@ pub type SwjIoSet<Clk, Dio, Tdi, Tdo, Trst, Srst> = BitBangSwj<
     PicoBidirPin<Srst>,
     CortexMDelay,
 >;
+
+/// Bit-banging 2-wire cJTAG (OScan1) transport over TCKC, TMSC and nRESET.
+pub type Oscan1IoSet<Tckc, Tmsc, Rst> = rust_dap::cjtag::BitBangOscan1<
+    PicoBidirPin<Tckc>,
+    PicoBidirPin<Tmsc>,
+    PicoBidirPin<Rst>,
+    CortexMDelay,
+>;

@@ -26,8 +26,8 @@
 #![cfg_attr(not(test), no_std)]
 
 use rust_dap::{
-    ActivePort, ConnectPort, DapConfig, DapError, DapTransport, SwdRequest, SwjPins,
-    DAP_TRANSFER_WAIT,
+    ActivePort, ConnectPort, DapConfig, DapError, DapTransport, JtagSequenceInfo, SwdRequest,
+    SwjPins, DAP_TRANSFER_WAIT,
 };
 
 /// Errors from the ARM debug layer.
@@ -115,6 +115,55 @@ pub mod rp2040 {
     pub const FN_FLASH_ENTER_CMD_XIP: [u8; 2] = *b"CX";
 }
 
+/// TI SimpleLink CC13x2 / CC26x2 (Cortex-M4F behind a cJTAG + ICEPick debug
+/// subsystem). Sources: TI TRM SWCU185 §6, OpenOCD `target/ti/icepick.cfg`.
+pub mod cc13x2 {
+    /// ICEPick (JTAG route controller) IDCODE, version nibble masked.
+    pub const ICEPICK_IDCODE: u32 = 0x0BB4_102F;
+    pub const ICEPICK_IDCODE_MASK: u32 = 0x0fff_ffff;
+    /// ICEPick IR is 6 bits.
+    pub const ICEPICK_IR_LEN: u8 = 6;
+    pub const ICEPICK_IR_BYPASS: u32 = 0x00;
+    pub const ICEPICK_IR_ROUTER: u32 = 0x02;
+    pub const ICEPICK_IR_IDCODE: u32 = 0x04;
+    pub const ICEPICK_IR_CONNECT: u32 = 0x07;
+    /// CONNECT register value that opens the router (write + key).
+    pub const ICEPICK_CONNECT_KEY: u32 = 0x89;
+    /// Cortex-M4 SWJ-DP as a JTAG-DP: IDCODE and 4-bit IR.
+    pub const DAP_IDCODE: u32 = 0x4BA0_0477;
+    pub const DAP_IDCODE_MASK: u32 = 0x0fff_ffff;
+    pub const DAP_IR_LEN: u8 = 4;
+    pub const DAP_IR_IDCODE: u32 = 0xE;
+
+    pub const FLASH_BASE: u32 = 0x0000_0000;
+    /// Largest flash in the family (CC1312R7 / CC2652R7: 704 KiB).
+    pub const FLASH_MAX: u32 = 704 * 1024;
+    pub const FLASH_SECTOR: u32 = 8192;
+    pub const SRAM_BASE: u32 = 0x2000_0000;
+    /// Largest SRAM in the family (R7 parts: 144 KiB).
+    pub const SRAM_MAX: u32 = 144 * 1024;
+    /// FLASH:FLASH_SIZE — bits[7:0] = number of sectors.
+    pub const FLASH_SIZE_REG: u32 = 0x4003_002C;
+    /// FLASH:CFG — bit1 DIS_STANDBY (ROM flash calls set it; clear after).
+    pub const FLASH_CFG_REG: u32 = 0x4003_0024;
+    pub const FLASH_CFG_DIS_STANDBY: u32 = 1 << 1;
+    /// PRCM:RAMHWOPT-ish SRAM size info used by OpenOCD (bits[1:0]).
+    pub const SRAM_SIZE_INFO_REG: u32 = 0x4008_2250;
+    /// VIMS:STAT / VIMS:CTL — flash cache must be off while programming.
+    pub const VIMS_STAT: u32 = 0x4003_4000;
+    pub const VIMS_STAT_MODE_CHANGING: u32 = 1 << 3;
+    pub const VIMS_CTL: u32 = 0x4003_4004;
+    /// VIMS:CTL bits: MODE=OFF(0b11) | PREF_DIS | ARB_CFG.. as the TI loader
+    /// does (`| 0x33`): mode off and line buffers disabled.
+    pub const VIMS_CTL_OFF: u32 = 0x33;
+    /// ROM API table; entry 10 points at the flash function table.
+    pub const ROM_API_TABLE: u32 = 0x1000_0180;
+    pub const ROM_API_FLASH_TABLE_INDEX: u32 = 10;
+    /// Flash table entries: `FlashSectorErase(addr)`, `FlashProgram(src, addr, len)`.
+    pub const ROM_FLASH_SECTOR_ERASE_INDEX: u32 = 5;
+    pub const ROM_FLASH_PROGRAM_INDEX: u32 = 6;
+}
+
 /// Nordic nRF52 debug constants. The CTRL-AP (APSEL 1) stays reachable even
 /// when APPROTECT blocks the AHB-AP, so its APPROTECTSTATUS reports the
 /// protection state and ERASEALL performs the (only) unlock.
@@ -193,6 +242,30 @@ pub struct ArmDebug<T: DapTransport> {
     apsel: u8,
     /// Retry budget for WAIT acks.
     retries: u32,
+    /// Which DP interface `transfer` drives.
+    link: Link,
+    /// TAP controller state tracked by the raw JTAG scan helpers.
+    tap_state: TapState,
+}
+
+/// The wire protocol between probe and DP.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Link {
+    /// Serial Wire Debug (the default).
+    Swd,
+    /// JTAG-DP, at position `dap_index` of the scan chain configured with
+    /// [`ArmDebug::jtag_chain`]. Also used for 2-wire cJTAG transports, which
+    /// present themselves as JTAG.
+    Jtag { dap_index: u8 },
+}
+
+/// Stable TAP states the raw scan helpers park in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TapState {
+    /// Unknown / Test-Logic-Reset: the next scan goes via Run-Test/Idle.
+    Idle,
+    PauseDr,
+    PauseIr,
 }
 
 impl<T: DapTransport> ArmDebug<T> {
@@ -204,7 +277,179 @@ impl<T: DapTransport> ArmDebug<T> {
             csw_valid: false,
             apsel: 0,
             retries: 64,
+            link: Link::Swd,
+            tap_state: TapState::Idle,
         }
+    }
+
+    /// The DP interface in use.
+    pub fn link(&self) -> Link {
+        self.link
+    }
+
+    /// Drive the DP over SWD (the default).
+    pub fn use_swd(&mut self) {
+        self.link = Link::Swd;
+    }
+
+    /// Describe the JTAG scan chain (IR length per TAP, index 0 nearest TDI)
+    /// and which TAP is the DAP, and drive the DP over JTAG from now on.
+    pub fn jtag_chain(&mut self, ir_lengths: &[u8], dap_index: u8) {
+        let n = ir_lengths.len().min(self.config.jtag.ir_length.len());
+        self.config.jtag.ir_length = Default::default();
+        self.config.jtag.ir_length[..n].copy_from_slice(&ir_lengths[..n]);
+        self.config.jtag.device_count = n as u8;
+        self.link = Link::Jtag { dap_index };
+        self.tap_state = TapState::Idle;
+    }
+
+    /// `DAP_Connect` on the transport for `port` (pins + protocol bring-up;
+    /// for a cJTAG transport this runs the OScan1 activation).
+    pub fn transport_connect(&mut self, port: ConnectPort) -> Result<ActivePort, ArmError> {
+        self.tap_state = TapState::Idle;
+        Ok(self.transport.connect(port, &self.config)?)
+    }
+
+    /// Bring up a JTAG-DP already reachable on the chain set by [`jtag_chain`]:
+    /// read DPIDR (via DPACC 0x0), clear sticky errors, SELECT=0, power up.
+    /// Returns the DPIDR.
+    pub fn connect_jtag(&mut self) -> Result<u32, ArmError> {
+        if !matches!(self.link, Link::Jtag { .. }) {
+            return Err(ArmError::NotSupported);
+        }
+        self.select = 0xffff_ffff;
+        self.csw_valid = false;
+        self.apsel = 0;
+        self.clear_sticky_errors();
+        let dpidr = self.dp_read(DP_DPIDR)?;
+        if dpidr == 0 || dpidr == 0xffff_ffff {
+            return Err(ArmError::NoTarget);
+        }
+        self.dp_write(DP_ABORT, ABORT_CLEAR_ALL)?;
+        self.dp_write(DP_SELECT, 0)?;
+        self.select = 0;
+        self.power_up()?;
+        Ok(dpidr)
+    }
+
+    // ---- raw JTAG scans (TAP-level, for routers such as TI ICEPick) ----
+
+    /// Clock `cycles` TCKs with TMS held at `tms` and TDI low.
+    pub fn jtag_tms(&mut self, tms: bool, cycles: usize) -> Result<(), ArmError> {
+        let mut left = cycles;
+        while left > 0 {
+            let n = left.min(64);
+            let info = JtagSequenceInfo {
+                number_of_tck_cycles: n,
+                tms_value: tms,
+                tdo_capture: false,
+            };
+            self.transport.jtag_sequence(&self.config, &info, 0)?;
+            left -= n;
+        }
+        Ok(())
+    }
+
+    /// Walk the TAP through the TMS pattern `path` (LSB first).
+    fn jtag_tms_path(&mut self, path: &[bool]) -> Result<(), ArmError> {
+        for &tms in path {
+            self.jtag_tms(tms, 1)?;
+        }
+        Ok(())
+    }
+
+    /// Shift `bits` (≤ 64) of `tdi` LSB first with TMS low, the last bit with
+    /// TMS = `exit`; returns the captured TDO bits.
+    fn jtag_shift(&mut self, tdi: u64, bits: usize, exit: bool) -> Result<u64, ArmError> {
+        if bits == 0 || bits > 64 {
+            return Err(ArmError::Internal);
+        }
+        let mut out = 0u64;
+        if bits > 1 {
+            let info = JtagSequenceInfo {
+                number_of_tck_cycles: bits - 1,
+                tms_value: false,
+                tdo_capture: true,
+            };
+            out = self
+                .transport
+                .jtag_sequence(&self.config, &info, tdi)?
+                .unwrap_or(0);
+        }
+        let info = JtagSequenceInfo {
+            number_of_tck_cycles: 1,
+            tms_value: exit,
+            tdo_capture: true,
+        };
+        let last = self
+            .transport
+            .jtag_sequence(&self.config, &info, (tdi >> (bits - 1)) & 1)?
+            .unwrap_or(0);
+        out |= (last & 1) << (bits - 1);
+        Ok(out)
+    }
+
+    /// Reset the TAP (5 TMS-high clocks) and park in Run-Test/Idle.
+    pub fn jtag_tap_reset(&mut self) -> Result<(), ArmError> {
+        self.jtag_tms(true, 8)?;
+        self.jtag_tms(false, 1)?;
+        self.tap_state = TapState::Idle;
+        Ok(())
+    }
+
+    /// Scan `bits` of `data` through the IR (`ir = true`) or DR of the whole
+    /// chain and return what came out. Ends in Pause-xR when `end_pause`, else
+    /// in Run-Test/Idle. Starts from wherever the previous scan parked.
+    pub fn jtag_scan(
+        &mut self,
+        ir: bool,
+        data: u64,
+        bits: usize,
+        end_pause: bool,
+    ) -> Result<u64, ArmError> {
+        // To Shift-xR from the current state.
+        let path: &[bool] = match (self.tap_state, ir) {
+            (TapState::Idle, false) => &[true, false, false],
+            (TapState::Idle, true) => &[true, true, false, false],
+            (_, false) => &[true, true, true, false, false],
+            (_, true) => &[true, true, true, true, false, false],
+        };
+        self.jtag_tms_path(path)?;
+        let out = self.jtag_shift(data, bits, true)?; // ends in Exit1-xR
+        if end_pause {
+            self.jtag_tms(false, 1)?; // Pause-xR
+            self.tap_state = if ir {
+                TapState::PauseIr
+            } else {
+                TapState::PauseDr
+            };
+        } else {
+            self.jtag_tms(true, 1)?; // Update-xR
+            self.jtag_tms(false, 1)?; // Run-Test/Idle
+            self.tap_state = TapState::Idle;
+        }
+        Ok(out)
+    }
+
+    /// Zero-bit DR scan (Capture-DR → Update-DR without Shift-DR), used by
+    /// IEEE 1149.7 command windows. Ends in Pause-DR.
+    pub fn jtag_zero_bit_scan(&mut self) -> Result<(), ArmError> {
+        let path: &[bool] = match self.tap_state {
+            TapState::Idle => &[true, false, true, false],
+            _ => &[true, true, true, false, true, false],
+        };
+        self.jtag_tms_path(path)?;
+        self.tap_state = TapState::PauseDr;
+        Ok(())
+    }
+
+    /// Spend `cycles` clocks in Run-Test/Idle.
+    pub fn jtag_idle(&mut self, cycles: usize) -> Result<(), ArmError> {
+        if self.tap_state != TapState::Idle {
+            self.jtag_tms_path(&[true, true, false])?; // Exit2 → Update → Idle
+            self.tap_state = TapState::Idle;
+        }
+        self.jtag_tms(false, cycles)
     }
 
     pub fn transport(&mut self) -> &mut T {
@@ -228,8 +473,19 @@ impl<T: DapTransport> ArmDebug<T> {
         }
         let mut retry = 0;
         loop {
-            match self.transport.swd_transfer(&self.config, request, data) {
-                Ok(v) => return Ok(v),
+            match self.raw_transfer(request, data) {
+                Ok(v) => {
+                    // JTAG-DP returns the previous scan's result: a DP read
+                    // (other than RDBUFF itself) needs one more scan to fetch
+                    // its value. AP reads are posted in both protocols and
+                    // already go through RDBUFF at the call site.
+                    if let Link::Jtag { .. } = self.link {
+                        if rnw && port == Port::Dp && addr != DP_RDBUFF {
+                            return self.transfer(Port::Dp, true, DP_RDBUFF, 0);
+                        }
+                    }
+                    return Ok(v);
+                }
                 Err(DapError::SwdError(ack)) if ack == DAP_TRANSFER_WAIT => {
                     if retry == self.retries {
                         return Err(ArmError::Wait);
@@ -248,13 +504,23 @@ impl<T: DapTransport> ArmDebug<T> {
         }
     }
 
+    /// One DP/AP transaction on whichever link is active, no retry.
+    fn raw_transfer(&mut self, request: SwdRequest, data: u32) -> Result<u32, DapError> {
+        match self.link {
+            Link::Swd => self.transport.swd_transfer(&self.config, request, data),
+            Link::Jtag { dap_index } => {
+                self.tap_state = TapState::Idle;
+                self.transport
+                    .jtag_transfer(&self.config, dap_index, request, data)
+            }
+        }
+    }
+
     /// Write DP ABORT to clear sticky error flags, bypassing the normal retry
     /// path (ABORT is always accessible even while errors are latched).
     fn clear_sticky_errors(&mut self) {
         let abort = SwdRequest::empty(); // DP write, addr 0 (ABORT)
-        let _ = self
-            .transport
-            .swd_transfer(&self.config, abort, ABORT_CLEAR_ALL);
+        let _ = self.raw_transfer(abort, ABORT_CLEAR_ALL);
     }
 
     fn dp_read(&mut self, addr: u8) -> Result<u32, ArmError> {
@@ -777,9 +1043,11 @@ impl<T: DapTransport> ArmDebug<T> {
 
     /// True once a port has been selected by [`connect_multidrop`].
     pub fn is_swd(&self) -> bool {
-        self.transport
-            .capabilities()
-            .contains(rust_dap::DapCapabilities::SWD)
+        self.link == Link::Swd
+            && self
+                .transport
+                .capabilities()
+                .contains(rust_dap::DapCapabilities::SWD)
     }
 }
 
@@ -1304,6 +1572,110 @@ impl<T: DapTransport> ArmDebug<T> {
             return Ok(HaltReason::HaltRequest);
         }
         Ok(HaltReason::Unknown)
+    }
+}
+
+impl<T: DapTransport> ArmDebug<T> {
+    /// Read the IDCODE the chain presents right after a TAP reset (the IR
+    /// resets to IDCODE on every TAP): `n` words, nearest TDO first.
+    pub fn jtag_idcodes_after_reset(&mut self, out: &mut [u32]) -> Result<(), ArmError> {
+        self.jtag_tap_reset()?;
+        let n = out.len();
+        for (i, slot) in out.iter_mut().enumerate() {
+            let last = i + 1 == n;
+            // Stay in Shift-DR between words: only the last word exits.
+            if i == 0 {
+                self.jtag_tms_path(&[true, false, false])?; // Select-DR, Capture, Shift
+            }
+            *slot = self.jtag_shift(0, 32, last)? as u32;
+        }
+        self.jtag_tms(true, 1)?; // Update-DR
+        self.jtag_tms(false, 1)?; // Run-Test/Idle
+        self.tap_state = TapState::Idle;
+        Ok(())
+    }
+
+    /// TI ICEPick-C: one ROUTER register write (`block`, `register`, 24-bit
+    /// `value`). The ICEPick must be the only TAP in the chain and the TAP
+    /// must not pass through Run-Test/Idle until the whole enable sequence is
+    /// done, so every scan parks in Pause.
+    fn icepick_router_write(
+        &mut self,
+        block: u32,
+        register: u32,
+        value: u32,
+    ) -> Result<(), ArmError> {
+        use cc13x2::*;
+        self.jtag_scan(
+            true,
+            ICEPICK_IR_ROUTER as u64,
+            ICEPICK_IR_LEN as usize,
+            true,
+        )?;
+        let dr = (1 << 31) | ((block & 7) << 28) | ((register & 0xF) << 24) | (value & 0x00ff_ffff);
+        self.jtag_scan(false, dr as u64, 32, true)?;
+        Ok(())
+    }
+
+    /// TI ICEPick-C: connect to the router and link debug TAP `tap` (the
+    /// CPU DAP is 0) into the scan chain, powered and clocked. Mirrors
+    /// OpenOCD's `icepick_c_tapenable`. Afterwards the chain is
+    /// ICEPick + DAP; call [`jtag_chain`] with the order found by
+    /// [`jtag_probe_icepick_chain`].
+    pub fn icepick_enable_debug_tap(&mut self, tap: u32) -> Result<(), ArmError> {
+        use cc13x2::*;
+        self.jtag_scan(
+            true,
+            ICEPICK_IR_CONNECT as u64,
+            ICEPICK_IR_LEN as usize,
+            true,
+        )?;
+        self.jtag_scan(false, ICEPICK_CONNECT_KEY as u64, 8, true)?;
+        self.icepick_router_write(0, 1, 0x00_1000)?; // ICEPick control
+        self.icepick_router_write(2, tap, 0x11_0048)?; // power + clock on
+        self.icepick_router_write(2, tap, 0x11_2048)?; // debug default mode
+        self.icepick_router_write(2, tap, 0x11_2148)?; // SelectTAP
+        self.jtag_scan(
+            true,
+            ICEPICK_IR_BYPASS as u64,
+            ICEPICK_IR_LEN as usize,
+            false,
+        )?; // -> Run-Test/Idle
+        self.jtag_idle(10)
+    }
+
+    /// With ICEPick + DAP in the chain, find which is nearer TDI without a
+    /// TAP reset (which would drop the ICEPick selection): load IDCODE into
+    /// both IRs for each candidate order and check what the DR returns.
+    /// Returns `(ir_lengths, dap_index)` for [`jtag_chain`].
+    pub fn jtag_probe_icepick_chain(&mut self) -> Result<([u8; 2], u8), ArmError> {
+        use cc13x2::*;
+        // Order A: TDI -> ICEPick -> DAP -> TDO. IR bits nearest TDO go first.
+        let ir_a = DAP_IR_IDCODE | (ICEPICK_IR_IDCODE << DAP_IR_LEN);
+        // Order B: TDI -> DAP -> ICEPick -> TDO.
+        let ir_b = ICEPICK_IR_IDCODE | (DAP_IR_IDCODE << ICEPICK_IR_LEN);
+        let total = (ICEPICK_IR_LEN + DAP_IR_LEN) as usize;
+        for (ir, order_a) in [(ir_a, true), (ir_b, false)] {
+            self.jtag_scan(true, ir as u64, total, false)?;
+            let dr = self.jtag_scan(false, 0, 64, false)?;
+            let first = dr as u32; // nearest TDO
+            let second = (dr >> 32) as u32;
+            let (near_tdo, near_tdi) = if order_a {
+                (DAP_IDCODE, ICEPICK_IDCODE)
+            } else {
+                (ICEPICK_IDCODE, DAP_IDCODE)
+            };
+            if first & DAP_IDCODE_MASK == near_tdo & DAP_IDCODE_MASK
+                && second & ICEPICK_IDCODE_MASK == near_tdi & ICEPICK_IDCODE_MASK
+            {
+                return Ok(if order_a {
+                    ([ICEPICK_IR_LEN, DAP_IR_LEN], 1)
+                } else {
+                    ([DAP_IR_LEN, ICEPICK_IR_LEN], 0)
+                });
+            }
+        }
+        Err(ArmError::NoTarget)
     }
 }
 

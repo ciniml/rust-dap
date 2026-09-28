@@ -34,6 +34,12 @@ gdb-target-rp2040 = ["gdbserver", "gdb-server-core?/gdb-target-rp2040"]
 gdb-target-nrf52 = ["gdbserver", "gdb-server-core?/gdb-target-nrf52"]
 # nRF54L targets: DPv2 SW-DP, Cortex-M33, RRAM flashing, CTRL-AP #2.
 gdb-target-nrf54 = ["gdbserver", "gdb-server-core?/gdb-target-nrf54"]
+# TI CC13x2/CC26x2 targets: 2-pin cJTAG (OScan1) + ICEPick, Cortex-M4F, ROM API
+# flashing. Needs the `cjtag` transport (the chip has no SWD).
+gdb-target-cc13x2 = ["gdbserver", "gdb-server-core?/gdb-target-cc13x2"]
+# Drive the gdb_server debug link as 2-pin cJTAG (TCKC=GPIO2, TMSC=GPIO3)
+# instead of SWD. Only meaningful with gdb-target-cc13x2.
+cjtag = []
 # Auto-detect the target family (by DPIDR) among the enabled gdb-target-*
 # features, so one build debugs whichever single target is wired. Combine
 # with the families to include, e.g.

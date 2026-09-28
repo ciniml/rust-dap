@@ -98,7 +98,14 @@ cargo build --release --bin gdb_server --no-default-features --features gdb-targ
 # 自動検出(挿さっている方を DPIDR で判別。含める family は feature で指定)
 cargo build --release --bin gdb_server --no-default-features \
   --features gdb-target-auto,gdb-target-rp2040,gdb-target-nrf52
+
+# TI CC13x2/CC26x2 ターゲット(2-pin cJTAG。SWD は無いので cjtag トランスポート必須)
+cargo build --release --bin gdb_server --no-default-features --features gdb-target-cc13x2,cjtag
 ```
+
+> `cjtag` では GPIO2=TCKC、GPIO3=TMSC、GPIO4=nRESET(SWD と同じ配線)。
+> ICEPick 経由で CPU DAP を有効化し、フラッシュは ROM API で書きます
+> (実装メモ: [doc/cc13x2-cjtag-study.ja.md](../../doc/cc13x2-cjtag-study.ja.md))。
 
 > nRF52 と RP2040 は SWD 線を共有できません(nRF は single-drop、RP2040 は
 > multidrop)。auto は「挿さっている一方のターゲット」を自動認識します。

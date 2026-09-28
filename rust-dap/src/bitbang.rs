@@ -62,7 +62,11 @@ enum PinDir {
     Output,
 }
 
-fn swj_clock_cycles(config: &mut DapConfig, frequency_hz: u32, jtag: bool) -> Result<(), DapError> {
+pub(crate) fn swj_clock_cycles(
+    config: &mut DapConfig,
+    frequency_hz: u32,
+    jtag: bool,
+) -> Result<(), DapError> {
     if frequency_hz == 0 {
         return Err(DapError::InvalidCommand);
     }
@@ -434,7 +438,18 @@ where
     delay: &'a D,
 }
 
-impl<Tck, Tms, Tdi, Tdo, Trst, Srst, D> JtagBits<'_, Tck, Tms, Tdi, Tdo, Trst, Srst, D>
+/// One JTAG TCK cycle, as seen by the scan algorithms: drive TMS/TDI, clock,
+/// optionally sample TDO. The 4-wire engine implements this on TCK/TMS/TDI/
+/// TDO; the 2-wire cJTAG (OScan1) engine implements the same cycle as three
+/// TCKC periods on TCKC/TMSC. Everything above this — IR/DR scans, DPACC/
+/// APACC transfers, raw sequences — is shared through [`JtagScan`].
+pub(crate) trait JtagBitDriver {
+    fn write_bit(&mut self, config: &DapConfig, tms: bool, tdi: bool);
+    fn read_bit(&mut self, config: &DapConfig, tms: bool, tdi: bool) -> bool;
+}
+
+impl<Tck, Tms, Tdi, Tdo, Trst, Srst, D> JtagBitDriver
+    for JtagBits<'_, Tck, Tms, Tdi, Tdo, Trst, Srst, D>
 where
     Tck: BidirPin,
     Tms: BidirPin,
@@ -444,9 +459,6 @@ where
     Srst: BidirPin,
     D: Delay,
 {
-    fn clock_wait(&self, config: &DapConfig) {
-        self.delay.delay_cycles(config.jtag.clock_wait_cycles);
-    }
     fn write_bit(&mut self, config: &DapConfig, tms: bool, tdi: bool) {
         self.tms.write(tms);
         self.tdi.write(tdi);
@@ -464,6 +476,21 @@ where
         self.tck.write(true);
         self.clock_wait(config);
         value
+    }
+}
+
+impl<Tck, Tms, Tdi, Tdo, Trst, Srst, D> JtagBits<'_, Tck, Tms, Tdi, Tdo, Trst, Srst, D>
+where
+    Tck: BidirPin,
+    Tms: BidirPin,
+    Tdi: BidirPin,
+    Tdo: BidirPin,
+    Trst: BidirPin,
+    Srst: BidirPin,
+    D: Delay,
+{
+    fn clock_wait(&self, config: &DapConfig) {
+        self.delay.delay_cycles(config.jtag.clock_wait_cycles);
     }
 
     fn connect(&mut self, config: &DapConfig) {
@@ -485,12 +512,6 @@ where
         }
     }
 
-    fn reset_state_machine(&mut self, config: &DapConfig) {
-        for _ in 0..10 {
-            self.write_bit(config, true, false);
-        }
-    }
-
     fn release(&mut self) {
         self.tck.set_mode_input();
         self.tms.set_mode_input();
@@ -498,30 +519,6 @@ where
         self.tdo.set_mode_input();
         self.ntrst.set_mode_input();
         self.nsrst.set_mode_input();
-    }
-
-    fn swj_sequence(
-        &mut self,
-        config: &DapConfig,
-        count: usize,
-        data: &[u8],
-    ) -> Result<(), DapError> {
-        let mut index = 0;
-        let mut value = 0;
-        let mut bits = 0;
-        let mut count = count;
-        while count > 0 {
-            count -= 1;
-            if bits == 0 {
-                value = *data.get(index).ok_or(DapError::InvalidCommand)?;
-                index += 1;
-                bits = 8;
-            }
-            self.write_bit(config, value & 1 != 0, false);
-            value >>= 1;
-            bits -= 1;
-        }
-        Ok(())
     }
 
     fn swj_pins(
@@ -556,6 +553,44 @@ where
             input |= SwjPins::TDO;
         }
         Ok(input)
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////
+// JTAG scan algorithms, shared by every JtagBitDriver
+////////////////////////////////////////////////////////////////////////////
+
+/// IR/DR scans, DPACC/APACC transfers and raw TMS/TDI sequences built on a
+/// [`JtagBitDriver`]. Blanket-implemented for every bit driver.
+pub(crate) trait JtagScan: JtagBitDriver {
+    fn reset_state_machine(&mut self, config: &DapConfig) {
+        for _ in 0..10 {
+            self.write_bit(config, true, false);
+        }
+    }
+
+    fn swj_sequence(
+        &mut self,
+        config: &DapConfig,
+        count: usize,
+        data: &[u8],
+    ) -> Result<(), DapError> {
+        let mut index = 0;
+        let mut value = 0;
+        let mut bits = 0;
+        let mut count = count;
+        while count > 0 {
+            count -= 1;
+            if bits == 0 {
+                value = *data.get(index).ok_or(DapError::InvalidCommand)?;
+                index += 1;
+                bits = 8;
+            }
+            self.write_bit(config, value & 1 != 0, false);
+            value >>= 1;
+            bits -= 1;
+        }
+        Ok(())
     }
 
     fn write_ir(&mut self, config: &DapConfig, dap_index: u8, ir: u32) {
@@ -646,9 +681,17 @@ where
         let a3 = request.contains(SwdRequest::A3);
 
         self.write_ir(config, dap_index, instruction);
+        let mut dr = build_acc(data, a3, a2, read);
+        self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
+        // JTAG-DP ACK in DR[2:0]: 0b010 = OK/FAULT (a FAULT only shows in
+        // CTRL/STAT), 0b001 = WAIT (transaction not accepted: repeat it).
+        let ack = (dr[0] as u8) | (dr[1] as u8) << 1 | (dr[2] as u8) << 2;
+        match ack {
+            0b010 => {}
+            0b001 => return Err(DapError::SwdError(DAP_TRANSFER_WAIT)),
+            other => return Err(DapError::SwdError(other)),
+        }
         if read {
-            let mut dr = build_acc(data, a3, a2, true);
-            self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
             let dr_data = &dr[3..35];
             let mut result: u32 = 0;
             for (i, dr) in dr_data.iter().enumerate().take(32) {
@@ -656,8 +699,6 @@ where
             }
             Ok(result)
         } else {
-            let mut dr = build_acc(data, a3, a2, false);
-            self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
             Ok(0)
         }
     }
@@ -686,6 +727,8 @@ where
         })
     }
 }
+
+impl<T: JtagBitDriver> JtagScan for T {}
 
 ////////////////////////////////////////////////////////////////////////////
 // SWD-only transport

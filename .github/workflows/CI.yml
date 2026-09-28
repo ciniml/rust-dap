@@ -46,6 +46,7 @@ jobs:
           cargo clippy --no-default-features --features jtag
           cargo clippy --bin gdb_server --features gdb-target-auto,gdb-target-rp2040,gdb-target-nrf52,gdb-target-nrf54
           cargo clippy --bin gdb_server --features gdb-target-rp2040,uart-bridge
+          cargo clippy --bin gdb_server --no-default-features --features gdb-target-cc13x2,cjtag
           cargo clippy --bin m1_selftest --features selftest
           cargo clippy --bin nrf52_probe --features selftest
         working-directory: ${{ matrix.projects }}

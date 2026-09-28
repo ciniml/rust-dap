@@ -17,6 +17,7 @@
 #![cfg_attr(not(test), no_std)]
 
 pub mod bitbang;
+pub mod cjtag;
 mod cmsis_dap;
 mod cursor;
 mod dispatcher;

@@ -39,7 +39,11 @@ use hal::pac;
 use rust_dap::{
     DapConfig, DapIdentity, USB_CLASS_MISCELLANEOUS, USB_PROTOCOL_IAD, USB_SUBCLASS_COMMON,
 };
-use rust_dap_rp::bitbang::{CortexMDelay, PicoBidirPin, SwdIoSet};
+#[cfg(feature = "cjtag")]
+use rust_dap_rp::bitbang::Oscan1IoSet;
+#[cfg(not(feature = "cjtag"))]
+use rust_dap_rp::bitbang::SwdIoSet;
+use rust_dap_rp::bitbang::{CortexMDelay, PicoBidirPin};
 #[allow(unused_imports)]
 use rust_dap_rp::bridge::{UartReader, UartWriter};
 #[allow(unused_imports)]
@@ -54,7 +58,13 @@ use usbd_serial::SerialPort;
 #[used]
 pub static BOOT2_FIRMWARE: [u8; 256] = rp2040_boot2::BOOT_LOADER_W25Q080;
 
+/// The debug link: bit-banged SWD (SWCLK=GPIO2, SWDIO=GPIO3) or, with the
+/// `cjtag` feature, 2-pin cJTAG OScan1 on the same pins (TCKC=GPIO2,
+/// TMSC=GPIO3). GPIO4 is nRESET either way.
+#[cfg(not(feature = "cjtag"))]
 type Swd = SwdIoSet<hal::gpio::bank0::Gpio2, hal::gpio::bank0::Gpio3, hal::gpio::bank0::Gpio4>;
+#[cfg(feature = "cjtag")]
+type Swd = Oscan1IoSet<hal::gpio::bank0::Gpio2, hal::gpio::bank0::Gpio3, hal::gpio::bank0::Gpio4>;
 
 // The gdbstub Target (arm-debug over SWD, target families, RTT) lives in
 // the board-independent `gdb-server-core` crate; this binary supplies the
@@ -293,7 +303,10 @@ mod app {
         let swclk = PicoBidirPin::new(pins.gpio2.into_floating_input());
         let swdio = PicoBidirPin::new(pins.gpio3.into_floating_input());
         let reset = PicoBidirPin::new(pins.gpio4.into_floating_input());
+        #[cfg(not(feature = "cjtag"))]
         let swd = SwdIoSet::new(swclk, swdio, reset, CortexMDelay);
+        #[cfg(feature = "cjtag")]
+        let swd = Oscan1IoSet::new(swclk, swdio, reset, CortexMDelay);
         let config = DapConfig::new(
             DapIdentity {
                 serial_number,

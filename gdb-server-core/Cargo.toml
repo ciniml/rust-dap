@@ -13,6 +13,8 @@ default = []
 gdb-target-rp2040 = []
 gdb-target-nrf52 = []
 gdb-target-nrf54 = []
+# TI CC13x2/CC26x2 (Cortex-M4F behind cJTAG/ICEPick; needs a JTAG-capable transport).
+gdb-target-cc13x2 = []
 gdb-target-auto = []
 
 [dependencies]
