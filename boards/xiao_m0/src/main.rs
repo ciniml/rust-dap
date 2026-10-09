@@ -47,10 +47,10 @@ impl Delay for CycleDelay {
 }
 
 // DAP command processing runs in a low-priority software task (dispatched by
-// the unused DAC interrupt) instead of inside the USB interrupt, so USB stays
+// the unused DAC interrupt, pended by the USB task) instead of inside the USB interrupt, so USB stays
 // responsive during the (blocking, bit-banged) SWD transfers — the same
 // restructuring already applied to the RP2040 boards.
-#[rtic::app(device = xiao_m0::pac, peripherals = true, dispatchers = [DAC])]
+#[rtic::app(device = xiao_m0::pac, peripherals = true)]
 mod app {
     use super::*;
     use usb_device::bus::UsbBusAllocator;
@@ -162,13 +162,18 @@ mod app {
                     }
                 }
             });
-        process::spawn().ok();
+        rtic::pend(bsp::pac::Interrupt::DAC);
     }
 
-    /// Execute a pending DAP command outside the USB interrupt. RTIC 2
-    /// software tasks are async; this one has no await points.
-    #[task(priority = 1, shared = [usb_dap])]
-    async fn process(mut ctx: process::Context) {
+    /// Execute a pending DAP command outside the USB interrupt, as a hardware
+    /// task on the unused DAC interrupt pended from `usb`. A software task's
+    /// `spawn()` fails while the task is still running, and a request that
+    /// arrives during a long command then has nothing left to process it (the
+    /// OUT packet was already read, so no further USB interrupt comes) — the
+    /// probe stops answering until a bus reset (#87). Pending an interrupt is
+    /// idempotent: if the task is running it runs again afterwards.
+    #[task(binds = DAC, priority = 1, shared = [usb_dap])]
+    fn process(mut ctx: process::Context) {
         ctx.shared.usb_dap.lock(|dap| {
             let _ = dap.process();
         });

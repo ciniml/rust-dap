@@ -501,10 +501,20 @@ mod app {
         c.local.debug_irq_out.set_low().ok();
     }
 
-    /// Processes CMSIS-DAP commands outside of the USB interrupt so long
-    /// SWD/JTAG transfers cannot block the UART interrupt.
-    #[task(priority = 1, shared = [usb_dap])]
-    async fn dap_process(mut c: dap_process::Context) {
+    /// Processes CMSIS-DAP commands outside of the USB interrupt so that long
+    /// SWD/JTAG transfers (transfer retries, DAP_SWJ_Pins waits, etc.) cannot
+    /// block the UART interrupt.
+    ///
+    /// This is a hardware task on an otherwise unused interrupt, pended from
+    /// `usbctrl_irq`, rather than an RTIC software task: `spawn()` fails when
+    /// the task is already running, and a request that arrives during a long
+    /// command then has nothing left to process it — the OUT packet was
+    /// already read from the endpoint, so no further USB interrupt comes and
+    /// the probe stops answering until a bus reset (#87). Pending an NVIC
+    /// interrupt is idempotent and never lost: if the task is running it
+    /// simply runs again afterwards.
+    #[task(binds = SW1_IRQ, priority = 1, shared = [usb_dap])]
+    fn dap_process(mut c: dap_process::Context) {
         c.shared.usb_dap.lock(|usb_dap| {
             usb_dap.process().ok();
         });
@@ -525,7 +535,7 @@ mod app {
             c.local.debug_usb_irq_out.set_low().ok();
             return;
         }
-        dap_process::spawn().ok();
+        rtic::pend(pac::Interrupt::SW1_IRQ);
 
         (&mut c.shared.usb_serial, &mut c.shared.uart_tx_producer).lock(
             |usb_serial, uart_tx_producer| {
