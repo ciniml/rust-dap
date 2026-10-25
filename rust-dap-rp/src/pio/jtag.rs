@@ -698,16 +698,10 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> DapTransport for JtagIoSet<Tck, Tms, Tdi, T
         // Issue DPACC or APACC.
         self.write_ir(config, dap_index, instruction);
         // Write DR.
-        let mut dr = build_acc(data, a3, a2, true);
-        self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
-        if read {
-            // TODO: check whether OK_FALSE etc. should be reported
-            dr.shift_end(3);
-            let result: u32 = dr.load();
-            Ok(result)
-        } else {
-            Ok(0)
-        }
+        let mut dr = build_acc(data, a3, a2, read);
+        self.read_write_dr(config, dap_index, &mut dr[..35]);
+        // TODO: check whether OK_FALSE etc. should be reported
+        Ok(dr[3..35].load_le::<u32>())
     }
 
     fn jtag_sequence(

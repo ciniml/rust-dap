@@ -646,20 +646,13 @@ where
         let a3 = request.contains(SwdRequest::A3);
 
         self.write_ir(config, dap_index, instruction);
-        if read {
-            let mut dr = build_acc(data, a3, a2, true);
-            self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
-            let dr_data = &dr[3..35];
-            let mut result: u32 = 0;
-            for (i, dr) in dr_data.iter().enumerate().take(32) {
-                result |= if *dr { 1 << i } else { 0 };
-            }
-            Ok(result)
-        } else {
-            let mut dr = build_acc(data, a3, a2, false);
-            self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
-            Ok(0)
+        let mut dr = build_acc(data, a3, a2, read);
+        self.read_write_dr(config, dap_index, &mut dr[..35]);
+        let mut result: u32 = 0;
+        for (i, dr) in dr[3..35].iter().enumerate() {
+            result |= if *dr { 1 << i } else { 0 };
         }
+        Ok(result)
     }
 
     fn sequence(
