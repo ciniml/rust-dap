@@ -648,6 +648,9 @@ where
         self.write_ir(config, dap_index, instruction);
         let mut dr = build_acc(data, a3, a2, read);
         self.read_write_dr(config, dap_index, &mut dr[..35]);
+        if read && !request.contains(SwdRequest::APnDP) && !request.contains(SwdRequest::RDBUFF) {
+            return self.transfer(config, dap_index, SwdRequest::RDBUFF | SwdRequest::RnW, 0);
+        }
         let mut result: u32 = 0;
         for (i, dr) in dr[3..35].iter().enumerate() {
             result |= if *dr { 1 << i } else { 0 };

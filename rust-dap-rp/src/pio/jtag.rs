@@ -700,6 +700,9 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> DapTransport for JtagIoSet<Tck, Tms, Tdi, T
         // Write DR.
         let mut dr = build_acc(data, a3, a2, read);
         self.read_write_dr(config, dap_index, &mut dr[..35]);
+        if read && !request.contains(SwdRequest::APnDP) && !request.contains(SwdRequest::RDBUFF) {
+            return self.jtag_transfer(config, dap_index, SwdRequest::RDBUFF | SwdRequest::RnW, 0);
+        }
         // TODO: check whether OK_FALSE etc. should be reported
         Ok(dr[3..35].load_le::<u32>())
     }
