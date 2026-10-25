@@ -481,7 +481,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
         self.write_tms(false); // ShiftIR
 
         // Set every IR except the one selected by dap_index to BYPASS (all 1).
-        // TDI -> other devices(head) -> target device -> other devices(tail) -> TDO
+        // TDI -> other devices(tail) -> target device -> other devices(head) -> TDO
         let device_count = config.jtag.device_count as usize;
         let total_ir_bit_length: usize = config.jtag.ir_length[0..device_count]
             .iter()
@@ -490,18 +490,18 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
         let target_ir_bit_length =
             *config.jtag.ir_length.get(dap_index as usize).unwrap_or(&0) as usize;
 
-        let tail_ir_bit_length: usize = config
+        let head_ir_bit_length: usize = config
             .jtag
             .ir_length
-            .get((dap_index as usize + 1)..device_count)
+            .get(0..dap_index as usize)
             .map(|lengths| lengths.iter().map(|x| *x as usize).sum())
             .unwrap_or(0);
 
         let mut ir = ir;
         let ir_bits = bits![mut u32, Lsb0; 1; MAX_IR_LENGTH];
-        // shift target_ir_bits after the tail bypass bits
+        // shift target_ir_bits after the head bypass bits
         for i in 0..target_ir_bit_length {
-            ir_bits.set(tail_ir_bit_length + i, ir & 1 != 0);
+            ir_bits.set(head_ir_bit_length + i, ir & 1 != 0);
             ir >>= 1;
         }
 

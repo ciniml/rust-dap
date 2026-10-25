@@ -570,7 +570,7 @@ where
         let bit_count_max: usize = ir_length.iter().map(|x| *x as usize).sum();
         let mut bit_count: usize = 0;
         let mut ir = ir;
-        for (i, length) in ir_length.iter().enumerate().rev() {
+        for (i, length) in ir_length.iter().enumerate() {
             for _ in 0..*length {
                 let tdi = if i == (dap_index as usize) {
                     let bit = (ir & 1) != 0;
