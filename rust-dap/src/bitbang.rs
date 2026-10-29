@@ -570,7 +570,7 @@ where
         let bit_count_max: usize = ir_length.iter().map(|x| *x as usize).sum();
         let mut bit_count: usize = 0;
         let mut ir = ir;
-        for (i, length) in ir_length.iter().enumerate().rev() {
+        for (i, length) in ir_length.iter().enumerate() {
             for _ in 0..*length {
                 let tdi = if i == (dap_index as usize) {
                     let bit = (ir & 1) != 0;
@@ -596,20 +596,11 @@ where
         self.write_bit(config, false, false); // ShiftDR
 
         let device_count = config.jtag.device_count as usize;
-        let ir_length = &config.jtag.ir_length[0..device_count];
-        let head_bits: usize = ir_length
-            .iter()
-            .take(dap_index.into())
-            .map(|x| *x as usize)
-            .sum();
-        let tail_bits: usize = ir_length
-            .iter()
-            .skip(dap_index as usize + 1)
-            .map(|x| *x as usize)
-            .sum();
-        let total_bits: usize = tail_bits + dr.len() + head_bits;
+        let head_bits: usize = dap_index as usize;
+        let tail_bits: usize = device_count.saturating_sub(dap_index as usize + 1);
+        let total_bits: usize = head_bits + dr.len() + tail_bits;
         let mut bit_count: usize = 0;
-        for _ in 0..tail_bits {
+        for _ in 0..head_bits {
             bit_count += 1;
             self.write_bit(config, false, false);
         }
@@ -619,7 +610,7 @@ where
             let tdo = self.read_bit(config, tms, *dr_bit);
             dr_bit.set(tdo);
         }
-        for _ in 0..head_bits {
+        for _ in 0..tail_bits {
             bit_count += 1;
             let tms = bit_count == total_bits;
             self.write_bit(config, tms, false);
@@ -646,20 +637,16 @@ where
         let a3 = request.contains(SwdRequest::A3);
 
         self.write_ir(config, dap_index, instruction);
-        if read {
-            let mut dr = build_acc(data, a3, a2, true);
-            self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
-            let dr_data = &dr[3..35];
-            let mut result: u32 = 0;
-            for (i, dr) in dr_data.iter().enumerate().take(32) {
-                result |= if *dr { 1 << i } else { 0 };
-            }
-            Ok(result)
-        } else {
-            let mut dr = build_acc(data, a3, a2, false);
-            self.read_write_dr(config, dap_index, dr.as_mut_bitslice());
-            Ok(0)
+        let mut dr = build_acc(data, a3, a2, read);
+        self.read_write_dr(config, dap_index, &mut dr[..35]);
+        if read && !request.contains(SwdRequest::APnDP) && !request.contains(SwdRequest::RDBUFF) {
+            return self.transfer(config, dap_index, SwdRequest::RDBUFF | SwdRequest::RnW, 0);
         }
+        let mut result: u32 = 0;
+        for (i, dr) in dr[3..35].iter().enumerate() {
+            result |= if *dr { 1 << i } else { 0 };
+        }
+        Ok(result)
     }
 
     fn sequence(
