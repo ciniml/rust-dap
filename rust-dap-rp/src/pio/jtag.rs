@@ -55,6 +55,8 @@ pub struct JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
     system_clock_hz: u32,
     context: Option<JtagPioContext>,
     divisor: f32,
+    // Output values of the pins, to keep the pins not selected by DAP_SWJ_Pins.
+    pin_out_state: u32,
     _pins: core::marker::PhantomData<(Tck, Tms, Tdi, Tdo, Trst, Srst)>,
 }
 
@@ -222,6 +224,7 @@ where
                 tx_fifo: tx,
             }),
             divisor,
+            pin_out_state: 0xFFFF_FFFF,
             _pins: core::marker::PhantomData,
         };
 
@@ -424,6 +427,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
         // output high: trst, srst, tms, tck, tdi
         // input: tdo
         let pin_out = 0xFFFF_FFFF;
+        self.pin_out_state = pin_out;
         let pindirs = 1 << self.tck_pin_id
             | 1 << self.tms_pin_id
             | 1 << self.tdi_pin_id
@@ -610,13 +614,17 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> DapTransport for JtagIoSet<Tck, Tms, Tdi, T
         ];
 
         // output
-        let pio_pin_out: u32 = flags.iter().fold(0, |out, (flag, pin_id)| {
-            out | if output.contains(*flag) && select.contains(*flag) {
-                1 << pin_id
-            } else {
-                0
+        // Update only the selected pins, and keep the others as they are.
+        for (flag, pin_id) in flags.iter() {
+            if select.contains(*flag) {
+                if output.contains(*flag) {
+                    self.pin_out_state |= 1 << pin_id;
+                } else {
+                    self.pin_out_state &= !(1 << pin_id);
+                }
             }
-        });
+        }
+        let pio_pin_out = self.pin_out_state;
         self.context.as_mut().unwrap().tx_fifo.write(pio_pin_out);
 
         // directions
