@@ -569,6 +569,22 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
     }
 }
 
+/// Check that `dap_index` is on the configured chain, and that the chain fits the scan buffers.
+fn check_chain(config: &DapConfig, dap_index: u8) -> Result<(), DapError> {
+    let device_count = usize::from(config.jtag.device_count);
+    let total_ir_bit_length: usize = config.jtag.ir_length[0..device_count]
+        .iter()
+        .map(|x| *x as usize)
+        .sum();
+    if usize::from(dap_index) >= device_count
+        || total_ir_bit_length > MAX_IR_LENGTH
+        || device_count - 1 + 35 > MAX_IR_LENGTH
+    {
+        return Err(DapError::SwdError(DAP_TRANSFER_ERROR));
+    }
+    Ok(())
+}
+
 // Value of the transfer response when the target did not respond.
 const DAP_TRANSFER_NO_ACK: u8 = 0x07;
 
@@ -725,17 +741,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> DapTransport for JtagIoSet<Tck, Tms, Tdi, T
         data: u32,
     ) -> Result<u32, DapError> {
         // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__Transfer.html
-        let device_count = usize::from(config.jtag.device_count);
-        let total_ir_bit_length: usize = config.jtag.ir_length[0..device_count]
-            .iter()
-            .map(|x| *x as usize)
-            .sum();
-        if usize::from(dap_index) >= device_count
-            || total_ir_bit_length > MAX_IR_LENGTH
-            || device_count - 1 + 35 > MAX_IR_LENGTH
-        {
-            return Err(DapError::SwdError(DAP_TRANSFER_ERROR));
-        }
+        check_chain(config, dap_index)?;
 
         let ap = request.contains(SwdRequest::APnDP);
         let read = request.contains(SwdRequest::RnW);
@@ -776,5 +782,27 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> DapTransport for JtagIoSet<Tck, Tms, Tdi, T
     fn jtag_idcode(&mut self, _config: &DapConfig, _index: u8) -> Result<u32, DapError> {
         // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__jtag__idcode.html
         Err(DapError::NotSupported)
+    }
+
+    fn jtag_write_abort(
+        &mut self,
+        config: &DapConfig,
+        dap_index: u8,
+        value: u32,
+    ) -> Result<(), DapError> {
+        // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__WriteAbort.html
+        check_chain(config, dap_index)?;
+        // The ABORT scan has the same 35bit layout as DPACC, with A[3:2] and RnW all 0.
+        // Its ACK has no meaning.
+        self.acc_scan(
+            config,
+            dap_index,
+            JtagInstruction::ABORT,
+            false,
+            false,
+            false,
+            value,
+        );
+        Ok(())
     }
 }
