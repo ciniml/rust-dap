@@ -548,6 +548,37 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
         self.write_tms(true); // Update-DR
         self.write_tms(false); // Run
     }
+
+    /// Issue `instruction` and scan the 35bit DPACC/APACC/ABORT register.
+    /// Returns the raw ACK and the data captured from the previous access.
+    #[allow(clippy::too_many_arguments)]
+    fn acc_scan(
+        &mut self,
+        config: &DapConfig,
+        dap_index: u8,
+        instruction: JtagInstruction,
+        a3: bool,
+        a2: bool,
+        read: bool,
+        data: u32,
+    ) -> (u8, u32) {
+        self.write_ir(config, dap_index, instruction as u32);
+        let mut dr = build_acc(data, a3, a2, read);
+        self.read_write_dr(config, dap_index, &mut dr[..35]);
+        (dr[0..3].load_le(), dr[3..35].load_le())
+    }
+}
+
+// Value of the transfer response when the target did not respond.
+const DAP_TRANSFER_NO_ACK: u8 = 0x07;
+
+fn jtag_ack_to_result(ack: u8, value: u32) -> Result<u32, DapError> {
+    // JTAG-DP ACK: OK/FAULT = 0b010, WAIT = 0b001
+    match ack {
+        0b010 => Ok(value),
+        0b001 => Err(DapError::SwdError(DAP_TRANSFER_WAIT)),
+        _ => Err(DapError::SwdError(DAP_TRANSFER_NO_ACK)),
+    }
 }
 
 impl<Tck, Tms, Tdi, Tdo, Trst, Srst> DapTransport for JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
@@ -694,25 +725,39 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> DapTransport for JtagIoSet<Tck, Tms, Tdi, T
         data: u32,
     ) -> Result<u32, DapError> {
         // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__Transfer.html
-        let instruction = if request.contains(SwdRequest::APnDP) {
-            JtagInstruction::APACC as u32
-        } else {
-            JtagInstruction::DPACC as u32
-        };
+        let device_count = usize::from(config.jtag.device_count);
+        let total_ir_bit_length: usize = config.jtag.ir_length[0..device_count]
+            .iter()
+            .map(|x| *x as usize)
+            .sum();
+        if usize::from(dap_index) >= device_count
+            || total_ir_bit_length > MAX_IR_LENGTH
+            || device_count - 1 + 35 > MAX_IR_LENGTH
+        {
+            return Err(DapError::SwdError(DAP_TRANSFER_ERROR));
+        }
+
+        let ap = request.contains(SwdRequest::APnDP);
         let read = request.contains(SwdRequest::RnW);
         let a2 = request.contains(SwdRequest::A2);
         let a3 = request.contains(SwdRequest::A3);
 
         // Issue DPACC or APACC.
-        self.write_ir(config, dap_index, instruction);
-        // Write DR.
-        let mut dr = build_acc(data, a3, a2, read);
-        self.read_write_dr(config, dap_index, &mut dr[..35]);
-        if read && !request.contains(SwdRequest::APnDP) && !request.contains(SwdRequest::RDBUFF) {
+        let instruction = if ap {
+            JtagInstruction::APACC
+        } else {
+            JtagInstruction::DPACC
+        };
+        let (ack, value) = self.acc_scan(config, dap_index, instruction, a3, a2, read, data);
+        let value = jtag_ack_to_result(ack, value)?;
+        if read && !ap && !request.contains(SwdRequest::RDBUFF) {
+            // The caller expects a DP read to return its value immediately, as on SWD.
+            // Read RDBUFF to take out the result of this read.
             return self.jtag_transfer(config, dap_index, SwdRequest::RDBUFF | SwdRequest::RnW, 0);
         }
-        // TODO: check whether OK_FALSE etc. should be reported
-        Ok(dr[3..35].load_le::<u32>())
+        // A JTAG scan captures the result of the previous access.
+        // The caller treats AP reads as posted, and takes the result out by reading RDBUFF.
+        Ok(if read { value } else { 0 })
     }
 
     fn jtag_sequence(
