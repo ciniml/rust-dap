@@ -55,6 +55,8 @@ pub struct JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
     system_clock_hz: u32,
     context: Option<JtagPioContext>,
     divisor: f32,
+    // Output values of the pins, to keep the pins not selected by DAP_SWJ_Pins.
+    pin_out_state: u32,
     _pins: core::marker::PhantomData<(Tck, Tms, Tdi, Tdo, Trst, Srst)>,
 }
 
@@ -222,6 +224,7 @@ where
                 tx_fifo: tx,
             }),
             divisor,
+            pin_out_state: 0xFFFF_FFFF,
             _pins: core::marker::PhantomData,
         };
 
@@ -424,6 +427,7 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
         // output high: trst, srst, tms, tck, tdi
         // input: tdo
         let pin_out = 0xFFFF_FFFF;
+        self.pin_out_state = pin_out;
         let pindirs = 1 << self.tck_pin_id
             | 1 << self.tms_pin_id
             | 1 << self.tdi_pin_id
@@ -544,6 +548,53 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
         self.write_tms(true); // Update-DR
         self.write_tms(false); // Run
     }
+
+    /// Issue `instruction` and scan the 35bit DPACC/APACC/ABORT register.
+    /// Returns the raw ACK and the data captured from the previous access.
+    #[allow(clippy::too_many_arguments)]
+    fn acc_scan(
+        &mut self,
+        config: &DapConfig,
+        dap_index: u8,
+        instruction: JtagInstruction,
+        a3: bool,
+        a2: bool,
+        read: bool,
+        data: u32,
+    ) -> (u8, u32) {
+        self.write_ir(config, dap_index, instruction as u32);
+        let mut dr = build_acc(data, a3, a2, read);
+        self.read_write_dr(config, dap_index, &mut dr[..35]);
+        (dr[0..3].load_le(), dr[3..35].load_le())
+    }
+}
+
+/// Check that `dap_index` is on the configured chain, and that the chain fits the scan buffers.
+fn check_chain(config: &DapConfig, dap_index: u8) -> Result<(), DapError> {
+    let device_count = usize::from(config.jtag.device_count);
+    let total_ir_bit_length: usize = config.jtag.ir_length[0..device_count]
+        .iter()
+        .map(|x| *x as usize)
+        .sum();
+    if usize::from(dap_index) >= device_count
+        || total_ir_bit_length > MAX_IR_LENGTH
+        || device_count - 1 + 35 > MAX_IR_LENGTH
+    {
+        return Err(DapError::SwdError(DAP_TRANSFER_ERROR));
+    }
+    Ok(())
+}
+
+// Value of the transfer response when the target did not respond.
+const DAP_TRANSFER_NO_ACK: u8 = 0x07;
+
+fn jtag_ack_to_result(ack: u8, value: u32) -> Result<u32, DapError> {
+    // JTAG-DP ACK: OK/FAULT = 0b010, WAIT = 0b001
+    match ack {
+        0b010 => Ok(value),
+        0b001 => Err(DapError::SwdError(DAP_TRANSFER_WAIT)),
+        _ => Err(DapError::SwdError(DAP_TRANSFER_NO_ACK)),
+    }
 }
 
 impl<Tck, Tms, Tdi, Tdo, Trst, Srst> DapTransport for JtagIoSet<Tck, Tms, Tdi, Tdo, Trst, Srst> {
@@ -610,13 +661,17 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> DapTransport for JtagIoSet<Tck, Tms, Tdi, T
         ];
 
         // output
-        let pio_pin_out: u32 = flags.iter().fold(0, |out, (flag, pin_id)| {
-            out | if output.contains(*flag) && select.contains(*flag) {
-                1 << pin_id
-            } else {
-                0
+        // Update only the selected pins, and keep the others as they are.
+        for (flag, pin_id) in flags.iter() {
+            if select.contains(*flag) {
+                if output.contains(*flag) {
+                    self.pin_out_state |= 1 << pin_id;
+                } else {
+                    self.pin_out_state &= !(1 << pin_id);
+                }
             }
-        });
+        }
+        let pio_pin_out = self.pin_out_state;
         self.context.as_mut().unwrap().tx_fifo.write(pio_pin_out);
 
         // directions
@@ -686,25 +741,29 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> DapTransport for JtagIoSet<Tck, Tms, Tdi, T
         data: u32,
     ) -> Result<u32, DapError> {
         // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__Transfer.html
-        let instruction = if request.contains(SwdRequest::APnDP) {
-            JtagInstruction::APACC as u32
-        } else {
-            JtagInstruction::DPACC as u32
-        };
+        check_chain(config, dap_index)?;
+
+        let ap = request.contains(SwdRequest::APnDP);
         let read = request.contains(SwdRequest::RnW);
         let a2 = request.contains(SwdRequest::A2);
         let a3 = request.contains(SwdRequest::A3);
 
         // Issue DPACC or APACC.
-        self.write_ir(config, dap_index, instruction);
-        // Write DR.
-        let mut dr = build_acc(data, a3, a2, read);
-        self.read_write_dr(config, dap_index, &mut dr[..35]);
-        if read && !request.contains(SwdRequest::APnDP) && !request.contains(SwdRequest::RDBUFF) {
+        let instruction = if ap {
+            JtagInstruction::APACC
+        } else {
+            JtagInstruction::DPACC
+        };
+        let (ack, value) = self.acc_scan(config, dap_index, instruction, a3, a2, read, data);
+        let value = jtag_ack_to_result(ack, value)?;
+        if read && !ap && !request.contains(SwdRequest::RDBUFF) {
+            // The caller expects a DP read to return its value immediately, as on SWD.
+            // Read RDBUFF to take out the result of this read.
             return self.jtag_transfer(config, dap_index, SwdRequest::RDBUFF | SwdRequest::RnW, 0);
         }
-        // TODO: check whether OK_FALSE etc. should be reported
-        Ok(dr[3..35].load_le::<u32>())
+        // A JTAG scan captures the result of the previous access.
+        // The caller treats AP reads as posted, and takes the result out by reading RDBUFF.
+        Ok(if read { value } else { 0 })
     }
 
     fn jtag_sequence(
@@ -723,5 +782,27 @@ impl<Tck, Tms, Tdi, Tdo, Trst, Srst> DapTransport for JtagIoSet<Tck, Tms, Tdi, T
     fn jtag_idcode(&mut self, _config: &DapConfig, _index: u8) -> Result<u32, DapError> {
         // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__jtag__idcode.html
         Err(DapError::NotSupported)
+    }
+
+    fn jtag_write_abort(
+        &mut self,
+        config: &DapConfig,
+        dap_index: u8,
+        value: u32,
+    ) -> Result<(), DapError> {
+        // https://arm-software.github.io/CMSIS_5/DAP/html/group__DAP__WriteAbort.html
+        check_chain(config, dap_index)?;
+        // The ABORT scan has the same 35bit layout as DPACC, with A[3:2] and RnW all 0.
+        // Its ACK has no meaning.
+        self.acc_scan(
+            config,
+            dap_index,
+            JtagInstruction::ABORT,
+            false,
+            false,
+            false,
+            value,
+        );
+        Ok(())
     }
 }

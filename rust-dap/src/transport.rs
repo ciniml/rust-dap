@@ -268,4 +268,16 @@ pub trait DapTransport {
     fn jtag_idcode(&mut self, _config: &DapConfig, _index: u8) -> Result<u32, DapError> {
         Err(DapError::NotSupported)
     }
+
+    /// DAP_WriteABORT over JTAG: write `value` to the ABORT register of the
+    /// JTAG-DP at `dap_index`. DPACC cannot reach ABORT, so this takes the
+    /// ABORT instruction instead of a DAP_Transfer.
+    fn jtag_write_abort(
+        &mut self,
+        _config: &DapConfig,
+        _dap_index: u8,
+        _value: u32,
+    ) -> Result<(), DapError> {
+        Err(DapError::NotSupported)
+    }
 }

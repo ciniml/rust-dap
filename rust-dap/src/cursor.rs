@@ -59,7 +59,8 @@ impl<Buffer: AsRef<[u8]>> CursorRead for BufferCursor<Buffer> {
         let data = self.buffer.as_ref();
         let remaining = data.len() - self.position;
         let bytes_to_read = core::cmp::min(remaining, buffer.len());
-        buffer.copy_from_slice(&data[self.position..self.position + bytes_to_read]);
+        buffer[..bytes_to_read]
+            .copy_from_slice(&data[self.position..self.position + bytes_to_read]);
         self.position += bytes_to_read;
         Ok(&buffer[0..bytes_to_read])
     }

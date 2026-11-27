@@ -72,10 +72,10 @@ impl Dispatcher {
             DapCommandId::TransferConfigure => self.transfer_configure(request, response),
             DapCommandId::Transfer => self.transfer(transport, request, response),
             DapCommandId::TransferBlock => self.transfer_block(transport, request, response),
-            DapCommandId::TransferAbort
-            | DapCommandId::WriteAbort
-            | DapCommandId::Delay
-            | DapCommandId::ResetTarget => Err(DapError::InvalidCommand),
+            DapCommandId::WriteAbort => self.write_abort(transport, request, response),
+            DapCommandId::TransferAbort | DapCommandId::Delay | DapCommandId::ResetTarget => {
+                Err(DapError::InvalidCommand)
+            }
             DapCommandId::SWJPins => self.swj_pins(transport, request, response),
             DapCommandId::SWJClock => self.swj_clock(transport, request, response),
             DapCommandId::SWJSequence => self.swj_sequence(transport, request, response),
@@ -707,6 +707,30 @@ impl Dispatcher {
         Ok((request_proceeded, response_body_count + 1))
     }
 
+    fn write_abort<T: DapTransport>(
+        &mut self,
+        transport: &mut T,
+        request: &[u8],
+        response: &mut [u8],
+    ) -> CommandResult {
+        // Request: DAP index (1 byte, JTAG only), ABORT value (4 bytes).
+        if request.len() < 5 {
+            return Err(DapError::InvalidCommand);
+        }
+        let dap_index = request[0];
+        let value = u32::from_le_bytes(request[1..5].try_into().unwrap());
+        let result = match self.active {
+            // On SWD, ABORT is the DP register written at address 0x0.
+            Some(ActivePort::Swd) => transport
+                .swd_transfer(&self.config, SwdRequest::empty(), value)
+                .map(|_| ()),
+            Some(ActivePort::Jtag) => transport.jtag_write_abort(&self.config, dap_index, value),
+            None => Err(DapError::NotSupported),
+        };
+        response[0] = if result.is_ok() { DAP_OK } else { DAP_ERROR };
+        Ok((5, 1))
+    }
+
     fn jtag_configure(&mut self, request: &[u8], response: &mut [u8]) -> CommandResult {
         if request.is_empty() {
             return Err(DapError::InvalidCommand);
@@ -759,6 +783,7 @@ mod test {
         read_bit_fill: u8,
         output_enables: Vec<bool>,
         jtag_sequences: Vec<(JtagSequenceInfo, u64)>,
+        jtag_aborts: Vec<(u8, u32)>,
     }
 
     impl MockTransport {
@@ -773,6 +798,14 @@ mod test {
                 read_bit_fill: 0xa5,
                 output_enables: Vec::new(),
                 jtag_sequences: Vec::new(),
+                jtag_aborts: Vec::new(),
+            }
+        }
+        fn jtag() -> Self {
+            Self {
+                capabilities: DapCapabilities::JTAG,
+                connect_result: Ok(ActivePort::Jtag),
+                ..Self::swd()
             }
         }
         fn with_results(results: &[Result<u32, DapError>]) -> Self {
@@ -887,6 +920,15 @@ mod test {
             } else {
                 None
             })
+        }
+        fn jtag_write_abort(
+            &mut self,
+            _config: &DapConfig,
+            dap_index: u8,
+            value: u32,
+        ) -> Result<(), DapError> {
+            self.jtag_aborts.push((dap_index, value));
+            Ok(())
         }
     }
 
@@ -1191,6 +1233,41 @@ mod test {
     }
 
     #[test]
+    fn write_abort_takes_the_active_port() {
+        let request = [1u8, 0x1e, 0, 0, 0];
+        let mut resp = [0u8; 8];
+
+        // JTAG: goes to the transport's ABORT scan with the DAP index.
+        let mut t = MockTransport::jtag();
+        let mut d = dispatcher();
+        d.execute(&mut t, 64, DapCommandId::Connect, &[2], &mut resp)
+            .unwrap();
+        let (consumed, produced) = d
+            .execute(&mut t, 64, DapCommandId::WriteAbort, &request, &mut resp)
+            .unwrap();
+        assert_eq!((consumed, produced), (5, 1));
+        assert_eq!(resp[0], DAP_OK);
+        assert_eq!(t.jtag_aborts, [(1, 0x1e)]);
+        assert!(t.transfer_log.is_empty());
+
+        // SWD: a DP write to address 0x0; the DAP index is ignored.
+        let mut t = MockTransport::swd();
+        let mut d = connected_dispatcher(&mut t);
+        d.execute(&mut t, 64, DapCommandId::WriteAbort, &request, &mut resp)
+            .unwrap();
+        assert_eq!(resp[0], DAP_OK);
+        assert_eq!(t.transfer_log, [(0, SwdRequest::empty(), 0x1e)]);
+
+        // Not connected: DAP_ERROR, and nothing reaches the transport.
+        let mut t = MockTransport::jtag();
+        let mut d = dispatcher();
+        d.execute(&mut t, 64, DapCommandId::WriteAbort, &request, &mut resp)
+            .unwrap();
+        assert_eq!(resp[0], DAP_ERROR);
+        assert!(t.jtag_aborts.is_empty());
+    }
+
+    #[test]
     fn short_requests_are_rejected() {
         let mut t = MockTransport::swd();
         let mut d = dispatcher();
@@ -1205,6 +1282,7 @@ mod test {
             (DapCommandId::SWDSequence, &[2, 0x08][..]),
             (DapCommandId::JTAGSequence, &[1, 0x88][..]),
             (DapCommandId::JTAGConfigure, &[2, 4][..]),
+            (DapCommandId::WriteAbort, &[0, 0x1e, 0, 0][..]),
         ] {
             assert!(
                 d.execute(&mut t, 64, cmd, req, &mut resp).is_err(),
